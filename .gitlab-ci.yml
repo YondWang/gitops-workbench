@@ -1,0 +1,191 @@
+stages:
+  - manage
+
+variables:
+  GITLAB_API_URL:
+    value: "https://www.chancee-shanghai.cn:9900/api/v4"
+    description: "GitLab API base URL"
+  TARGET_PROJECT:
+    value: "software_hmi_app/business"
+    description: "被管理的业务项目路径"
+  ACTION:
+    value: "list_branches"
+    options:
+      - "list_branches"
+      - "create_branch"
+      - "create_policy_branch"
+      - "protect_branch"
+    description: "要执行的分支管理动作"
+  BRANCH_NAME:
+    value: "codex/api-test-from-fix"
+    description: "create_branch 使用：要创建的分支名"
+  SOURCE_REF:
+    value: "fix"
+    description: "创建分支的来源 ref；留空时 create_policy_branch 会按规范推断"
+  BRANCH_KIND:
+    value: "feature"
+    options:
+      - "baseline"
+      - "feature"
+      - "fix"
+      - "bugfix"
+      - "stable"
+      - "hotfix"
+    description: "create_policy_branch 使用：规范分支类型"
+  VERSION:
+    value: "3.2.0.0"
+    description: "四段版本号 A.B.C.D"
+  TICKET_ID:
+    value: "TASK1234"
+    description: "任务或 Bug 编号"
+  SHORT_DESC:
+    value: "short-desc"
+    description: "分支简短英文描述"
+  PROTECT_NAME:
+    value: "baseline/*"
+    description: "protect_branch 使用：保护分支名或通配符"
+  PUSH_ACCESS_LEVEL:
+    value: "0"
+    description: "保护分支 push 权限：0=No one, 30=Developers+Maintainers, 40=Maintainers"
+  MERGE_ACCESS_LEVEL:
+    value: "40"
+    description: "保护分支 merge 权限：30=Developers+Maintainers, 40=Maintainers"
+
+gitops_manage:
+  stage: manage
+  rules:
+    - when: manual
+  script:
+    - |
+      set -eu
+
+      require_token() {
+        if [ -z "${GITLAB_API_TOKEN:-}" ]; then
+          echo "GITLAB_API_TOKEN is missing. Configure it in Settings -> CI/CD -> Variables." >&2
+          exit 2
+        fi
+      }
+
+      urlencode_project() {
+        # GitLab project path only needs slash escaping for this workflow.
+        printf '%s' "$1" | sed 's#/#%2F#g'
+      }
+
+      valid_version() {
+        printf '%s' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+      }
+
+      slugify() {
+        printf '%s' "${1:-work}" \
+          | tr '[:upper:]' '[:lower:]' \
+          | sed -E 's/[^a-z0-9._-]+/-/g; s/-+/-/g; s/^[-._]+//; s/[-._]+$//' \
+          | sed 's/^$/work/'
+      }
+
+      ticket_id() {
+        printf '%s' "${1:-TASK}" \
+          | tr '[:lower:]' '[:upper:]' \
+          | sed -E 's/[^A-Z0-9]+//g; s/^$/TASK/'
+      }
+
+      minor_version() {
+        printf '%s' "$1" | awk -F. '{print $1"."$2}'
+      }
+
+      api() {
+        method="$1"
+        path="$2"
+        shift 2
+        curl --fail-with-body --silent --show-error \
+          --request "$method" \
+          --header "PRIVATE-TOKEN: ${GITLAB_API_TOKEN}" \
+          "$@" \
+          "${GITLAB_API_URL}${path}"
+      }
+
+      project_id="$(urlencode_project "$TARGET_PROJECT")"
+      project_api="/projects/${project_id}"
+
+      require_token
+      echo "ACTION=${ACTION}"
+      echo "TARGET_PROJECT=${TARGET_PROJECT}"
+
+      case "$ACTION" in
+        list_branches)
+          api GET "${project_api}/repository/branches?per_page=100"
+          ;;
+
+        create_branch)
+          if [ -z "${BRANCH_NAME:-}" ] || [ -z "${SOURCE_REF:-}" ]; then
+            echo "BRANCH_NAME and SOURCE_REF are required." >&2
+            exit 2
+          fi
+          api POST "${project_api}/repository/branches" \
+            --data-urlencode "branch=${BRANCH_NAME}" \
+            --data-urlencode "ref=${SOURCE_REF}"
+          ;;
+
+        create_policy_branch)
+          if ! valid_version "$VERSION"; then
+            echo "VERSION must be A.B.C.D, got: ${VERSION}" >&2
+            exit 2
+          fi
+
+          ticket="$(ticket_id "$TICKET_ID")"
+          desc="$(slugify "$SHORT_DESC")"
+
+          case "$BRANCH_KIND" in
+            baseline)
+              branch="baseline/${VERSION}"
+              ref="${SOURCE_REF:-main}"
+              ;;
+            feature)
+              branch="feature/${VERSION}/${ticket}-${desc}"
+              ref="${SOURCE_REF:-baseline/${VERSION}}"
+              ;;
+            fix)
+              branch="fix/${VERSION}"
+              ref="${SOURCE_REF:-baseline/${VERSION}}"
+              ;;
+            bugfix)
+              branch="bugfix/${VERSION}/${ticket}-${desc}"
+              ref="${SOURCE_REF:-fix/${VERSION}}"
+              ;;
+            stable)
+              branch="stable/$(minor_version "$VERSION")"
+              ref="${SOURCE_REF:-fix/${VERSION}}"
+              ;;
+            hotfix)
+              branch="hotfix/${VERSION}/${ticket}-${desc}"
+              ref="${SOURCE_REF:-main}"
+              ;;
+            *)
+              echo "Unsupported BRANCH_KIND: ${BRANCH_KIND}" >&2
+              exit 2
+              ;;
+          esac
+
+          echo "create branch: ${branch}"
+          echo "from ref: ${ref}"
+          api POST "${project_api}/repository/branches" \
+            --data-urlencode "branch=${branch}" \
+            --data-urlencode "ref=${ref}"
+          ;;
+
+        protect_branch)
+          if [ -z "${PROTECT_NAME:-}" ]; then
+            echo "PROTECT_NAME is required." >&2
+            exit 2
+          fi
+          api POST "${project_api}/protected_branches" \
+            --data-urlencode "name=${PROTECT_NAME}" \
+            --data "push_access_level=${PUSH_ACCESS_LEVEL}" \
+            --data "merge_access_level=${MERGE_ACCESS_LEVEL}"
+          ;;
+
+        *)
+          echo "Unsupported ACTION: ${ACTION}" >&2
+          exit 2
+          ;;
+      esac
+
