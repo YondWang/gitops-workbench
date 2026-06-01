@@ -16,11 +16,19 @@ Open this project in GitLab:
 Build -> Pipelines -> Run pipeline
 ```
 
-Select variables:
+In this GitLab version, the form is shown as **Inputs**.
+
+Select branch:
 
 ```text
-ACTION=list_branches
-TARGET_PROJECT=software_hmi_app/business
+main
+```
+
+For the first test, keep the default inputs:
+
+```text
+action=list_branches
+target_project=software_hmi_app/business
 ```
 
 Run the pipeline.
@@ -66,9 +74,9 @@ ACTION=list_branches
 ## Create A Test Branch
 
 ```text
-ACTION=create_branch
-BRANCH_NAME=codex/api-test-from-fix
-SOURCE_REF=fix
+action=create_branch
+branch_name=codex/api-test-from-fix
+source_ref=fix
 ```
 
 ## Create A Policy Branch From Existing fix
@@ -76,11 +84,10 @@ SOURCE_REF=fix
 If `baseline/3.2.0.0` does not exist yet, override source ref:
 
 ```text
-ACTION=create_policy_branch
-BRANCH_KIND=feature
-VERSION=3.2.0.0
-TICKET_ID=TASK1234
-SHORT_DESC=user-login
-SOURCE_REF=fix
+action=create_policy_branch
+branch_kind=feature
+version=3.2.0.0
+ticket_id=TASK1234
+short_desc=user-login
+source_ref=fix
 ```
-
