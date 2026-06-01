@@ -1,55 +1,74 @@
+spec:
+  inputs:
+    action:
+      default: "list_branches"
+      options:
+        - "list_branches"
+        - "create_branch"
+        - "create_policy_branch"
+        - "protect_branch"
+      description: "要执行的分支管理动作"
+    target_project:
+      default: "software_hmi_app/business"
+      description: "被管理的业务项目路径"
+    branch_name:
+      default: "codex/api-test-from-fix"
+      description: "create_branch 使用：要创建的分支名"
+    source_ref:
+      default: "fix"
+      description: "创建分支的来源 ref；create_policy_branch 可留默认或按需覆盖"
+    branch_kind:
+      default: "feature"
+      options:
+        - "baseline"
+        - "feature"
+        - "fix"
+        - "bugfix"
+        - "stable"
+        - "hotfix"
+      description: "create_policy_branch 使用：规范分支类型"
+    version:
+      default: "3.2.0.0"
+      description: "四段版本号 A.B.C.D"
+    ticket_id:
+      default: "TASK1234"
+      description: "任务或 Bug 编号"
+    short_desc:
+      default: "short-desc"
+      description: "分支简短英文描述"
+    protect_name:
+      default: "baseline/*"
+      description: "protect_branch 使用：保护分支名或通配符"
+    push_access_level:
+      default: "0"
+      options:
+        - "0"
+        - "30"
+        - "40"
+      description: "保护分支 push 权限：0=No one, 30=Developers+Maintainers, 40=Maintainers"
+    merge_access_level:
+      default: "40"
+      options:
+        - "30"
+        - "40"
+      description: "保护分支 merge 权限：30=Developers+Maintainers, 40=Maintainers"
+---
 stages:
   - manage
 
 variables:
-  GITLAB_API_URL:
-    value: "https://www.chancee-shanghai.cn:9900/api/v4"
-    description: "GitLab API base URL"
-  TARGET_PROJECT:
-    value: "software_hmi_app/business"
-    description: "被管理的业务项目路径"
-  ACTION:
-    value: "list_branches"
-    options:
-      - "list_branches"
-      - "create_branch"
-      - "create_policy_branch"
-      - "protect_branch"
-    description: "要执行的分支管理动作"
-  BRANCH_NAME:
-    value: "codex/api-test-from-fix"
-    description: "create_branch 使用：要创建的分支名"
-  SOURCE_REF:
-    value: "fix"
-    description: "创建分支的来源 ref；留空时 create_policy_branch 会按规范推断"
-  BRANCH_KIND:
-    value: "feature"
-    options:
-      - "baseline"
-      - "feature"
-      - "fix"
-      - "bugfix"
-      - "stable"
-      - "hotfix"
-    description: "create_policy_branch 使用：规范分支类型"
-  VERSION:
-    value: "3.2.0.0"
-    description: "四段版本号 A.B.C.D"
-  TICKET_ID:
-    value: "TASK1234"
-    description: "任务或 Bug 编号"
-  SHORT_DESC:
-    value: "short-desc"
-    description: "分支简短英文描述"
-  PROTECT_NAME:
-    value: "baseline/*"
-    description: "protect_branch 使用：保护分支名或通配符"
-  PUSH_ACCESS_LEVEL:
-    value: "0"
-    description: "保护分支 push 权限：0=No one, 30=Developers+Maintainers, 40=Maintainers"
-  MERGE_ACCESS_LEVEL:
-    value: "40"
-    description: "保护分支 merge 权限：30=Developers+Maintainers, 40=Maintainers"
+  GITLAB_API_URL: "https://www.chancee-shanghai.cn:9900/api/v4"
+  ACTION: "$[[ inputs.action ]]"
+  TARGET_PROJECT: "$[[ inputs.target_project ]]"
+  BRANCH_NAME: "$[[ inputs.branch_name ]]"
+  SOURCE_REF: "$[[ inputs.source_ref ]]"
+  BRANCH_KIND: "$[[ inputs.branch_kind ]]"
+  VERSION: "$[[ inputs.version ]]"
+  TICKET_ID: "$[[ inputs.ticket_id ]]"
+  SHORT_DESC: "$[[ inputs.short_desc ]]"
+  PROTECT_NAME: "$[[ inputs.protect_name ]]"
+  PUSH_ACCESS_LEVEL: "$[[ inputs.push_access_level ]]"
+  MERGE_ACCESS_LEVEL: "$[[ inputs.merge_access_level ]]"
 
 gitops_manage:
   stage: manage
@@ -188,4 +207,3 @@ gitops_manage:
           exit 2
           ;;
       esac
-
