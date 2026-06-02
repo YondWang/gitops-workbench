@@ -3,10 +3,11 @@ button_bugfix_merge:
   variables:
     OPERATION: "bugfix_merge"
   script:
-    - if [ -z "${BUGFIX_BRANCH:-}" ]; then BUGFIX_BRANCH="$(derive_bugfix_branch)"; fi
-    - version="$(get_version_from_bugfix "$BUGFIX_BRANCH")"
-    - fix_target="$(get_fix_from_bugfix "$BUGFIX_BRANCH")"
-    - baseline="baseline/${version}"
-    - if [ -z "$fix_target" ]; then err "cannot infer fix branch for ${BUGFIX_BRANCH}. Set/fix existing fix/${version}-rcN first."; exit 2; fi
-    - create_mr "$BUGFIX_BRANCH" "$fix_target" "[${version}][bugfix] merge ${BUGFIX_BRANCH}"
-    - if [ "$AUTO_SYNC" = "true" ]; then cherry_pick_commits "$BUGFIX_BRANCH" "$baseline"; else warn "auto_sync disabled; remember to sync ${BUGFIX_BRANCH} to ${baseline}"; fi
+    - |
+      if [ -z "${BUGFIX_BRANCH:-}" ]; then BUGFIX_BRANCH="$(derive_bugfix_branch)"; fi
+      version="$(get_version_from_bugfix "$BUGFIX_BRANCH")"
+      fix_target="$(get_fix_from_bugfix "$BUGFIX_BRANCH")"
+      baseline="baseline/${version}"
+      if [ -z "$fix_target" ]; then err "cannot infer fix branch for ${BUGFIX_BRANCH}. Set/fix existing fix/${version}-rcN first."; exit 2; fi
+      create_mr "$BUGFIX_BRANCH" "$fix_target" "[${version}][bugfix] merge ${BUGFIX_BRANCH}"
+      if [ "$AUTO_SYNC" = "true" ]; then cherry_pick_commits "$BUGFIX_BRANCH" "$baseline"; else warn "auto_sync disabled; remember to sync ${BUGFIX_BRANCH} to ${baseline}"; fi

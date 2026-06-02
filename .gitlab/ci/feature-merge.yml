@@ -3,8 +3,9 @@ button_feature_merge:
   variables:
     OPERATION: "feature_merge"
   script:
-    - if [ -z "${FEATURE_BRANCH:-}" ]; then FEATURE_BRANCH="$(derive_feature_branch)"; fi
-    - version="$(get_version_from_feature "$FEATURE_BRANCH")"
-    - target="baseline/${version}"
-    - create_mr "$FEATURE_BRANCH" "$target" "[${version}][feature] merge ${FEATURE_BRANCH}"
-    - log "review and merge this MR in GitLab"
+    - |
+      if [ -z "${FEATURE_BRANCH:-}" ]; then FEATURE_BRANCH="$(derive_feature_branch)"; fi
+      version="$(get_version_from_feature "$FEATURE_BRANCH")"
+      target="baseline/${version}"
+      create_mr "$FEATURE_BRANCH" "$target" "[${version}][feature] merge ${FEATURE_BRANCH}"
+      log "review and merge this MR in GitLab"

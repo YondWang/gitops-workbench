@@ -3,5 +3,6 @@ button_branch_list:
   variables:
     OPERATION: "branch_list"
   script:
-    - query="${PATTERN:+&search=${PATTERN}}"
-    - api GET "${PROJECT_API}/repository/branches?per_page=100${query}"
+    - |
+      query="${PATTERN:+&search=${PATTERN}}"
+      api GET "${PROJECT_API}/repository/branches?per_page=100${query}"

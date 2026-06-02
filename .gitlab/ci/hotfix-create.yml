@@ -3,7 +3,8 @@ button_hotfix_create:
   variables:
     OPERATION: "hotfix_create"
   script:
-    - branch="$(derive_hotfix_branch)"
-    - source_ref="${FROM_REF:-main}"
-    - branch_create "$branch" "$source_ref"
-    - ok "hotfix branch ready: ${branch}"
+    - |
+      branch="$(derive_hotfix_branch)"
+      source_ref="${FROM_REF:-main}"
+      branch_create "$branch" "$source_ref"
+      ok "hotfix branch ready: ${branch}"

@@ -3,8 +3,9 @@ button_bugfix_create:
   variables:
     OPERATION: "bugfix_create"
   script:
-    - require_version "$VERSION"
-    - rc="${RC_NUMBER:-1}"
-    - branch="$(derive_bugfix_branch)"
-    - branch_create "$branch" "fix/${VERSION}-rc${rc}"
-    - ok "bugfix branch ready: ${branch}"
+    - |
+      require_version "$VERSION"
+      rc="${RC_NUMBER:-1}"
+      branch="$(derive_bugfix_branch)"
+      branch_create "$branch" "fix/${VERSION}-rc${rc}"
+      ok "bugfix branch ready: ${branch}"

@@ -3,7 +3,8 @@ button_feature_create:
   variables:
     OPERATION: "feature_create"
   script:
-    - require_version "$VERSION"
-    - branch="$(derive_feature_branch)"
-    - branch_create "$branch" "baseline/${VERSION}"
-    - ok "feature branch ready: ${branch}"
+    - |
+      require_version "$VERSION"
+      branch="$(derive_feature_branch)"
+      branch_create "$branch" "baseline/${VERSION}"
+      ok "feature branch ready: ${branch}"
