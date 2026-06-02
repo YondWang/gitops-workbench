@@ -156,31 +156,31 @@ get_version_from_feature() {
 }
 
 get_fix_from_bugfix() {
-  version="$(get_version_from_bugfix "$1")"
-  latest_fix_branch "$version"
+  bugfix_version_value="$(get_version_from_bugfix "$1")"
+  latest_fix_branch "$bugfix_version_value"
 }
 
 latest_fix_branch() {
-  version="$1"
-  search="fix/${version}-rc"
-  api GET "${PROJECT_API}/repository/branches?per_page=100&search=${search}" \
-    | grep -o "fix/${version}-rc[0-9][0-9]*" \
+  latest_fix_version="$1"
+  latest_fix_search="fix/${latest_fix_version}-rc"
+  api GET "${PROJECT_API}/repository/branches?per_page=100&search=${latest_fix_search}" \
+    | grep -o "fix/${latest_fix_version}-rc[0-9][0-9]*" \
     | sort -t c -k2,2n \
     | tail -1
 }
 
 next_rc_number() {
-  version="$1"
-  search="fix/${version}-rc"
-  current="$(api GET "${PROJECT_API}/repository/branches?per_page=100&search=${search}" \
-    | grep -o "fix/${version}-rc[0-9][0-9]*" \
-    | sed -E "s#fix/${version}-rc##" \
+  next_rc_version="$1"
+  next_rc_search="fix/${next_rc_version}-rc"
+  next_rc_current="$(api GET "${PROJECT_API}/repository/branches?per_page=100&search=${next_rc_search}" \
+    | grep -o "fix/${next_rc_version}-rc[0-9][0-9]*" \
+    | sed -E "s#fix/${next_rc_version}-rc##" \
     | sort -n \
     | tail -1 || true)"
-  if [ -z "$current" ]; then
+  if [ -z "$next_rc_current" ]; then
     printf '1'
   else
-    awk "BEGIN { print ${current} + 1 }"
+    awk "BEGIN { print ${next_rc_current} + 1 }"
   fi
 }
 
@@ -218,40 +218,40 @@ create_tag() {
 compare_branches() {
   require_safe_ref_name "$1" "compare from"
   require_safe_ref_name "$2" "compare to"
-  from="$(urlencode_ref "$1")"
-  to="$(urlencode_ref "$2")"
-  api GET "${PROJECT_API}/repository/compare?from=${from}&to=${to}"
+  compare_from_encoded="$(urlencode_ref "$1")"
+  compare_to_encoded="$(urlencode_ref "$2")"
+  api GET "${PROJECT_API}/repository/compare?from=${compare_from_encoded}&to=${compare_to_encoded}"
 }
 
 list_compare_commit_ids() {
-  from="$1"
-  to="$2"
-  compare_branches "$from" "$to" \
+  compare_source_ref="$1"
+  compare_target_ref="$2"
+  compare_branches "$compare_source_ref" "$compare_target_ref" \
     | grep -o '"id":"[0-9a-f][0-9a-f]*"' \
     | sed -E 's/"id":"([^"]+)"/\1/'
 }
 
 cherry_pick_commits() {
-  source_branch="$1"
-  target_branch="$2"
-  require_safe_ref_name "$source_branch" "cherry-pick source branch"
-  require_safe_ref_name "$target_branch" "cherry-pick target branch"
-  commits="$(list_compare_commit_ids "$target_branch" "$source_branch" || true)"
-  if [ -z "$commits" ]; then
-    ok "no commits to cherry-pick: ${source_branch} -> ${target_branch}"
+  cherry_source_branch="$1"
+  cherry_target_branch="$2"
+  require_safe_ref_name "$cherry_source_branch" "cherry-pick source branch"
+  require_safe_ref_name "$cherry_target_branch" "cherry-pick target branch"
+  cherry_commits="$(list_compare_commit_ids "$cherry_target_branch" "$cherry_source_branch" || true)"
+  if [ -z "$cherry_commits" ]; then
+    ok "no commits to cherry-pick: ${cherry_source_branch} -> ${cherry_target_branch}"
     return 0
   fi
-  for sha in $commits; do
-    log "cherry-pick ${sha} -> ${target_branch}"
-    if ! api POST "${PROJECT_API}/repository/commits/${sha}/cherry_pick" \
-      --data-urlencode "branch=${target_branch}"; then
+  for cherry_sha in $cherry_commits; do
+    log "cherry-pick ${cherry_sha} -> ${cherry_target_branch}"
+    if ! api POST "${PROJECT_API}/repository/commits/${cherry_sha}/cherry_pick" \
+      --data-urlencode "branch=${cherry_target_branch}"; then
       printf '\n'
-      err "cherry-pick failed: ${sha} -> ${target_branch}. Resolve conflicts manually."
+      err "cherry-pick failed: ${cherry_sha} -> ${cherry_target_branch}. Resolve conflicts manually."
       exit 3
     fi
     printf '\n'
   done
-  ok "cherry-pick completed: ${source_branch} -> ${target_branch}"
+  ok "cherry-pick completed: ${cherry_source_branch} -> ${cherry_target_branch}"
 }
 
 derive_tag_from_fix() {
@@ -293,10 +293,10 @@ resolve_fix_branch() {
     printf 'fix/%s-rc%s' "$VERSION" "$RC_NUMBER"
     return 0
   fi
-  latest="$(latest_fix_branch "$VERSION" || true)"
-  if [ -z "$latest" ]; then
+  resolved_latest_fix="$(latest_fix_branch "$VERSION" || true)"
+  if [ -z "$resolved_latest_fix" ]; then
     err "cannot find fix branch for version ${VERSION}. Create fix branch first or set rc_number/fix_branch."
     exit 2
   fi
-  printf '%s' "$latest"
+  printf '%s' "$resolved_latest_fix"
 }
