@@ -1,0 +1,225 @@
+log() { printf '[INFO] %s\n' "$*"; }
+ok() { printf '[OK] %s\n' "$*"; }
+warn() { printf '[WARN] %s\n' "$*" >&2; }
+err() { printf '[ERROR] %s\n' "$*" >&2; }
+
+check_token() {
+  if [ -z "${GITLAB_API_TOKEN:-}" ]; then
+    err "GITLAB_API_TOKEN is missing. Configure it in Settings -> CI/CD -> Variables."
+    exit 2
+  fi
+}
+
+urlencode_project() {
+  printf '%s' "$1" | sed 's#/#%2F#g'
+}
+
+urlencode_ref() {
+  printf '%s' "$1" | sed 's#/#%2F#g; s# #%20#g'
+}
+
+init_project() {
+  PROJECT_ID="$(urlencode_project "$TARGET_PROJECT")"
+  PROJECT_API="/projects/${PROJECT_ID}"
+  export PROJECT_ID PROJECT_API
+  log "target project: ${TARGET_PROJECT}"
+  log "operation: ${OPERATION}"
+}
+
+api() {
+  method="$1"
+  path="$2"
+  shift 2
+  curl --fail-with-body --silent --show-error \
+    --request "$method" \
+    --header "PRIVATE-TOKEN: ${GITLAB_API_TOKEN}" \
+    "$@" \
+    "${GITLAB_API_URL}${path}"
+}
+
+api_get() {
+  api GET "$1"
+}
+
+check_version() {
+  printf '%s' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+}
+
+require_version() {
+  check_version "$1" || {
+    err "version must be A.B.C.D, got: $1"
+    exit 2
+  }
+}
+
+increment_patch() {
+  require_version "$1"
+  printf '%s' "$1" | awk -F. '{print $1"."$2"."$3"."$4+1}'
+}
+
+get_major_minor() {
+  printf '%s' "$1" | awk -F. '{print $1"."$2}'
+}
+
+clean_name() {
+  value="${1:-work}"
+  printf '%s' "$value" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9._-]+/-/g; s/-+/-/g; s/^[-._]+//; s/[-._]+$//' \
+    | sed 's/^$/work/'
+}
+
+upper_ticket() {
+  value="${1:-TASK}"
+  printf '%s' "$value" \
+    | tr '[:lower:]' '[:upper:]' \
+    | sed -E 's/[^A-Z0-9]+//g; s/^$/TASK/'
+}
+
+branch_exists() {
+  branch="$(urlencode_ref "$1")"
+  api GET "${PROJECT_API}/repository/branches/${branch}" >/dev/null 2>&1
+}
+
+branch_create() {
+  branch="$1"
+  ref="$2"
+  if branch_exists "$branch"; then
+    warn "branch already exists: ${branch}"
+    return 0
+  fi
+  log "create branch: ${branch} from ${ref}"
+  api POST "${PROJECT_API}/repository/branches" \
+    --data-urlencode "branch=${branch}" \
+    --data-urlencode "ref=${ref}"
+  printf '\n'
+  ok "branch created: ${branch}"
+}
+
+branch_protect() {
+  name="$1"
+  push_level="$2"
+  merge_level="$3"
+  log "protect branch: ${name} push=${push_level} merge=${merge_level}"
+  if api POST "${PROJECT_API}/protected_branches" \
+    --data-urlencode "name=${name}" \
+    --data "push_access_level=${push_level}" \
+    --data "merge_access_level=${merge_level}"; then
+    printf '\n'
+    ok "protected: ${name}"
+  else
+    printf '\n'
+    warn "protect branch failed or already exists: ${name}"
+  fi
+}
+
+get_baseline_from_feature() {
+  printf '%s' "$1" | awk -F/ '{print "baseline/"$2}'
+}
+
+get_baseline_from_bugfix() {
+  printf '%s' "$1" | awk -F/ '{print "baseline/"$2}'
+}
+
+get_version_from_bugfix() {
+  printf '%s' "$1" | awk -F/ '{print $2}'
+}
+
+get_version_from_feature() {
+  printf '%s' "$1" | awk -F/ '{print $2}'
+}
+
+get_fix_from_bugfix() {
+  version="$(get_version_from_bugfix "$1")"
+  search="fix/${version}-rc"
+  api GET "${PROJECT_API}/repository/branches?per_page=100&search=${search}" \
+    | grep -o "fix/${version}-rc[0-9][0-9]*" \
+    | sort -t c -k2,2n \
+    | tail -1
+}
+
+next_rc_number() {
+  version="$1"
+  search="fix/${version}-rc"
+  current="$(api GET "${PROJECT_API}/repository/branches?per_page=100&search=${search}" \
+    | grep -o "fix/${version}-rc[0-9][0-9]*" \
+    | sed -E "s#fix/${version}-rc##" \
+    | sort -n \
+    | tail -1 || true)"
+  if [ -z "$current" ]; then
+    printf '1'
+  else
+    awk "BEGIN { print ${current} + 1 }"
+  fi
+}
+
+create_mr() {
+  source="$1"
+  target="$2"
+  title="$3"
+  log "create MR: ${source} -> ${target}"
+  api POST "${PROJECT_API}/merge_requests" \
+    --data-urlencode "source_branch=${source}" \
+    --data-urlencode "target_branch=${target}" \
+    --data-urlencode "title=${title}" \
+    --data "remove_source_branch=false"
+  printf '\n'
+  ok "MR requested: ${source} -> ${target}"
+}
+
+create_tag() {
+  tag="$1"
+  ref="$2"
+  message="${3:-$tag}"
+  log "create tag: ${tag} on ${ref}"
+  api POST "${PROJECT_API}/repository/tags" \
+    --data-urlencode "tag_name=${tag}" \
+    --data-urlencode "ref=${ref}" \
+    --data-urlencode "message=${message}"
+  printf '\n'
+  ok "tag created: ${tag}"
+}
+
+compare_branches() {
+  from="$1"
+  to="$2"
+  api GET "${PROJECT_API}/repository/compare?from=${from}&to=${to}"
+}
+
+list_compare_commit_ids() {
+  from="$1"
+  to="$2"
+  compare_branches "$from" "$to" \
+    | grep -o '"id":"[0-9a-f][0-9a-f]*"' \
+    | sed -E 's/"id":"([^"]+)"/\1/'
+}
+
+cherry_pick_commits() {
+  source_branch="$1"
+  target_branch="$2"
+  commits="$(list_compare_commit_ids "$target_branch" "$source_branch" || true)"
+  if [ -z "$commits" ]; then
+    ok "no commits to cherry-pick: ${source_branch} -> ${target_branch}"
+    return 0
+  fi
+  for sha in $commits; do
+    log "cherry-pick ${sha} -> ${target_branch}"
+    if ! api POST "${PROJECT_API}/repository/commits/${sha}/cherry_pick" \
+      --data-urlencode "branch=${target_branch}"; then
+      printf '\n'
+      err "cherry-pick failed: ${sha} -> ${target_branch}. Resolve conflicts manually."
+      exit 3
+    fi
+    printf '\n'
+  done
+  ok "cherry-pick completed: ${source_branch} -> ${target_branch}"
+}
+
+derive_tag_from_fix() {
+  printf '%s' "$1" | sed -E 's#^fix/([^/]+)$#v\1#'
+}
+
+derive_tag_from_hotfix() {
+  printf '%s' "$1" | awk -F/ '{print "v"$2}'
+}
+

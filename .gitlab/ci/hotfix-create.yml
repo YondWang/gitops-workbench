@@ -1,0 +1,13 @@
+hotfix_create:
+  extends: .gitops_base
+  stage: branch
+  rules:
+    - if: '$OPERATION == "hotfix_create"'
+  script:
+    - new_version="$(increment_patch "$CURRENT_VERSION")"
+    - bug="$(upper_ticket "$BUG_ID")"
+    - desc="$(clean_name "$DESCRIPTION")"
+    - branch="hotfix/${new_version}/${bug}-${desc}"
+    - branch_create "$branch" "$FROM_REF"
+    - ok "hotfix branch ready: ${branch}"
+

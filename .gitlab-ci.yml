@@ -1,209 +1,151 @@
 spec:
   inputs:
-    action:
-      default: "list_branches"
+    operation:
+      default: "branch_list"
       options:
-        - "list_branches"
-        - "create_branch"
-        - "create_policy_branch"
-        - "protect_branch"
-      description: "要执行的分支管理动作"
+        - "version_init"
+        - "feature_create"
+        - "feature_merge"
+        - "fix_create"
+        - "bugfix_create"
+        - "bugfix_merge"
+        - "release_tag"
+        - "release_stable"
+        - "hotfix_create"
+        - "hotfix_merge"
+        - "branch_list"
+        - "branch_compare"
+        - "mr_list"
+        - "tag_list"
+        - "sync_check"
+        - "version_status"
+      description: "选择要执行的 GitOps 操作"
     target_project:
       default: "software_hmi_app/business"
       description: "被管理的业务项目路径"
-    branch_name:
-      default: "codex/api-test-from-fix"
-      description: "create_branch 使用：要创建的分支名"
-    source_ref:
-      default: "fix"
-      description: "创建分支的来源 ref；create_policy_branch 可留默认或按需覆盖"
-    branch_kind:
-      default: "feature"
-      options:
-        - "baseline"
-        - "feature"
-        - "fix"
-        - "bugfix"
-        - "stable"
-        - "hotfix"
-      description: "create_policy_branch 使用：规范分支类型"
     version:
       default: "3.2.0.0"
-      description: "四段版本号 A.B.C.D"
-    ticket_id:
+      description: "版本号 A.B.C.D"
+    from_ref:
+      default: "main"
+      description: "创建分支/版本时的来源 ref"
+    task_id:
       default: "TASK1234"
-      description: "任务或 Bug 编号"
-    short_desc:
+      description: "功能任务编号"
+    bug_id:
+      default: "BUG001"
+      description: "Bug 编号"
+    description:
       default: "short-desc"
-      description: "分支简短英文描述"
-    protect_name:
-      default: "baseline/*"
-      description: "protect_branch 使用：保护分支名或通配符"
-    push_access_level:
-      default: "0"
-      options:
-        - "0"
-        - "30"
-        - "40"
-      description: "保护分支 push 权限：0=No one, 30=Developers+Maintainers, 40=Maintainers"
-    merge_access_level:
-      default: "40"
-      options:
-        - "30"
-        - "40"
-      description: "保护分支 merge 权限：30=Developers+Maintainers, 40=Maintainers"
+      description: "英文短描述，用于分支名"
+    feature_branch:
+      default: "feature/3.2.0.0/TASK1234-short-desc"
+      description: "功能分支名"
+    bugfix_branch:
+      default: "bugfix/3.2.0.0/BUG001-short-desc"
+      description: "Bugfix 分支名"
+    fix_branch:
+      default: "fix/3.2.0.0-rc1"
+      description: "Fix/RC 分支名"
+    hotfix_branch:
+      default: "hotfix/3.2.0.1/BUG999-critical"
+      description: "Hotfix 分支名"
+    rc_number:
+      default: ""
+      description: "RC 编号；留空时自动递增"
+    tag_name:
+      default: ""
+      description: "Tag 名；留空时自动推导"
+    from_tag:
+      default: "v3.2.0.0"
+      description: "创建 stable 分支时的来源 tag"
+    current_version:
+      default: "3.2.0.0"
+      description: "Hotfix 当前线上版本号"
+    merge_to_main:
+      default: "false"
+      options: ["false", "true"]
+      description: "release_tag 后是否创建 fix -> main MR"
+    auto_sync:
+      default: "true"
+      options: ["true", "false"]
+      description: "bugfix 合并后是否同步到 baseline"
+    sync_to_baseline:
+      default: ""
+      description: "hotfix 同步目标 baseline 版本；留空则不自动同步"
+    pattern:
+      default: ""
+      description: "分支/tag 查询过滤条件"
+    from_branch:
+      default: "fix/3.2.0.0-rc1"
+      description: "比较来源分支"
+    to_branch:
+      default: "baseline/3.2.0.0"
+      description: "比较目标分支"
+    state:
+      default: "opened"
+      options: ["opened", "merged", "closed", "all"]
+      description: "MR 状态"
+    target_branch:
+      default: ""
+      description: "MR 目标分支过滤"
 ---
+image: docker.m.daocloud.io/curlimages/curl:latest
+
 stages:
-  - manage
+  - query
+  - branch
+  - merge
+  - release
+  - sync
 
 variables:
   GITLAB_API_URL: "https://www.chancee-shanghai.cn:9900/api/v4"
-  ACTION: "$[[ inputs.action ]]"
+  OPERATION: "$[[ inputs.operation ]]"
   TARGET_PROJECT: "$[[ inputs.target_project ]]"
-  BRANCH_NAME: "$[[ inputs.branch_name ]]"
-  SOURCE_REF: "$[[ inputs.source_ref ]]"
-  BRANCH_KIND: "$[[ inputs.branch_kind ]]"
   VERSION: "$[[ inputs.version ]]"
-  TICKET_ID: "$[[ inputs.ticket_id ]]"
-  SHORT_DESC: "$[[ inputs.short_desc ]]"
-  PROTECT_NAME: "$[[ inputs.protect_name ]]"
-  PUSH_ACCESS_LEVEL: "$[[ inputs.push_access_level ]]"
-  MERGE_ACCESS_LEVEL: "$[[ inputs.merge_access_level ]]"
+  FROM_REF: "$[[ inputs.from_ref ]]"
+  TASK_ID: "$[[ inputs.task_id ]]"
+  BUG_ID: "$[[ inputs.bug_id ]]"
+  DESCRIPTION: "$[[ inputs.description ]]"
+  FEATURE_BRANCH: "$[[ inputs.feature_branch ]]"
+  BUGFIX_BRANCH: "$[[ inputs.bugfix_branch ]]"
+  FIX_BRANCH: "$[[ inputs.fix_branch ]]"
+  HOTFIX_BRANCH: "$[[ inputs.hotfix_branch ]]"
+  RC_NUMBER: "$[[ inputs.rc_number ]]"
+  TAG_NAME: "$[[ inputs.tag_name ]]"
+  FROM_TAG: "$[[ inputs.from_tag ]]"
+  CURRENT_VERSION: "$[[ inputs.current_version ]]"
+  MERGE_TO_MAIN: "$[[ inputs.merge_to_main ]]"
+  AUTO_SYNC: "$[[ inputs.auto_sync ]]"
+  SYNC_TO_BASELINE: "$[[ inputs.sync_to_baseline ]]"
+  PATTERN: "$[[ inputs.pattern ]]"
+  FROM_BRANCH: "$[[ inputs.from_branch ]]"
+  TO_BRANCH: "$[[ inputs.to_branch ]]"
+  STATE: "$[[ inputs.state ]]"
+  TARGET_BRANCH_FILTER: "$[[ inputs.target_branch ]]"
 
-gitops_manage:
-  stage: manage
-  rules:
-    - when: manual
-  script:
-    - |
-      set -eu
+.gitops_base:
+  before_script:
+    - set -eu
+    - . .gitlab/scripts/git-utils.sh
+    - check_token
+    - init_project
 
-      require_token() {
-        if [ -z "${GITLAB_API_TOKEN:-}" ]; then
-          echo "GITLAB_API_TOKEN is missing. Configure it in Settings -> CI/CD -> Variables." >&2
-          exit 2
-        fi
-      }
-
-      urlencode_project() {
-        # GitLab project path only needs slash escaping for this workflow.
-        printf '%s' "$1" | sed 's#/#%2F#g'
-      }
-
-      valid_version() {
-        printf '%s' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
-      }
-
-      slugify() {
-        printf '%s' "${1:-work}" \
-          | tr '[:upper:]' '[:lower:]' \
-          | sed -E 's/[^a-z0-9._-]+/-/g; s/-+/-/g; s/^[-._]+//; s/[-._]+$//' \
-          | sed 's/^$/work/'
-      }
-
-      ticket_id() {
-        printf '%s' "${1:-TASK}" \
-          | tr '[:lower:]' '[:upper:]' \
-          | sed -E 's/[^A-Z0-9]+//g; s/^$/TASK/'
-      }
-
-      minor_version() {
-        printf '%s' "$1" | awk -F. '{print $1"."$2}'
-      }
-
-      api() {
-        method="$1"
-        path="$2"
-        shift 2
-        curl --fail-with-body --silent --show-error \
-          --request "$method" \
-          --header "PRIVATE-TOKEN: ${GITLAB_API_TOKEN}" \
-          "$@" \
-          "${GITLAB_API_URL}${path}"
-      }
-
-      project_id="$(urlencode_project "$TARGET_PROJECT")"
-      project_api="/projects/${project_id}"
-
-      require_token
-      echo "ACTION=${ACTION}"
-      echo "TARGET_PROJECT=${TARGET_PROJECT}"
-
-      case "$ACTION" in
-        list_branches)
-          api GET "${project_api}/repository/branches?per_page=100"
-          ;;
-
-        create_branch)
-          if [ -z "${BRANCH_NAME:-}" ] || [ -z "${SOURCE_REF:-}" ]; then
-            echo "BRANCH_NAME and SOURCE_REF are required." >&2
-            exit 2
-          fi
-          api POST "${project_api}/repository/branches" \
-            --data-urlencode "branch=${BRANCH_NAME}" \
-            --data-urlencode "ref=${SOURCE_REF}"
-          ;;
-
-        create_policy_branch)
-          if ! valid_version "$VERSION"; then
-            echo "VERSION must be A.B.C.D, got: ${VERSION}" >&2
-            exit 2
-          fi
-
-          ticket="$(ticket_id "$TICKET_ID")"
-          desc="$(slugify "$SHORT_DESC")"
-
-          case "$BRANCH_KIND" in
-            baseline)
-              branch="baseline/${VERSION}"
-              ref="${SOURCE_REF:-main}"
-              ;;
-            feature)
-              branch="feature/${VERSION}/${ticket}-${desc}"
-              ref="${SOURCE_REF:-baseline/${VERSION}}"
-              ;;
-            fix)
-              branch="fix/${VERSION}"
-              ref="${SOURCE_REF:-baseline/${VERSION}}"
-              ;;
-            bugfix)
-              branch="bugfix/${VERSION}/${ticket}-${desc}"
-              ref="${SOURCE_REF:-fix/${VERSION}}"
-              ;;
-            stable)
-              branch="stable/$(minor_version "$VERSION")"
-              ref="${SOURCE_REF:-fix/${VERSION}}"
-              ;;
-            hotfix)
-              branch="hotfix/${VERSION}/${ticket}-${desc}"
-              ref="${SOURCE_REF:-main}"
-              ;;
-            *)
-              echo "Unsupported BRANCH_KIND: ${BRANCH_KIND}" >&2
-              exit 2
-              ;;
-          esac
-
-          echo "create branch: ${branch}"
-          echo "from ref: ${ref}"
-          api POST "${project_api}/repository/branches" \
-            --data-urlencode "branch=${branch}" \
-            --data-urlencode "ref=${ref}"
-          ;;
-
-        protect_branch)
-          if [ -z "${PROTECT_NAME:-}" ]; then
-            echo "PROTECT_NAME is required." >&2
-            exit 2
-          fi
-          api POST "${project_api}/protected_branches" \
-            --data-urlencode "name=${PROTECT_NAME}" \
-            --data "push_access_level=${PUSH_ACCESS_LEVEL}" \
-            --data "merge_access_level=${MERGE_ACCESS_LEVEL}"
-          ;;
-
-        *)
-          echo "Unsupported ACTION: ${ACTION}" >&2
-          exit 2
-          ;;
-      esac
+include:
+  - local: ".gitlab/ci/version-init.yml"
+  - local: ".gitlab/ci/feature-create.yml"
+  - local: ".gitlab/ci/feature-merge.yml"
+  - local: ".gitlab/ci/fix-create.yml"
+  - local: ".gitlab/ci/bugfix-create.yml"
+  - local: ".gitlab/ci/bugfix-merge.yml"
+  - local: ".gitlab/ci/release-tag.yml"
+  - local: ".gitlab/ci/release-stable.yml"
+  - local: ".gitlab/ci/hotfix-create.yml"
+  - local: ".gitlab/ci/hotfix-merge.yml"
+  - local: ".gitlab/ci/branch-list.yml"
+  - local: ".gitlab/ci/branch-compare.yml"
+  - local: ".gitlab/ci/mr-list.yml"
+  - local: ".gitlab/ci/tag-list.yml"
+  - local: ".gitlab/ci/sync-check.yml"
+  - local: ".gitlab/ci/version-status.yml"
