@@ -1,9 +1,7 @@
-mr_list:
+button_mr_list:
   extends: .gitops_base
-  stage: query
-  rules:
-    - if: '$OPERATION == "mr_list"'
+  variables:
+    OPERATION: "mr_list"
   script:
     - target_query="${TARGET_BRANCH_FILTER:+&target_branch=${TARGET_BRANCH_FILTER}}"
     - api GET "${PROJECT_API}/merge_requests?per_page=100&state=${STATE}${target_query}"
-

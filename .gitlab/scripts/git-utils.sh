@@ -23,7 +23,7 @@ init_project() {
   PROJECT_API="/projects/${PROJECT_ID}"
   export PROJECT_ID PROJECT_API
   log "target project: ${TARGET_PROJECT}"
-  log "operation: ${OPERATION}"
+  log "operation: ${OPERATION:-manual button}"
 }
 
 api() {
@@ -131,6 +131,11 @@ get_version_from_feature() {
 
 get_fix_from_bugfix() {
   version="$(get_version_from_bugfix "$1")"
+  latest_fix_branch "$version"
+}
+
+latest_fix_branch() {
+  version="$1"
   search="fix/${version}-rc"
   api GET "${PROJECT_API}/repository/branches?per_page=100&search=${search}" \
     | grep -o "fix/${version}-rc[0-9][0-9]*" \
@@ -181,8 +186,8 @@ create_tag() {
 }
 
 compare_branches() {
-  from="$1"
-  to="$2"
+  from="$(urlencode_ref "$1")"
+  to="$(urlencode_ref "$2")"
   api GET "${PROJECT_API}/repository/compare?from=${from}&to=${to}"
 }
 
@@ -223,3 +228,41 @@ derive_tag_from_hotfix() {
   printf '%s' "$1" | awk -F/ '{print "v"$2}'
 }
 
+derive_feature_branch() {
+  require_version "$VERSION"
+  ticket="$(upper_ticket "$TASK_ID")"
+  desc="$(clean_name "$DESCRIPTION")"
+  printf 'feature/%s/%s-%s' "$VERSION" "$ticket" "$desc"
+}
+
+derive_bugfix_branch() {
+  require_version "$VERSION"
+  bug="$(upper_ticket "$BUG_ID")"
+  desc="$(clean_name "$DESCRIPTION")"
+  printf 'bugfix/%s/%s-%s' "$VERSION" "$bug" "$desc"
+}
+
+derive_hotfix_branch() {
+  new_version="$(increment_patch "$CURRENT_VERSION")"
+  bug="$(upper_ticket "$BUG_ID")"
+  desc="$(clean_name "$DESCRIPTION")"
+  printf 'hotfix/%s/%s-%s' "$new_version" "$bug" "$desc"
+}
+
+resolve_fix_branch() {
+  if [ -n "${FIX_BRANCH:-}" ]; then
+    printf '%s' "$FIX_BRANCH"
+    return 0
+  fi
+  require_version "$VERSION"
+  if [ -n "${RC_NUMBER:-}" ]; then
+    printf 'fix/%s-rc%s' "$VERSION" "$RC_NUMBER"
+    return 0
+  fi
+  latest="$(latest_fix_branch "$VERSION" || true)"
+  if [ -z "$latest" ]; then
+    err "cannot find fix branch for version ${VERSION}. Create fix branch first or set rc_number/fix_branch."
+    exit 2
+  fi
+  printf '%s' "$latest"
+}

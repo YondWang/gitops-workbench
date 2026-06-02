@@ -1,12 +1,11 @@
-sync_check:
+button_sync_check:
   extends: .gitops_base
-  stage: sync
-  rules:
-    - if: '$OPERATION == "sync_check"'
+  variables:
+    OPERATION: "sync_check"
   script:
+    - FIX_BRANCH="$(resolve_fix_branch)"
     - version="$(printf '%s' "$FIX_BRANCH" | sed -E 's#^fix/([^/]+)-rc[0-9]+$#\1#')"
     - baseline="baseline/${version}"
     - log "checking unsynced commits from ${baseline} to ${FIX_BRANCH}"
     - list_compare_commit_ids "$baseline" "$FIX_BRANCH" || true
     - ok "sync check completed"
-

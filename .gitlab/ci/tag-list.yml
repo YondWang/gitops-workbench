@@ -1,8 +1,6 @@
-tag_list:
+button_tag_list:
   extends: .gitops_base
-  stage: query
-  rules:
-    - if: '$OPERATION == "tag_list"'
+  variables:
+    OPERATION: "tag_list"
   script:
     - api GET "${PROJECT_API}/repository/tags?per_page=100" | { if [ -n "$PATTERN" ]; then grep "$PATTERN" || true; else cat; fi; }
-

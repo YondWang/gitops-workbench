@@ -1,12 +1,11 @@
-release_stable:
+button_release_stable:
   extends: .gitops_base
-  stage: release
-  rules:
-    - if: '$OPERATION == "release_stable"'
+  variables:
+    OPERATION: "release_stable"
   script:
     - require_version "$VERSION"
+    - if [ -z "${FROM_TAG:-}" ]; then FROM_TAG="v${VERSION}"; fi
     - stable="stable/$(get_major_minor "$VERSION")"
     - branch_create "$stable" "$FROM_TAG"
     - branch_protect "$stable" 0 0
     - ok "stable archive branch ready: ${stable}"
-

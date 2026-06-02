@@ -1,8 +1,7 @@
-fix_create:
+button_fix_create:
   extends: .gitops_base
-  stage: branch
-  rules:
-    - if: '$OPERATION == "fix_create"'
+  variables:
+    OPERATION: "fix_create"
   script:
     - require_version "$VERSION"
     - rc="${RC_NUMBER:-$(next_rc_number "$VERSION")}"
@@ -11,4 +10,3 @@ fix_create:
     - branch_protect "$branch" 0 40
     - ok "fix branch ready for testing: ${branch}"
     - log "recommended tag later: v${VERSION}-rc${rc}"
-
