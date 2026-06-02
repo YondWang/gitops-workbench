@@ -1,0 +1,11 @@
+feature_merge:
+  extends: .gitops_base
+  stage: merge
+  rules:
+    - if: '$OPERATION == "feature_merge"'
+  script:
+    - version="$(get_version_from_feature "$FEATURE_BRANCH")"
+    - target="baseline/${version}"
+    - create_mr "$FEATURE_BRANCH" "$target" "[${version}][feature] merge ${FEATURE_BRANCH}"
+    - log "review and merge this MR in GitLab"
+

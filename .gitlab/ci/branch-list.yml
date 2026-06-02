@@ -1,0 +1,9 @@
+branch_list:
+  extends: .gitops_base
+  stage: query
+  rules:
+    - if: '$OPERATION == "branch_list"'
+  script:
+    - query="${PATTERN:+&search=${PATTERN}}"
+    - api GET "${PROJECT_API}/repository/branches?per_page=100${query}"
+

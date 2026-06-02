@@ -1,0 +1,12 @@
+version_status:
+  extends: .gitops_base
+  stage: query
+  rules:
+    - if: '$OPERATION == "version_status"'
+  script:
+    - if [ -n "$VERSION" ]; then search="$VERSION"; else search=""; fi
+    - log "branches for version filter: ${search:-all}"
+    - api GET "${PROJECT_API}/repository/branches?per_page=100&search=${search}"
+    - log "tags for version filter: ${search:-all}"
+    - api GET "${PROJECT_API}/repository/tags?per_page=100" | { if [ -n "$search" ]; then grep "$search" || true; else cat; fi; }
+

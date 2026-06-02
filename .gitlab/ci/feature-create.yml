@@ -1,0 +1,13 @@
+feature_create:
+  extends: .gitops_base
+  stage: branch
+  rules:
+    - if: '$OPERATION == "feature_create"'
+  script:
+    - require_version "$VERSION"
+    - ticket="$(upper_ticket "$TASK_ID")"
+    - desc="$(clean_name "$DESCRIPTION")"
+    - branch="feature/${VERSION}/${ticket}-${desc}"
+    - branch_create "$branch" "baseline/${VERSION}"
+    - ok "feature branch ready: ${branch}"
+

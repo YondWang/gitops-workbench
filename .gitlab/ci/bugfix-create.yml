@@ -1,0 +1,14 @@
+bugfix_create:
+  extends: .gitops_base
+  stage: branch
+  rules:
+    - if: '$OPERATION == "bugfix_create"'
+  script:
+    - require_version "$VERSION"
+    - rc="${RC_NUMBER:-1}"
+    - bug="$(upper_ticket "$BUG_ID")"
+    - desc="$(clean_name "$DESCRIPTION")"
+    - branch="bugfix/${VERSION}/${bug}-${desc}"
+    - branch_create "$branch" "fix/${VERSION}-rc${rc}"
+    - ok "bugfix branch ready: ${branch}"
+

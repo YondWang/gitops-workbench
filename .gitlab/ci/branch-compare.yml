@@ -1,0 +1,9 @@
+branch_compare:
+  extends: .gitops_base
+  stage: query
+  rules:
+    - if: '$OPERATION == "branch_compare"'
+  script:
+    - log "compare from=${FROM_BRANCH} to=${TO_BRANCH}"
+    - compare_branches "$FROM_BRANCH" "$TO_BRANCH"
+
