@@ -76,14 +76,39 @@ upper_ticket() {
     | sed -E 's/[^A-Z0-9]+//g; s/^$/TASK/'
 }
 
+require_safe_ref_name() {
+  value="$1"
+  label="${2:-ref}"
+  if [ -z "$value" ]; then
+    err "${label} cannot be empty"
+    exit 2
+  fi
+  case "$value" in
+    *%2F*|*%2f*|*%25*|*%*)
+      err "${label} looks URL-encoded, refuse to continue: ${value}"
+      exit 2
+      ;;
+    *' '*)
+      err "${label} cannot contain spaces: ${value}"
+      exit 2
+      ;;
+    */.|*.|*/..|*..*|*@{*|*\\*)
+      err "${label} contains unsafe git ref characters: ${value}"
+      exit 2
+      ;;
+  esac
+}
+
 branch_exists() {
-  branch="$(urlencode_ref "$1")"
-  api GET "${PROJECT_API}/repository/branches/${branch}" >/dev/null 2>&1
+  encoded_branch_ref="$(urlencode_ref "$1")"
+  api GET "${PROJECT_API}/repository/branches/${encoded_branch_ref}" >/dev/null 2>&1
 }
 
 branch_create() {
   branch="$1"
   ref="$2"
+  require_safe_ref_name "$branch" "branch"
+  require_safe_ref_name "$ref" "source ref"
   if branch_exists "$branch"; then
     warn "branch already exists: ${branch}"
     return 0
@@ -100,6 +125,7 @@ branch_protect() {
   name="$1"
   push_level="$2"
   merge_level="$3"
+  require_safe_ref_name "$name" "protected branch"
   log "protect branch: ${name} push=${push_level} merge=${merge_level}"
   if api POST "${PROJECT_API}/protected_branches" \
     --data-urlencode "name=${name}" \
@@ -162,6 +188,8 @@ create_mr() {
   source="$1"
   target="$2"
   title="$3"
+  require_safe_ref_name "$source" "MR source branch"
+  require_safe_ref_name "$target" "MR target branch"
   log "create MR: ${source} -> ${target}"
   api POST "${PROJECT_API}/merge_requests" \
     --data-urlencode "source_branch=${source}" \
@@ -176,6 +204,8 @@ create_tag() {
   tag="$1"
   ref="$2"
   message="${3:-$tag}"
+  require_safe_ref_name "$tag" "tag"
+  require_safe_ref_name "$ref" "tag ref"
   log "create tag: ${tag} on ${ref}"
   api POST "${PROJECT_API}/repository/tags" \
     --data-urlencode "tag_name=${tag}" \
@@ -186,6 +216,8 @@ create_tag() {
 }
 
 compare_branches() {
+  require_safe_ref_name "$1" "compare from"
+  require_safe_ref_name "$2" "compare to"
   from="$(urlencode_ref "$1")"
   to="$(urlencode_ref "$2")"
   api GET "${PROJECT_API}/repository/compare?from=${from}&to=${to}"
@@ -202,6 +234,8 @@ list_compare_commit_ids() {
 cherry_pick_commits() {
   source_branch="$1"
   target_branch="$2"
+  require_safe_ref_name "$source_branch" "cherry-pick source branch"
+  require_safe_ref_name "$target_branch" "cherry-pick target branch"
   commits="$(list_compare_commit_ids "$target_branch" "$source_branch" || true)"
   if [ -z "$commits" ]; then
     ok "no commits to cherry-pick: ${source_branch} -> ${target_branch}"
