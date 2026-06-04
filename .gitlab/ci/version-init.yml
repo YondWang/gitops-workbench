@@ -1,13 +1,13 @@
-version_init:
+button_version_init:
   extends: .gitops_base
-  stage: branch
-  rules:
-    - if: '$OPERATION == "version_init"'
+  variables:
+    OPERATION: "version_init"
   script:
-    - require_version "$VERSION"
-    - baseline="baseline/${VERSION}"
-    - branch_create "$baseline" "$FROM_REF"
-    - branch_protect "$baseline" 30 40
-    - ok "version initialized: ${VERSION}"
-    - log "next: create feature branches from ${baseline}"
-
+    - |
+      require_version "$VERSION"
+      source_ref="${FROM_REF:-fix}"
+      baseline="baseline/${VERSION}"
+      branch_create "$baseline" "$source_ref"
+      branch_protect "$baseline" 30 40
+      ok "version initialized: ${VERSION}"
+      log "next: create feature branches from ${baseline}"

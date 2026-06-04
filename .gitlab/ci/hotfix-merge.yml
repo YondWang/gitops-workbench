@@ -1,11 +1,11 @@
-hotfix_merge:
+button_hotfix_merge:
   extends: .gitops_base
-  stage: hotfix
-  rules:
-    - if: '$OPERATION == "hotfix_merge"'
+  variables:
+    OPERATION: "hotfix_merge"
   script:
-    - create_mr "$HOTFIX_BRANCH" "main" "[hotfix] ${HOTFIX_BRANCH}"
-    - tag="${TAG_NAME:-$(derive_tag_from_hotfix "$HOTFIX_BRANCH")}"
-    - create_tag "$tag" "$HOTFIX_BRANCH" "hotfix from ${HOTFIX_BRANCH}"
-    - if [ -n "$SYNC_TO_BASELINE" ]; then cherry_pick_commits "$HOTFIX_BRANCH" "baseline/${SYNC_TO_BASELINE}"; else warn "sync_to_baseline empty; skip baseline sync"; fi
-
+    - |
+      if [ -z "${HOTFIX_BRANCH:-}" ]; then HOTFIX_BRANCH="$(derive_hotfix_branch)"; fi
+      create_mr "$HOTFIX_BRANCH" "main" "[hotfix] ${HOTFIX_BRANCH}"
+      tag="${TAG_NAME:-$(derive_tag_from_hotfix "$HOTFIX_BRANCH")}"
+      create_tag "$tag" "$HOTFIX_BRANCH" "hotfix from ${HOTFIX_BRANCH}"
+      if [ -n "$SYNC_TO_BASELINE" ]; then cherry_pick_commits "$HOTFIX_BRANCH" "baseline/${SYNC_TO_BASELINE}"; else warn "sync_to_baseline empty; skip baseline sync"; fi

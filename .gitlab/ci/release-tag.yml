@@ -1,11 +1,11 @@
-release_tag:
+button_release_tag:
   extends: .gitops_base
-  stage: release
-  rules:
-    - if: '$OPERATION == "release_tag"'
+  variables:
+    OPERATION: "release_tag"
   script:
-    - tag="${TAG_NAME:-$(derive_tag_from_fix "$FIX_BRANCH")}"
-    - create_tag "$tag" "$FIX_BRANCH" "release from ${FIX_BRANCH}"
-    - if [ "$MERGE_TO_MAIN" = "true" ]; then create_mr "$FIX_BRANCH" "main" "[release] ${tag}"; else log "merge_to_main=false, skip MR to main"; fi
-    - ok "release tag flow completed: ${tag}"
-
+    - |
+      FIX_BRANCH="$(resolve_fix_branch)"
+      tag="${TAG_NAME:-$(derive_tag_from_fix "$FIX_BRANCH")}"
+      create_tag "$tag" "$FIX_BRANCH" "release from ${FIX_BRANCH}"
+      if [ "$MERGE_TO_MAIN" = "true" ]; then create_mr "$FIX_BRANCH" "main" "[release] ${tag}"; else log "merge_to_main=false, skip MR to main"; fi
+      ok "release tag flow completed: ${tag}"
