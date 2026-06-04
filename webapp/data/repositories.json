@@ -1,0 +1,14 @@
+{
+  "repositories": [
+    {
+      "id": "business",
+      "name": "business",
+      "base_url": "https://www.chancee-shanghai.cn:9900",
+      "project": "software_hmi_app/business",
+      "enabled": true,
+      "default_ref": "main",
+      "token_env": "GITLAB_TOKEN",
+      "ssl_verify": true
+    }
+  ]
+}

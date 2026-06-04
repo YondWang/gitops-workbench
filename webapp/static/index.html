@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GitLab Branch Workbench</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <section id="loginView" class="login-view">
+      <form id="loginForm" class="login-card">
+        <div class="mark">GB</div>
+        <h1>GitLab Branch Workbench</h1>
+        <p>登录后管理多个 GitLab 仓库的分支、Tag 和发版同步。</p>
+        <label>
+          用户名
+          <input name="username" autocomplete="username" value="admin" required />
+        </label>
+        <label>
+          密码
+          <input name="password" type="password" autocomplete="current-password" required />
+        </label>
+        <button class="primary wide">登录</button>
+        <div id="loginMessage" class="message"></div>
+      </form>
+    </section>
+
+    <main id="appView" class="shell hidden">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="mark">GB</div>
+          <div>
+            <h1>Branch Workbench</h1>
+            <p id="projectName">加载项目中...</p>
+          </div>
+        </div>
+        <nav>
+          <button class="nav-item active" data-view="overview">分支总览</button>
+          <button class="nav-item" data-view="baseline">Baseline</button>
+          <button class="nav-item" data-view="fix">Fix</button>
+          <button class="nav-item" data-view="feature">Feature</button>
+          <button class="nav-item" data-view="release">发版</button>
+          <button class="nav-item" data-view="repositories" data-admin-only>仓库管理</button>
+          <button class="nav-item" data-view="settings">配置</button>
+        </nav>
+      </aside>
+
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <div class="eyebrow">当前角色</div>
+            <div><strong id="currentUser">-</strong> <span id="currentRole" class="badge muted">-</span></div>
+          </div>
+          <div class="actions">
+            <select id="repositorySelect" class="repo-select"></select>
+            <input id="branchSearch" class="search" placeholder="搜索远端分支" />
+            <button id="refreshBtn" class="secondary">刷新</button>
+            <button id="logoutBtn">退出</button>
+          </div>
+        </header>
+
+        <section id="overview" class="view active-view">
+          <div class="grid two">
+            <article class="panel">
+              <div class="panel-title">
+                <h2>远端分支</h2>
+                <span id="branchCount" class="badge muted">0</span>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>分支</th>
+                      <th>类型</th>
+                      <th>保护</th>
+                      <th>最近提交</th>
+                    </tr>
+                  </thead>
+                  <tbody id="branchesBody"></tbody>
+                </table>
+              </div>
+            </article>
+            <article class="panel">
+              <div class="panel-title">
+                <h2>Tag</h2>
+                <span id="tagCount" class="badge muted">0</span>
+              </div>
+              <ul id="tagList" class="list"></ul>
+            </article>
+          </div>
+        </section>
+
+        <section id="baseline" class="view">
+          <article class="panel form-panel" data-admin-only>
+            <div class="panel-title">
+              <h2>Init Baseline</h2>
+            </div>
+            <form id="baselineForm">
+              <label>
+                操作范围
+                <select name="scope">
+                  <option value="single">当前仓库</option>
+                  <option value="all">全部启用仓库</option>
+                </select>
+              </label>
+              <label>
+                来源分支或 Tag
+                <select id="baselineRef" name="ref" required></select>
+              </label>
+              <label>
+                版本号
+                <input name="version" placeholder="3.2.0.0" required />
+              </label>
+              <button class="primary">创建 baseline/{version}</button>
+            </form>
+          </article>
+          <article class="panel readonly-panel" data-user-block>
+            <h2>权限不足</h2>
+            <p>初始化 baseline 需要 admin 角色。</p>
+          </article>
+        </section>
+
+        <section id="fix" class="view">
+          <article class="panel form-panel" data-admin-only>
+            <div class="panel-title">
+              <h2>从 Baseline 创建 Fix</h2>
+            </div>
+            <form id="fixForm">
+              <label>
+                操作范围
+                <select name="scope">
+                  <option value="single">当前仓库</option>
+                  <option value="all">全部启用仓库</option>
+                </select>
+              </label>
+              <label>
+                Baseline
+                <select id="fixBaseline" name="baseline" required></select>
+              </label>
+              <button class="primary">创建下一个 fix_{version}/rcN</button>
+            </form>
+          </article>
+          <article class="panel readonly-panel" data-user-block>
+            <h2>权限不足</h2>
+            <p>创建 fix 分支需要 admin 角色。</p>
+          </article>
+        </section>
+
+        <section id="feature" class="view">
+          <article class="panel form-panel">
+            <div class="panel-title">
+              <h2>从 Baseline 创建 Feature</h2>
+            </div>
+            <form id="featureForm">
+              <label>
+                操作范围
+                <select name="scope">
+                  <option value="single">当前仓库</option>
+                  <option value="all">全部启用仓库</option>
+                </select>
+              </label>
+              <label>
+                Baseline
+                <select id="featureBaseline" name="baseline" required></select>
+              </label>
+              <label>
+                任务号
+                <input name="ticket" placeholder="TASK1234" required />
+              </label>
+              <label>
+                描述
+                <input name="desc" placeholder="user-login" required />
+              </label>
+              <button class="primary">创建 feature 分支</button>
+            </form>
+          </article>
+        </section>
+
+        <section id="release" class="view">
+          <article class="panel form-panel" data-admin-only>
+            <div class="panel-title">
+              <h2>Fix 打 Tag 并同步 Baseline</h2>
+            </div>
+            <form id="releaseForm">
+              <label>
+                操作范围
+                <select name="scope">
+                  <option value="single">当前仓库</option>
+                  <option value="all">全部启用仓库</option>
+                </select>
+              </label>
+              <label>
+                Fix 分支
+                <select id="releaseFix" name="fix_branch" required></select>
+              </label>
+              <label>
+                目标 Baseline
+                <select id="releaseBaseline" name="baseline" required></select>
+              </label>
+              <label>
+                Tag 名称
+                <input name="tag_name" placeholder="留空使用 v{version}-rcN" />
+              </label>
+              <label>
+                发版说明
+                <textarea name="message" rows="4" placeholder="填写发版说明、验证范围和回滚方式"></textarea>
+              </label>
+              <button class="primary">创建 Tag 并同步 baseline</button>
+            </form>
+          </article>
+          <article class="panel readonly-panel" data-user-block>
+            <h2>权限不足</h2>
+            <p>打 Tag 和同步 baseline 需要 admin 角色。</p>
+          </article>
+        </section>
+
+        <section id="repositories" class="view">
+          <div class="grid two">
+            <article class="panel">
+              <div class="panel-title">
+                <h2>已管理仓库</h2>
+                <span id="repoCount" class="badge muted">0</span>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>ID</th>
+                      <th>项目</th>
+                      <th>Token</th>
+                      <th>状态</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="repositoriesBody"></tbody>
+                </table>
+              </div>
+            </article>
+            <article class="panel">
+              <div class="panel-title">
+                <h2>添加或编辑仓库</h2>
+              </div>
+              <form id="repositoryForm">
+                <label>
+                  仓库 ID
+                  <input name="id" placeholder="business" required />
+                </label>
+                <label>
+                  显示名称
+                  <input name="name" placeholder="business" required />
+                </label>
+                <label>
+                  GitLab 地址
+                  <input name="base_url" placeholder="https://www.chancee-shanghai.cn:9900" required />
+                </label>
+                <label>
+                  项目路径
+                  <input name="project" placeholder="software_hmi_app/business" required />
+                </label>
+                <label>
+                  默认来源分支
+                  <input name="default_ref" value="main" required />
+                </label>
+                <label>
+                  Token 环境变量
+                  <input name="token_env" value="GITLAB_TOKEN" required />
+                </label>
+                <label class="checkline">
+                  <input name="enabled" type="checkbox" checked />
+                  启用仓库
+                </label>
+                <label class="checkline">
+                  <input name="ssl_verify" type="checkbox" checked />
+                  校验 SSL 证书
+                </label>
+                <div class="button-row">
+                  <button class="primary" id="saveRepositoryBtn">保存仓库</button>
+                  <button type="button" id="resetRepositoryFormBtn">清空</button>
+                </div>
+              </form>
+            </article>
+          </div>
+        </section>
+
+        <section id="settings" class="view">
+          <article class="panel">
+            <div class="panel-title">
+              <h2>运行配置</h2>
+            </div>
+            <pre id="configOutput" class="terminal compact">等待加载...</pre>
+          </article>
+        </section>
+
+        <article class="panel log-panel">
+          <div class="panel-title">
+            <h2>操作结果</h2>
+            <button id="clearLogBtn">清空</button>
+          </div>
+          <pre id="logOutput" class="terminal log">暂无操作。</pre>
+        </article>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

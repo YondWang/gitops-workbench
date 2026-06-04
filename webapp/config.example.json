@@ -1,0 +1,23 @@
+{
+  "gitlab": {
+    "base_url": "https://www.chancee-shanghai.cn:9900",
+    "project": "software_hmi_app/business",
+    "ssl_verify": true
+  },
+  "repositories": [
+    {
+      "id": "business",
+      "name": "business",
+      "base_url": "https://www.chancee-shanghai.cn:9900",
+      "project": "software_hmi_app/business",
+      "enabled": true,
+      "default_ref": "main",
+      "token_env": "GITLAB_TOKEN",
+      "ssl_verify": true
+    }
+  ],
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8765
+  }
+}

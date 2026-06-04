@@ -204,3 +204,6 @@ cherry-pick failed
 .gitlab/ci/version-status.yml
 ```
 
+## Web 控制台
+
+GitLab 分支管理 Web 工具位于 `webapp/` 目录。根目录 `.gitlab-ci.yml` 和 `.gitlab/` 下的 pipeline 文件保持原有用途，不受 Web 工具影响。
