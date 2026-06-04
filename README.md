@@ -213,3 +213,30 @@ cherry-pick failed
 ```
 
 这时需要人工在对应目标分支解决冲突，再重新发起 MR 或手动 cherry-pick。
+
+## 7. 文件结构
+
+```text
+.gitlab-ci.yml
+.gitlab/scripts/git-utils.sh
+.gitlab/ci/version-init.yml
+.gitlab/ci/feature-create.yml
+.gitlab/ci/feature-merge.yml
+.gitlab/ci/fix-create.yml
+.gitlab/ci/bugfix-create.yml
+.gitlab/ci/bugfix-merge.yml
+.gitlab/ci/release-tag.yml
+.gitlab/ci/release-stable.yml
+.gitlab/ci/hotfix-create.yml
+.gitlab/ci/hotfix-merge.yml
+.gitlab/ci/branch-list.yml
+.gitlab/ci/branch-compare.yml
+.gitlab/ci/mr-list.yml
+.gitlab/ci/tag-list.yml
+.gitlab/ci/sync-check.yml
+.gitlab/ci/version-status.yml
+```
+
+## Web 控制台
+
+GitLab 分支管理 Web 工具位于 `webapp/` 目录。根目录 `.gitlab-ci.yml` 和 `.gitlab/` 下的 pipeline 文件保持原有用途，不受 Web 工具影响。
