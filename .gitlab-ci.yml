@@ -1,8 +1,9 @@
 spec:
   inputs:
     operation:
-      default: "branch_list"
+      default: "manual_buttons"
       options:
+        - "manual_buttons"
         - "version_init"
         - "feature_create"
         - "feature_merge"
@@ -19,7 +20,7 @@ spec:
         - "tag_list"
         - "sync_check"
         - "version_status"
-      description: "选择要执行的 GitOps 操作"
+      description: "兼容旧入口；按钮式流水线中可保持 manual_buttons"
     target_project:
       default: "software_hmi_app/business"
       description: "被管理的业务项目路径"
@@ -27,8 +28,8 @@ spec:
       default: "3.2.0.0"
       description: "版本号 A.B.C.D"
     from_ref:
-      default: "main"
-      description: "创建分支/版本时的来源 ref"
+      default: ""
+      description: "创建来源 ref；初始化版本留空默认 fix，hotfix 留空默认 main"
     task_id:
       default: "TASK1234"
       description: "功能任务编号"
@@ -39,17 +40,17 @@ spec:
       default: "short-desc"
       description: "英文短描述，用于分支名"
     feature_branch:
-      default: "feature/3.2.0.0/TASK1234-short-desc"
-      description: "功能分支名"
+      default: ""
+      description: "功能分支名；留空时按 version/task_id/description 自动推导"
     bugfix_branch:
-      default: "bugfix/3.2.0.0/BUG001-short-desc"
-      description: "Bugfix 分支名"
+      default: ""
+      description: "Bugfix 分支名；留空时按 version/bug_id/description 自动推导"
     fix_branch:
-      default: "fix/3.2.0.0-rc1"
-      description: "Fix/RC 分支名"
+      default: ""
+      description: "Fix/RC 分支名；留空时自动选择当前版本最新 RC"
     hotfix_branch:
-      default: "hotfix/3.2.0.1/BUG999-critical"
-      description: "Hotfix 分支名"
+      default: ""
+      description: "Hotfix 分支名；留空时按 current_version/bug_id/description 自动推导"
     rc_number:
       default: ""
       description: "RC 编号；留空时自动递增"
@@ -57,8 +58,8 @@ spec:
       default: ""
       description: "Tag 名；留空时自动推导"
     from_tag:
-      default: "v3.2.0.0"
-      description: "创建 stable 分支时的来源 tag"
+      default: ""
+      description: "创建 stable 分支时的来源 tag；留空时按 v{version} 推导"
     current_version:
       default: "3.2.0.0"
       description: "Hotfix 当前线上版本号"
@@ -97,11 +98,7 @@ workflow:
 image: docker.m.daocloud.io/curlimages/curl:latest
 
 stages:
-  - query
-  - branch
-  - merge
-  - release
-  - sync
+  - operate
 
 variables:
   GITLAB_API_URL: "https://www.chancee-shanghai.cn:9900/api/v4"
@@ -130,6 +127,9 @@ variables:
   TARGET_BRANCH_FILTER: "$[[ inputs.target_branch ]]"
 
 .gitops_base:
+  stage: operate
+  when: manual
+  allow_failure: false
   before_script:
     - set -eu
     - . .gitlab/scripts/git-utils.sh
