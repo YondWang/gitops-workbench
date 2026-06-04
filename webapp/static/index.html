@@ -108,9 +108,19 @@
                 <select id="baselineRef" name="ref" required></select>
               </label>
               <label>
-                版本号
-                <input name="version" placeholder="3.2.0.0" required />
+                变更类型
+                <select id="baselineBumpType" name="bump_type">
+                  <option value="minor">新功能基线：B+1，C/D 清零</option>
+                  <option value="patch">修复/优化：C+1，D 清零</option>
+                  <option value="build">构建/热修复：D+1</option>
+                  <option value="major">架构不兼容：A+1，B/C/D 清零</option>
+                </select>
               </label>
+              <label>
+                版本号
+                <input id="baselineVersion" name="version" placeholder="留空自动生成，例如 3.2.0.0" />
+              </label>
+              <button type="button" id="suggestBaselineVersionBtn" class="secondary">自动填充版本号</button>
               <button class="primary">创建 baseline/{version}</button>
             </form>
           </article>

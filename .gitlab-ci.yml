@@ -90,6 +90,10 @@ spec:
       default: ""
       description: "MR 目标分支过滤"
 ---
+workflow:
+  rules:
+    - when: never
+
 image: docker.m.daocloud.io/curlimages/curl:latest
 
 stages:

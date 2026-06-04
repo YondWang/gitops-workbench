@@ -23,6 +23,7 @@ from branch_policy import (
     parse_fix,
     require_ref_name,
     require_version,
+    version_suggestions,
 )
 from gitlab_client import GitLabClient, GitLabConfig, GitLabError
 from repository_store import RepositoryConfig, RepositoryStore
@@ -126,21 +127,35 @@ class GitOpsApp:
             "tags": tags,
         }
 
+    def suggest_versions(self, repo_id: str) -> dict[str, Any]:
+        target = self.target(repo_id)
+        names = target.client.branch_names() + target.client.tag_names()
+        return {
+            "ok": True,
+            "repository": target.repo.public_dict(self.token_loaded(target.repo)),
+            "suggestions": version_suggestions(names),
+        }
+
     def init_baseline(self, payload: dict[str, Any]) -> dict[str, Any]:
-        version = require_version(str(payload.get("version", "")))
+        requested_version = str(payload.get("version", "")).strip()
+        bump_type = str(payload.get("bump_type", "minor")).strip() or "minor"
+        explicit_version = require_version(requested_version) if requested_version else ""
         ref = require_ref_name(str(payload.get("ref", "")), "来源分支")
-        branch = baseline_branch(version)
+        if bump_type not in {"major", "minor", "patch", "build"}:
+            raise ValueError("版本变更类型仅支持 major/minor/patch/build")
 
         def precheck(target: OperationTarget) -> dict[str, Any]:
             refs = set(target.client.branch_names()) | set(target.client.tag_names())
             if ref not in refs:
                 raise ValueError(f"来源不存在：{ref}")
+            version = explicit_version or version_suggestions(list(refs))[bump_type]
+            branch = baseline_branch(version)
             if branch in refs:
                 raise ValueError(f"目标 baseline 已存在：{branch}")
-            return {"branch": branch, "ref": ref}
+            return {"branch": branch, "ref": ref, "version": version, "bump_type": bump_type, "auto_generated": not explicit_version}
 
-        def execute(target: OperationTarget, _: dict[str, Any]) -> dict[str, Any]:
-            return {"branch": branch, "ref": ref, "created": target.client.create_branch(branch, ref)}
+        def execute(target: OperationTarget, context: dict[str, Any]) -> dict[str, Any]:
+            return {**context, "created": target.client.create_branch(context["branch"], ref)}
 
         return self.run_operation(payload, "init_baseline", precheck, execute)
 
@@ -416,6 +431,7 @@ def make_handler(app: GitOpsApp):
                 "/api/project": ("view", lambda: app.project(query.get("repository_id", ""))),
                 "/api/branches": ("view", lambda: app.branches(query.get("repository_id", ""), query.get("search", ""))),
                 "/api/tags": ("view", lambda: app.tags(query.get("repository_id", ""), query.get("search", ""))),
+                "/api/version/suggestions": ("view", lambda: app.suggest_versions(query.get("repository_id", ""))),
             }
             repo_route = match_repo_get(path)
             if repo_route:

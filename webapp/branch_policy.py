@@ -4,8 +4,10 @@ import re
 from dataclasses import dataclass
 
 
-VERSION_RE = re.compile(r"^\d+\.\d+\.\d+\.\d+$")
+VERSION_RE = re.compile(r"^[Vv]?(\d{1,4})\.(\d{1,4})\.(\d{1,4})\.(\d{1,4})$")
+VERSION_IN_TEXT_RE = re.compile(r"[Vv]?(\d{1,4})\.(\d{1,4})\.(\d{1,4})\.(\d{1,4})")
 SAFE_REF_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+MAX_VERSION_PART = 9999
 
 
 @dataclass(frozen=True)
@@ -15,11 +17,94 @@ class FixBranch:
     rc: int
 
 
+@dataclass(frozen=True, order=True)
+class Version:
+    major: int
+    minor: int
+    patch: int
+    revision: int
+
+    def normalized(self) -> str:
+        return f"{self.major}.{self.minor}.{self.patch}.{self.revision}"
+
+    def display(self) -> str:
+        return f"V{self.normalized()}"
+
+
 def require_version(version: str) -> str:
+    return parse_version(version).normalized()
+
+
+def parse_version(version: str) -> Version:
     value = version.strip()
-    if not VERSION_RE.fullmatch(value):
+    match = VERSION_RE.fullmatch(value)
+    if not match:
         raise ValueError("版本号必须是四段式，例如 3.2.0.0")
-    return value
+    parts = tuple(int(item) for item in match.groups())
+    if any(part > MAX_VERSION_PART for part in parts):
+        raise ValueError("版本号每段不能超过 4 位")
+    return Version(*parts)
+
+
+def bump_version(version: str, bump_type: str) -> str:
+    current = parse_version(version)
+    bump = (bump_type or "minor").strip().lower()
+    if bump == "major":
+        next_version = Version(current.major + 1, 0, 0, 0)
+    elif bump == "minor":
+        next_version = Version(current.major, current.minor + 1, 0, 0)
+    elif bump == "patch":
+        next_version = Version(current.major, current.minor, current.patch + 1, 0)
+    elif bump in {"build", "revision"}:
+        next_version = Version(current.major, current.minor, current.patch, current.revision + 1)
+    else:
+        raise ValueError("版本变更类型仅支持 major/minor/patch/build")
+    return normalize_overflow(next_version).normalized()
+
+
+def normalize_overflow(version: Version) -> Version:
+    major, minor, patch, revision = version.major, version.minor, version.patch, version.revision
+    if revision > MAX_VERSION_PART:
+        patch += 1
+        revision = 0
+    if patch > MAX_VERSION_PART:
+        minor += 1
+        patch = 0
+    if minor > MAX_VERSION_PART:
+        major += 1
+        minor = 0
+    if major > MAX_VERSION_PART:
+        raise ValueError("版本号已超过四段式最大范围")
+    return Version(major, minor, patch, revision)
+
+
+def extract_versions(values: list[str]) -> list[Version]:
+    versions: list[Version] = []
+    for value in values:
+        for match in VERSION_IN_TEXT_RE.finditer(value):
+            try:
+                versions.append(Version(*(int(item) for item in match.groups())))
+            except ValueError:
+                continue
+    return versions
+
+
+def latest_version(values: list[str], default: str = "0.0.0.0") -> str:
+    versions = extract_versions(values)
+    if not versions:
+        return require_version(default)
+    return max(versions).normalized()
+
+
+def version_suggestions(values: list[str], default: str = "0.0.0.0") -> dict[str, str]:
+    latest = latest_version(values, default)
+    return {
+        "latest": latest,
+        "major": bump_version(latest, "major"),
+        "minor": bump_version(latest, "minor"),
+        "patch": bump_version(latest, "patch"),
+        "build": bump_version(latest, "build"),
+    }
 
 
 def safe_ref_name(name: str) -> bool:

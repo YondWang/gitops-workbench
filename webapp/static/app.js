@@ -227,6 +227,27 @@ async function handleOperation(title, path, form) {
   await refreshAll();
 }
 
+async function suggestBaselineVersion() {
+  if (!state.currentRepositoryId) {
+    appendLog("自动生成版本号失败", "请先选择仓库");
+    return;
+  }
+  const data = await api(`/api/version/suggestions?repository_id=${encodeURIComponent(state.currentRepositoryId)}`);
+  const bumpType = $("#baselineBumpType").value;
+  const version = data.suggestions?.[bumpType];
+  if (!version) {
+    appendLog("自动生成版本号失败", data);
+    return;
+  }
+  $("#baselineVersion").value = version;
+  appendLog("自动生成版本号", {
+    repository: state.currentRepositoryId,
+    latest: data.suggestions.latest,
+    bump_type: bumpType,
+    version,
+  });
+}
+
 function summarizeOperationResult(result) {
   if (!result || !Array.isArray(result.results)) return result;
   return {
@@ -311,6 +332,10 @@ function bindEvents() {
   $("#baselineForm").addEventListener("submit", (event) => {
     event.preventDefault();
     handleOperation("Init baseline", "/api/baseline/init", event.currentTarget).catch((error) => appendLog("Init baseline 失败", error.message));
+  });
+
+  $("#suggestBaselineVersionBtn").addEventListener("click", () => {
+    suggestBaselineVersion().catch((error) => appendLog("自动生成版本号失败", error.message));
   });
 
   $("#fixForm").addEventListener("submit", (event) => {
