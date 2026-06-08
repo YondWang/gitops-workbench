@@ -1,17 +1,47 @@
 # GitLab Branch Workbench
 
-轻量 Web 分支管理工具。后端使用 Python 标准库，核心 Git 操作统一通过 GitLab REST API v4 完成，不依赖本地 clone。工具支持在页面中维护多个 GitLab 仓库，并选择对当前仓库或全部启用仓库执行一键操作。
+轻量 Web 分支管理工具。后端使用 Python 标准库，核心 Git 操作统一通过 GitLab REST API v4 完成，不依赖本地 clone。工具支持维护多个 GitLab 仓库，并可选择对当前仓库或全部启用仓库执行创建操作。
 
 ## 功能
 
 - 页面中添加、编辑、启用、停用多个 GitLab 仓库。
 - 读取并分组展示当前仓库的远端分支和 Tag。
-- 从任意来源分支初始化 `baseline/{version}`。
-- 从 baseline 创建下一个 `fix_{version}/rcN`。
-- 从 baseline 创建 `feature/{version}/{TASKID-desc}`。
-- 从 fix 分支创建发版 Tag，再创建并尝试合并 `fix -> baseline` Merge Request。
+- `admin` 可从指定来源分支或 Tag 创建唯一 `release` 分支。
+- `user` 和 `admin` 可从 `release`、`bugfix/<版本号>` 或迁移期 `fix` 创建 `feature/{TASKID}_{desc}`。
+- `admin` 可从指定来源分支或 Tag 创建版本级长期分支 `bugfix/<版本号>`。
+- `admin` 可基于分支创建 Tag，默认命名为 `<来源>-<yyyyMMddHHmmss>`；来源分支中的 `/` 会替换为 `-`。
 - 写操作可选择“当前仓库”或“全部启用仓库”；全部仓库会先做预检查，预检查失败时不会写任何仓库。
-- 简单登录与角色权限：`user` 可查看和创建 feature；`admin` 可执行 baseline、fix、发版和 MR 操作。
+
+Web 工具只做分支创建和 Tag 创建，不做 Feature 合入、Bugfix 同步或自动 MR。Feature 合回来源分支、Bugfix 发版后同步回 `release`，统一在 GitLab MR 中完成。
+
+## 分支规则
+
+```text
+release
+feature/{TASKID}_{desc}
+bugfix/<版本号>
+```
+
+规则摘要：
+
+- `release` 只有一个，是下一版本功能集成和提测分支。
+- `feature/*` 可以从 `release`、`bugfix/<版本号>` 或迁移期 `fix` 拉出。
+- `feature/*` 必须遵循“从哪拉出，就合入到哪”的原则。
+- `bugfix/<版本号>` 是版本级长期维护分支，不是个人问题级短分支。
+- `bugfix/<版本号>` 稳定节点在自身分支打 Tag 进行提测或发版。
+- Bugfix 发版后，修复内容必须通过 GitLab MR 同步回 `release`。
+
+## 迁移说明
+
+当前项目如果仍存在 `fix` 和 `dev`：
+
+- 将现有 `fix` 视为上一版本的 Bugfix 维护线，暂时不强制重命名。
+- 所有上一版本或历史版本发现的问题继续在 `fix` 修复。
+- 从 `fix` 拉出新的 `release`。
+- 新版本常规功能从 `release` 拉出 `feature/*`。
+- 新版本固定版本修复从 `release` 拉出新的 `bugfix/<版本号>`。
+- 如果上一版本的小需求必须进入 `fix`，可以从 `fix` 拉出 Feature，但必须合回 `fix`。
+- `dev` 不再作为新规则下的功能开发来源。
 
 ## 配置
 
@@ -37,29 +67,6 @@ data/repositories.json
 
 该文件只保存 GitLab 地址、项目路径和 Token 环境变量名，不保存 Token 明文。
 
-## 版本号自动生成
-
-Baseline 初始化时，版本号可以留空，由后端根据当前仓库已有分支和 Tag 中的最大四段式版本自动生成。
-
-变更类型对应规则：
-
-```text
-major  架构不兼容：A+1，B/C/D 清零
-minor  新功能基线：B+1，C/D 清零
-patch  修复/优化：C+1，D 清零
-build  构建/热修复：D+1
-```
-
-例如当前仓库最大版本为 `3.2.0.0`：
-
-```text
-minor -> 3.3.0.0
-patch -> 3.2.1.0
-build -> 3.2.0.1
-```
-
-前端也提供“自动填充版本号”按钮，便于操作前预览生成结果；特殊场景仍可手动覆盖。
-
 默认登录账号：
 
 ```text
@@ -81,14 +88,4 @@ python3 server.py --host 127.0.0.1 --port 8765
 http://127.0.0.1:8765
 ```
 
-Ubuntu 22.04 服务器迁移时，只需要 Python 3、项目文件和可访问 GitLab 的网络环境。
-
-## 分支规则
-
-```text
-baseline/{version}
-fix_{version}/rcN
-feature/{version}/{TASKID-desc}
-```
-
-版本号必须为四段式，例如 `3.2.0.0`。发版默认 Tag 为 `v{version}-rcN`，页面中可以手动覆盖。
+服务器迁移时，只需要 Python 3、项目文件和可访问 GitLab 的网络环境。

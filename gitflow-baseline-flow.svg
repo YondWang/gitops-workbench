@@ -1,0 +1,174 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="2500" viewBox="0 0 1800 2500">
+  <defs>
+    <style>
+      .bg { fill: #f7f7f5; }
+      .title { font-family: Arial, "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; font-size: 72px; font-weight: 800; fill: #111; }
+      .subtitle { font-family: Arial, "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; font-size: 28px; fill: #555; }
+      .section { font-family: Arial, "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; font-size: 28px; font-weight: 800; fill: #333; }
+      .lane { stroke: #deded9; stroke-width: 8; }
+      .header { stroke: #111; stroke-width: 4; rx: 22; ry: 22; }
+      .headerText { font-family: Arial, "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; font-size: 34px; font-weight: 800; fill: #111; text-anchor: middle; }
+      .smallHeader { font-family: Arial, "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; font-size: 20px; fill: #333; text-anchor: middle; }
+      .node { stroke: #111; stroke-width: 4; }
+      .nodeText { font-family: Arial, "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; font-size: 21px; font-weight: 800; fill: #111; text-anchor: middle; dominant-baseline: middle; }
+      .note { fill: #fff; stroke: #88a4ac; stroke-width: 3; stroke-dasharray: 7 7; rx: 12; ry: 12; }
+      .noteText { font-family: Arial, "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; font-size: 22px; fill: #17232a; font-weight: 700; text-anchor: middle; }
+      .tag { fill: #ffe9a8; stroke: #9d833d; stroke-width: 3; rx: 12; ry: 12; }
+      .tagText { font-family: Arial, "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; font-size: 23px; font-weight: 800; fill: #111; text-anchor: middle; }
+      .rule { fill: #fff; stroke: #d2d2cc; stroke-width: 2; rx: 16; ry: 16; }
+      .ruleTitle { font-family: Arial, "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; font-size: 26px; font-weight: 800; fill: #111; }
+      .ruleText { font-family: Arial, "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; font-size: 22px; fill: #333; }
+      .arrow { fill: none; stroke: #111; stroke-width: 4; stroke-dasharray: 10 12; marker-end: url(#arrowhead); }
+      .solidArrow { fill: none; stroke: #111; stroke-width: 4; marker-end: url(#arrowhead); }
+      .thin { stroke-width: 3; }
+    </style>
+    <marker id="arrowhead" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto">
+      <path d="M 0 0 L 12 5 L 0 10 z" fill="#111"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1800" height="2500"/>
+
+  <text class="title" x="90" y="105">三分支 Git 版本管理流程</text>
+  <text class="subtitle" x="95" y="154">release 唯一主线 · feature 从 release / bugfix / 迁移期 fix 拉出并合回来源 · bugfix 版本级长期维护</text>
+
+  <!-- Swimlane guide lines -->
+  <line class="lane" x1="250" y1="315" x2="250" y2="2240"/>
+  <line class="lane" x1="680" y1="315" x2="680" y2="2240"/>
+  <line class="lane" x1="1110" y1="315" x2="1110" y2="2240"/>
+  <line class="lane" x1="1530" y1="315" x2="1530" y2="2240"/>
+
+  <!-- Headers -->
+  <rect class="header" x="105" y="190" width="290" height="128" fill="#d7efff"/>
+  <text class="headerText" x="250" y="248">Release</text>
+  <text class="smallHeader" x="250" y="284">唯一功能集成 / 下一版本提测</text>
+
+  <rect class="header" x="535" y="190" width="290" height="128" fill="#ffd7d8"/>
+  <text class="headerText" x="680" y="248">Feature/*</text>
+  <text class="smallHeader" x="680" y="284">短期功能开发分支</text>
+
+  <rect class="header" x="965" y="190" width="290" height="128" fill="#d7f9df"/>
+  <text class="headerText" x="1110" y="248">Bugfix/&lt;版本号&gt;</text>
+  <text class="smallHeader" x="1110" y="284">版本级长期维护分支</text>
+
+  <!-- <rect class="header" x="1395" y="190" width="270" height="128" fill="#fff0ce"/>
+  <text class="headerText" x="1530" y="248">Tag / QA</text> -->
+  <!-- <text class="smallHeader" x="1530" y="284">提测 / 发版节点</text> -->
+
+  <!-- Rules card -->
+  <rect class="rule" x="90" y="2265" width="1620" height="165"/>
+  <text class="ruleTitle" x="125" y="2310">关键规则</text>
+  <text class="ruleText" x="125" y="2350">1. `release` 只有一个；`feature/*` 可从 `release`、`bugfix/&lt;版本号&gt;` 或迁移期 `fix` 拉出，完成后合回来源分支。</text>
+  <text class="ruleText" x="125" y="2386">2. `bugfix/&lt;版本号&gt;` 是版本级长期分支，不是 `bugfix/&lt;版本号&gt;/&lt;问题号&gt;_&lt;简述&gt;` 个人短分支。</text>
+  <text class="ruleText" x="125" y="2422">3. `bugfix/&lt;版本号&gt;` 稳定节点打 Tag 提测/发版，发版后必须同步回 `release`。</text>
+
+  <!-- Section 1: release + feature -->
+  <text class="section" x="90" y="380">1. Feature 从 release / bugfix / 迁移期 fix 拉出，完成后合回来源分支</text>
+
+  <circle class="node" cx="250" cy="470" r="40" fill="#32d981"/>
+  <text class="nodeText" x="250" y="470">Rel</text>
+  <rect class="note" x="90" y="520" width="320" height="78"/>
+  <text class="noteText" x="250" y="552">release唯一主线</text>
+  <text class="noteText" x="250" y="582">当前可集成状态</text>
+
+  <circle class="node" cx="680" cy="620" r="40" fill="#3349f5"/>
+  <text class="nodeText" x="680" y="620">F1</text>
+  <path class="arrow" d="M 288 486 C 420 500, 560 560, 645 602"/>
+  <rect class="note" x="500" y="465" width="360" height="82"/>
+  <text class="noteText" x="680" y="498">feature/TASK-1001_xxx</text>
+  <text class="noteText" x="680" y="528">从 release / bugfix / fix 拉出</text>
+
+  <circle class="node" cx="680" cy="785" r="40" fill="#3349f5"/>
+  <text class="nodeText" x="680" y="785">开发</text>
+  <path class="arrow" d="M 680 660 L 680 742"/>
+  <rect class="note" x="500" y="830" width="360" height="82"/>
+  <text class="noteText" x="680" y="862">功能开发 / 自测</text>
+  <text class="noteText" x="680" y="892">Review + CI + 静态检查</text>
+
+  <circle class="node" cx="250" cy="930" r="40" fill="#32d981"/>
+  <text class="nodeText" x="250" y="930">合入</text>
+  <path class="arrow" d="M 645 810 C 520 850, 390 900, 290 922"/>
+  <rect class="note" x="90" y="980" width="330" height="78"/>
+  <text class="noteText" x="255" y="1012">feature/* → 来源分支</text>
+  <text class="noteText" x="255" y="1042">从哪拉出就合回哪</text>
+
+  <circle class="node" cx="680" cy="1085" r="40" fill="#3349f5"/>
+  <text class="nodeText" x="680" y="1085">F2</text>
+  <path class="arrow" d="M 286 948 C 430 975, 565 1030, 646 1068"/>
+  <rect class="note" x="505" y="1128" width="350" height="70"/>
+  <text class="noteText" x="680" y="1156">多个 Feature 可并行</text>
+  <text class="noteText" x="680" y="1185">但都合回 release</text>
+
+  <circle class="node" cx="250" cy="1235" r="40" fill="#32d981"/>
+  <text class="nodeText" x="250" y="1235">提测</text>
+  <path class="arrow" d="M 645 1108 C 510 1150, 385 1200, 290 1228"/>
+  <rect class="note" x="80" y="1286" width="350" height="82"/>
+  <text class="noteText" x="255" y="1318">下一版本提测</text>
+  <text class="noteText" x="255" y="1348">基于 release</text>
+
+  <circle class="node" cx="1530" cy="1235" r="36" fill="#ff8a00"/>
+  <text class="nodeText" x="1530" y="1235">Tag</text>
+  <path class="arrow" d="M 290 1235 C 650 1190, 1110 1190, 1490 1228"/>
+  <rect class="tag" x="1400" y="1285" width="260" height="76"/>
+  <text class="tagText" x="1530" y="1316">release测试通过</text>
+  <text class="tagText" x="1530" y="1346">Tag: V1.1.0</text>
+
+  <!-- Section 2: bugfix version branch -->
+  <text class="section" x="90" y="1450">2. 当前固定版本进入 bugfix/&lt;版本号&gt; 长期维护线</text>
+
+  <circle class="node" cx="250" cy="1535" r="40" fill="#32d981"/>
+  <text class="nodeText" x="250" y="1535">V1.0</text>
+  <rect class="note" x="70" y="1585" width="360" height="82"/>
+  <text class="noteText" x="250" y="1617">来源：release稳定点</text>
+  <text class="noteText" x="250" y="1647">或版本Tag V1.0.0</text>
+
+  <circle class="node" cx="1110" cy="1535" r="42" fill="#22c55e"/>
+  <text class="nodeText" x="1110" y="1535">BF</text>
+  <path class="arrow" d="M 292 1535 C 540 1490, 850 1490, 1068 1528"/>
+  <rect class="note" x="900" y="1405" width="420" height="88"/>
+  <text class="noteText" x="1110" y="1438">创建或进入长期分支</text>
+  <text class="noteText" x="1110" y="1468">bugfix/V1.0.0</text>
+
+  <circle class="node" cx="1110" cy="1715" r="42" fill="#22c55e"/>
+  <text class="nodeText" x="1110" y="1715">修复</text>
+  <path class="arrow" d="M 1110 1578 L 1110 1670"/>
+  <rect class="note" x="885" y="1758" width="450" height="94"/>
+  <text class="noteText" x="1110" y="1790">同一版本多个问题</text>
+  <text class="noteText" x="1110" y="1820">都提交到 bugfix/V1.0.0</text>
+  <text class="noteText" x="1110" y="1850">问题号写入 Issue / MR / Commit</text>
+
+  <circle class="node" cx="1530" cy="1715" r="38" fill="#ff8a00"/>
+  <text class="nodeText" x="1530" y="1715">RC</text>
+  <path class="arrow" d="M 1150 1715 C 1280 1688, 1405 1688, 1490 1708"/>
+  <rect class="tag" x="1380" y="1760" width="300" height="112"/>
+  <text class="tagText" x="1530" y="1792">候选提测Tag</text>
+  <text class="tagText" x="1530" y="1822">bugfix-V1.0.0</text>
+  <text class="tagText" x="1530" y="1852">20260605143000</text>
+
+  <circle class="node" cx="1110" cy="1925" r="42" fill="#22c55e"/>
+  <text class="nodeText" x="1110" y="1925">稳定</text>
+  <path class="arrow" d="M 1110 1758 L 1110 1882"/>
+  <rect class="note" x="885" y="1970" width="450" height="82"/>
+  <text class="noteText" x="1110" y="2002">测试回归通过</text>
+  <text class="noteText" x="1110" y="2032">形成可交付稳定节点</text>
+
+  <circle class="node" cx="1530" cy="1925" r="38" fill="#ff8a00"/>
+  <text class="nodeText" x="1530" y="1925">P1</text>
+  <path class="arrow" d="M 1152 1925 C 1280 1898, 1405 1898, 1490 1918"/>
+  <rect class="tag" x="1380" y="1970" width="300" height="112"/>
+  <text class="tagText" x="1530" y="2002">修复发版Tag</text>
+  <text class="tagText" x="1530" y="2032">bugfix-V1.0.0</text>
+  <text class="tagText" x="1530" y="2062">20260606101530</text>
+
+  <circle class="node" cx="250" cy="2115" r="42" fill="#32d981"/>
+  <text class="nodeText" x="250" y="2115">同步</text>
+  <path class="arrow" d="M 1068 1945 C 820 2040, 520 2115, 292 2115"/>
+  <rect class="note" x="70" y="2160" width="395" height="82"/>
+  <text class="noteText" x="268" y="2192">bugfix/V1.0.0 → release</text>
+  <text class="noteText" x="268" y="2222">后续版本不丢已发布修复</text>
+
+  <!-- Prohibition note -->
+  <rect class="note" x="870" y="2110" width="520" height="82"/>
+  <text class="noteText" x="1130" y="2142">禁止个人问题级Bugfix分支</text>
+  <text class="noteText" x="1130" y="2172">不用 bugfix/V1.0.0/BUG-884_xxx</text>
+</svg>
