@@ -21,9 +21,9 @@ ROLE_PERMISSIONS = {
     "admin": {
         "view",
         "create_feature",
-        "init_baseline",
-        "create_fix",
-        "release",
+        "create_release",
+        "create_bugfix",
+        "create_tag",
         "admin",
     },
 }
