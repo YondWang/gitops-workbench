@@ -79,7 +79,7 @@ function renderSession() {
   const isAdmin = state.session.role === "admin";
   document.querySelectorAll("[data-admin-only]").forEach((el) => el.classList.toggle("hidden", !isAdmin));
   document.querySelectorAll("[data-user-block]").forEach((el) => el.classList.toggle("hidden", isAdmin));
-  if (!isAdmin && $("#repositories").classList.contains("active-view")) {
+  if (!isAdmin && ["release", "bugfix", "tag", "repositories"].some((id) => $(`#${id}`).classList.contains("active-view"))) {
     switchView("overview");
   }
 }
@@ -166,23 +166,31 @@ function renderTags() {
 
 function renderSelectOptions() {
   const allBranches = state.branches.map((item) => item.name).sort((a, b) => a.localeCompare(b));
-  const baselines = state.branches.filter((item) => item.kind === "baseline").map((item) => item.name);
-  const fixes = state.branches.filter((item) => item.kind === "fix").map((item) => item.name);
+  const tagNames = state.tags.map((item) => item.name).sort((a, b) => a.localeCompare(b));
+  const refs = [...allBranches, ...tagNames];
+  const featureSources = state.branches
+    .filter((item) => item.kind === "release" || item.kind === "bugfix")
+    .map((item) => item.name)
+    .sort((a, b) => a.localeCompare(b));
 
-  fillSelect("#baselineRef", allBranches);
-  fillSelect("#fixBaseline", baselines);
-  fillSelect("#featureBaseline", baselines);
-  fillSelect("#releaseFix", fixes);
-  fillSelect("#releaseBaseline", baselines);
+  fillSelect("#releaseRef", refs);
+  fillSelect("#featureRef", featureSources, "release");
+  fillSelect("#bugfixRef", refs, "release");
+  fillSelect("#tagRef", allBranches);
 }
 
-function fillSelect(selector, values) {
+function fillSelect(selector, values, preferred = "") {
   const select = $(selector);
+  if (!select) return;
   const previous = select.value;
   select.innerHTML =
     values.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("") ||
     `<option value="">暂无可选分支</option>`;
-  if (values.includes(previous)) select.value = previous;
+  if (values.includes(previous)) {
+    select.value = previous;
+  } else if (preferred && values.includes(preferred)) {
+    select.value = preferred;
+  }
 }
 
 async function refreshAll() {
@@ -225,27 +233,6 @@ async function handleOperation(title, path, form) {
   const result = await postJson(path, body);
   appendLog(title, summarizeOperationResult(result));
   await refreshAll();
-}
-
-async function suggestBaselineVersion() {
-  if (!state.currentRepositoryId) {
-    appendLog("自动生成版本号失败", "请先选择仓库");
-    return;
-  }
-  const data = await api(`/api/version/suggestions?repository_id=${encodeURIComponent(state.currentRepositoryId)}`);
-  const bumpType = $("#baselineBumpType").value;
-  const version = data.suggestions?.[bumpType];
-  if (!version) {
-    appendLog("自动生成版本号失败", data);
-    return;
-  }
-  $("#baselineVersion").value = version;
-  appendLog("自动生成版本号", {
-    repository: state.currentRepositoryId,
-    latest: data.suggestions.latest,
-    bump_type: bumpType,
-    version,
-  });
 }
 
 function summarizeOperationResult(result) {
@@ -329,20 +316,6 @@ function bindEvents() {
     button.addEventListener("click", () => switchView(button.dataset.view));
   });
 
-  $("#baselineForm").addEventListener("submit", (event) => {
-    event.preventDefault();
-    handleOperation("Init baseline", "/api/baseline/init", event.currentTarget).catch((error) => appendLog("Init baseline 失败", error.message));
-  });
-
-  $("#suggestBaselineVersionBtn").addEventListener("click", () => {
-    suggestBaselineVersion().catch((error) => appendLog("自动生成版本号失败", error.message));
-  });
-
-  $("#fixForm").addEventListener("submit", (event) => {
-    event.preventDefault();
-    handleOperation("创建 fix", "/api/fix/create", event.currentTarget).catch((error) => appendLog("创建 fix 失败", error.message));
-  });
-
   $("#featureForm").addEventListener("submit", (event) => {
     event.preventDefault();
     handleOperation("创建 feature", "/api/feature/create", event.currentTarget).catch((error) => appendLog("创建 feature 失败", error.message));
@@ -350,9 +323,17 @@ function bindEvents() {
 
   $("#releaseForm").addEventListener("submit", (event) => {
     event.preventDefault();
-    handleOperation("Tag 发版并同步 baseline", "/api/release", event.currentTarget).catch((error) =>
-      appendLog("发版失败", error.message),
-    );
+    handleOperation("创建 release", "/api/release/create", event.currentTarget).catch((error) => appendLog("创建 release 失败", error.message));
+  });
+
+  $("#bugfixForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    handleOperation("创建 bugfix", "/api/bugfix/create", event.currentTarget).catch((error) => appendLog("创建 bugfix 失败", error.message));
+  });
+
+  $("#tagForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    handleOperation("创建 Tag", "/api/tags/create", event.currentTarget).catch((error) => appendLog("创建 Tag 失败", error.message));
   });
 
   $("#repositoryForm").addEventListener("submit", (event) => {
