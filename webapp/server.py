@@ -52,6 +52,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
 }
 
+NO_ONE = 0
+MAINTAINER = 40
+
+BRANCH_PROTECTION = {
+    "release": {"push_access_level": NO_ONE, "merge_access_level": MAINTAINER},
+    "bugfix": {"push_access_level": NO_ONE, "merge_access_level": MAINTAINER},
+}
+
 
 @dataclass(frozen=True)
 class OperationTarget:
@@ -136,7 +144,7 @@ class GitOpsApp:
             return {"branch": branch, "ref": ref}
 
         def execute(target: OperationTarget, context: dict[str, Any]) -> dict[str, Any]:
-            return {**context, "created": target.client.create_branch(branch, ref)}
+            return {**context, **self.create_protected_branch(target, branch, ref, "release")}
 
         return self.run_operation(payload, "create_release", precheck, execute)
 
@@ -176,7 +184,7 @@ class GitOpsApp:
             return {"branch": branch, "ref": ref, "version": version}
 
         def execute(target: OperationTarget, context: dict[str, Any]) -> dict[str, Any]:
-            return {**context, "created": target.client.create_branch(context["branch"], context["ref"])}
+            return {**context, **self.create_protected_branch(target, context["branch"], context["ref"], "bugfix")}
 
         return self.run_operation(payload, "create_bugfix", precheck, execute)
 
@@ -199,6 +207,12 @@ class GitOpsApp:
             return {**context, "tag": target.client.create_tag(context["tag_name"], context["ref"], context["message"])}
 
         return self.run_operation(payload, "create_tag", precheck, execute)
+
+    def create_protected_branch(self, target: OperationTarget, branch: str, ref: str, kind: str) -> dict[str, Any]:
+        created = target.client.create_branch(branch, ref)
+        protection = BRANCH_PROTECTION[kind]
+        protected = target.client.protect_branch(branch, **protection)
+        return {"created": created, "protected": protected, "protection": protection}
 
     def run_operation(
         self,
