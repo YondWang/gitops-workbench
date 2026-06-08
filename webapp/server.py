@@ -13,17 +13,12 @@ from urllib.parse import parse_qs, urlparse
 
 from auth import AuthManager, login_cookie, logout_cookie, parse_cookie
 from branch_policy import (
-    baseline_branch,
+    bugfix_branch,
     classify_branch,
-    default_release_tag,
+    default_tag_name,
     feature_branch,
-    fix_branch,
-    next_fix_rc,
-    parse_baseline,
-    parse_fix,
     require_ref_name,
     require_version,
-    version_suggestions,
 )
 from gitlab_client import GitLabClient, GitLabConfig, GitLabError
 from repository_store import RepositoryConfig, RepositoryStore
@@ -77,7 +72,7 @@ class GitOpsApp:
             "repositories": repos,
             "roles": {
                 "user": ["view", "create_feature"],
-                "admin": ["view", "create_feature", "init_baseline", "create_fix", "release", "admin"],
+                "admin": ["view", "create_feature", "create_release", "create_bugfix", "create_tag", "admin"],
             },
         }
 
@@ -127,130 +122,83 @@ class GitOpsApp:
             "tags": tags,
         }
 
-    def suggest_versions(self, repo_id: str) -> dict[str, Any]:
-        target = self.target(repo_id)
-        names = target.client.branch_names() + target.client.tag_names()
-        return {
-            "ok": True,
-            "repository": target.repo.public_dict(self.token_loaded(target.repo)),
-            "suggestions": version_suggestions(names),
-        }
-
-    def init_baseline(self, payload: dict[str, Any]) -> dict[str, Any]:
-        requested_version = str(payload.get("version", "")).strip()
-        bump_type = str(payload.get("bump_type", "minor")).strip() or "minor"
-        explicit_version = require_version(requested_version) if requested_version else ""
-        ref = require_ref_name(str(payload.get("ref", "")), "来源分支")
-        if bump_type not in {"major", "minor", "patch", "build"}:
-            raise ValueError("版本变更类型仅支持 major/minor/patch/build")
+    def create_release(self, payload: dict[str, Any]) -> dict[str, Any]:
+        ref = require_ref_name(str(payload.get("ref", "")), "来源分支或Tag")
+        branch = "release"
 
         def precheck(target: OperationTarget) -> dict[str, Any]:
-            refs = set(target.client.branch_names()) | set(target.client.tag_names())
+            branch_names = target.client.branch_names()
+            refs = set(branch_names) | set(target.client.tag_names())
             if ref not in refs:
                 raise ValueError(f"来源不存在：{ref}")
-            version = explicit_version or version_suggestions(list(refs))[bump_type]
-            branch = baseline_branch(version)
-            if branch in refs:
-                raise ValueError(f"目标 baseline 已存在：{branch}")
-            return {"branch": branch, "ref": ref, "version": version, "bump_type": bump_type, "auto_generated": not explicit_version}
-
-        def execute(target: OperationTarget, context: dict[str, Any]) -> dict[str, Any]:
-            return {**context, "created": target.client.create_branch(context["branch"], ref)}
-
-        return self.run_operation(payload, "init_baseline", precheck, execute)
-
-    def create_fix(self, payload: dict[str, Any]) -> dict[str, Any]:
-        selected_baseline = require_ref_name(str(payload.get("baseline", "")), "baseline 分支")
-        version = parse_baseline(selected_baseline)
-
-        def precheck(target: OperationTarget) -> dict[str, Any]:
-            branch_names = target.client.branch_names()
-            if selected_baseline not in branch_names:
-                raise ValueError(f"baseline 不存在：{selected_baseline}")
-            rc_number = next_fix_rc(version, branch_names)
-            branch = fix_branch(version, rc_number)
             if branch in branch_names:
-                raise ValueError(f"目标 fix 已存在：{branch}")
-            return {"branch": branch, "ref": selected_baseline, "version": version, "rc_number": rc_number}
+                raise ValueError("release 分支已存在")
+            return {"branch": branch, "ref": ref}
 
         def execute(target: OperationTarget, context: dict[str, Any]) -> dict[str, Any]:
-            return {**context, "created": target.client.create_branch(context["branch"], selected_baseline)}
+            return {**context, "created": target.client.create_branch(branch, ref)}
 
-        return self.run_operation(payload, "create_fix", precheck, execute)
+        return self.run_operation(payload, "create_release", precheck, execute)
 
     def create_feature(self, payload: dict[str, Any]) -> dict[str, Any]:
-        selected_baseline = require_ref_name(str(payload.get("baseline", "")), "baseline 分支")
-        version = parse_baseline(selected_baseline)
         ticket = str(payload.get("ticket", ""))
         desc = str(payload.get("desc", ""))
-        branch = feature_branch(version, ticket, desc)
+        ref = require_ref_name(str(payload.get("ref", "release") or "release"), "来源分支")
+        if ref != "release" and classify_branch(ref) != "bugfix":
+            raise ValueError("Feature 分支只能从 release、bugfix/<版本号> 或迁移期 fix 拉出")
+        branch = feature_branch(ticket, desc)
 
         def precheck(target: OperationTarget) -> dict[str, Any]:
             branch_names = target.client.branch_names()
-            if selected_baseline not in branch_names:
-                raise ValueError(f"baseline 不存在：{selected_baseline}")
+            if ref not in branch_names:
+                raise ValueError(f"来源分支不存在：{ref}")
             if branch in branch_names:
                 raise ValueError(f"目标 feature 已存在：{branch}")
-            return {"branch": branch, "ref": selected_baseline, "version": version}
+            return {"branch": branch, "ref": ref}
 
         def execute(target: OperationTarget, context: dict[str, Any]) -> dict[str, Any]:
-            return {**context, "created": target.client.create_branch(branch, selected_baseline)}
+            return {**context, "created": target.client.create_branch(branch, ref)}
 
         return self.run_operation(payload, "create_feature", precheck, execute)
 
-    def release_from_fix(self, payload: dict[str, Any]) -> dict[str, Any]:
-        fix_name = require_ref_name(str(payload.get("fix_branch", "")), "fix 分支")
-        fix = parse_fix(fix_name)
-        target_baseline = require_ref_name(str(payload.get("baseline") or baseline_branch(fix.version)), "baseline 分支")
-        tag_name = require_ref_name(str(payload.get("tag_name") or default_release_tag(fix_name)), "Tag 名称")
-        message = str(payload.get("message", "")).strip() or f"Release {tag_name} from {fix_name}"
+    def create_bugfix(self, payload: dict[str, Any]) -> dict[str, Any]:
+        version = require_version(str(payload.get("version", "")))
+        ref = require_ref_name(str(payload.get("ref", "release") or "release"), "来源分支或Tag")
+        branch = bugfix_branch(version)
+
+        def precheck(target: OperationTarget) -> dict[str, Any]:
+            branch_names = target.client.branch_names()
+            refs = set(branch_names) | set(target.client.tag_names())
+            if ref not in refs:
+                raise ValueError(f"来源不存在：{ref}")
+            if branch in branch_names:
+                raise ValueError(f"目标 bugfix 分支已存在：{branch}")
+            return {"branch": branch, "ref": ref, "version": version}
+
+        def execute(target: OperationTarget, context: dict[str, Any]) -> dict[str, Any]:
+            return {**context, "created": target.client.create_branch(context["branch"], context["ref"])}
+
+        return self.run_operation(payload, "create_bugfix", precheck, execute)
+
+    def create_tag(self, payload: dict[str, Any]) -> dict[str, Any]:
+        ref = require_ref_name(str(payload.get("ref", "")), "Tag 来源")
+        tag_name = require_ref_name(str(payload.get("tag_name") or default_tag_name(ref)), "Tag 名称")
+        message = str(payload.get("message", "")).strip() or f"Tag {tag_name} from {ref}"
 
         def precheck(target: OperationTarget) -> dict[str, Any]:
             branch_names = target.client.branch_names()
             tag_names = target.client.tag_names()
-            if fix_name not in branch_names:
-                raise ValueError(f"fix 分支不存在：{fix_name}")
-            if target_baseline not in branch_names:
-                raise ValueError(f"baseline 分支不存在：{target_baseline}")
+            refs = set(branch_names) | set(tag_names)
+            if ref not in refs:
+                raise ValueError(f"Tag 来源不存在：{ref}")
             if tag_name in tag_names:
                 raise ValueError(f"Tag 已存在：{tag_name}")
-            existing_mrs = target.client.opened_merge_requests(fix_name, target_baseline)
-            if existing_mrs:
-                raise ValueError(f"已存在打开的 MR：{existing_mrs[0].get('web_url') or existing_mrs[0].get('iid')}")
-            return {"fix_branch": fix_name, "baseline": target_baseline, "tag_name": tag_name}
+            return {"ref": ref, "tag_name": tag_name, "message": message}
 
         def execute(target: OperationTarget, context: dict[str, Any]) -> dict[str, Any]:
-            tag = target.client.create_tag(tag_name, fix_name, message)
-            title = f"release: {fix_name} -> {target_baseline}"
-            try:
-                mr = target.client.create_merge_request(fix_name, target_baseline, title)
-            except GitLabError as exc:
-                return {
-                    **context,
-                    "ok": False,
-                    "tag_created": True,
-                    "tag": tag,
-                    "error": str(exc),
-                    "gitlab_status": exc.status,
-                    "gitlab_payload": exc.payload,
-                }
-            try:
-                merge = {
-                    "ok": True,
-                    "result": target.client.accept_merge_request(int(mr["iid"])),
-                    "requires_manual_resolution": False,
-                }
-            except GitLabError as exc:
-                merge = {
-                    "ok": False,
-                    "error": str(exc),
-                    "gitlab_status": exc.status,
-                    "gitlab_payload": exc.payload,
-                    "requires_manual_resolution": True,
-                }
-            return {**context, "tag": tag, "merge_request": mr, "merge": merge}
+            return {**context, "tag": target.client.create_tag(context["tag_name"], context["ref"], context["message"])}
 
-        return self.run_operation(payload, "release", precheck, execute)
+        return self.run_operation(payload, "create_tag", precheck, execute)
 
     def run_operation(
         self,
@@ -351,7 +299,7 @@ def summarize_tag(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def group_branches(branches: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    groups = {key: [] for key in ("baseline", "fix", "feature", "bugfix", "hotfix", "stable", "other")}
+    groups = {key: [] for key in ("release", "feature", "bugfix", "other")}
     for branch in branches:
         groups.setdefault(branch["kind"], []).append(branch)
     return groups
@@ -431,7 +379,6 @@ def make_handler(app: GitOpsApp):
                 "/api/project": ("view", lambda: app.project(query.get("repository_id", ""))),
                 "/api/branches": ("view", lambda: app.branches(query.get("repository_id", ""), query.get("search", ""))),
                 "/api/tags": ("view", lambda: app.tags(query.get("repository_id", ""), query.get("search", ""))),
-                "/api/version/suggestions": ("view", lambda: app.suggest_versions(query.get("repository_id", ""))),
             }
             repo_route = match_repo_get(path)
             if repo_route:
@@ -455,10 +402,10 @@ def make_handler(app: GitOpsApp):
                 "/api/login": ("public", lambda: self.login(payload)),
                 "/api/logout": ("public", self.logout),
                 "/api/repositories": ("admin", lambda: app.add_repository(payload)),
-                "/api/baseline/init": ("init_baseline", lambda: app.init_baseline(payload)),
-                "/api/fix/create": ("create_fix", lambda: app.create_fix(payload)),
+                "/api/release/create": ("create_release", lambda: app.create_release(payload)),
                 "/api/feature/create": ("create_feature", lambda: app.create_feature(payload)),
-                "/api/release": ("release", lambda: app.release_from_fix(payload)),
+                "/api/bugfix/create": ("create_bugfix", lambda: app.create_bugfix(payload)),
+                "/api/tags/create": ("create_tag", lambda: app.create_tag(payload)),
             }
             self.dispatch_route(path, routes)
 

@@ -11,7 +11,7 @@
       <form id="loginForm" class="login-card">
         <div class="mark">GB</div>
         <h1>GitLab Branch Workbench</h1>
-        <p>登录后管理多个 GitLab 仓库的分支、Tag 和发版同步。</p>
+        <p>登录后管理多个 GitLab 仓库的分支创建和 Tag。</p>
         <label>
           用户名
           <input name="username" autocomplete="username" value="admin" required />
@@ -36,10 +36,10 @@
         </div>
         <nav>
           <button class="nav-item active" data-view="overview">分支总览</button>
-          <button class="nav-item" data-view="baseline">Baseline</button>
-          <button class="nav-item" data-view="fix">Fix</button>
+          <button class="nav-item" data-view="release" data-admin-only>Release</button>
           <button class="nav-item" data-view="feature">Feature</button>
-          <button class="nav-item" data-view="release">发版</button>
+          <button class="nav-item" data-view="bugfix" data-admin-only>Bugfix</button>
+          <button class="nav-item" data-view="tag" data-admin-only>Tag</button>
           <button class="nav-item" data-view="repositories" data-admin-only>仓库管理</button>
           <button class="nav-item" data-view="settings">配置</button>
         </nav>
@@ -90,106 +90,10 @@
           </div>
         </section>
 
-        <section id="baseline" class="view">
-          <article class="panel form-panel" data-admin-only>
-            <div class="panel-title">
-              <h2>Init Baseline</h2>
-            </div>
-            <form id="baselineForm">
-              <label>
-                操作范围
-                <select name="scope">
-                  <option value="single">当前仓库</option>
-                  <option value="all">全部启用仓库</option>
-                </select>
-              </label>
-              <label>
-                来源分支或 Tag
-                <select id="baselineRef" name="ref" required></select>
-              </label>
-              <label>
-                变更类型
-                <select id="baselineBumpType" name="bump_type">
-                  <option value="minor">新功能基线：B+1，C/D 清零</option>
-                  <option value="patch">修复/优化：C+1，D 清零</option>
-                  <option value="build">构建/热修复：D+1</option>
-                  <option value="major">架构不兼容：A+1，B/C/D 清零</option>
-                </select>
-              </label>
-              <label>
-                版本号
-                <input id="baselineVersion" name="version" placeholder="留空自动生成，例如 3.2.0.0" />
-              </label>
-              <button type="button" id="suggestBaselineVersionBtn" class="secondary">自动填充版本号</button>
-              <button class="primary">创建 baseline/{version}</button>
-            </form>
-          </article>
-          <article class="panel readonly-panel" data-user-block>
-            <h2>权限不足</h2>
-            <p>初始化 baseline 需要 admin 角色。</p>
-          </article>
-        </section>
-
-        <section id="fix" class="view">
-          <article class="panel form-panel" data-admin-only>
-            <div class="panel-title">
-              <h2>从 Baseline 创建 Fix</h2>
-            </div>
-            <form id="fixForm">
-              <label>
-                操作范围
-                <select name="scope">
-                  <option value="single">当前仓库</option>
-                  <option value="all">全部启用仓库</option>
-                </select>
-              </label>
-              <label>
-                Baseline
-                <select id="fixBaseline" name="baseline" required></select>
-              </label>
-              <button class="primary">创建下一个 fix_{version}/rcN</button>
-            </form>
-          </article>
-          <article class="panel readonly-panel" data-user-block>
-            <h2>权限不足</h2>
-            <p>创建 fix 分支需要 admin 角色。</p>
-          </article>
-        </section>
-
-        <section id="feature" class="view">
-          <article class="panel form-panel">
-            <div class="panel-title">
-              <h2>从 Baseline 创建 Feature</h2>
-            </div>
-            <form id="featureForm">
-              <label>
-                操作范围
-                <select name="scope">
-                  <option value="single">当前仓库</option>
-                  <option value="all">全部启用仓库</option>
-                </select>
-              </label>
-              <label>
-                Baseline
-                <select id="featureBaseline" name="baseline" required></select>
-              </label>
-              <label>
-                任务号
-                <input name="ticket" placeholder="TASK1234" required />
-              </label>
-              <label>
-                描述
-                <input name="desc" placeholder="user-login" required />
-              </label>
-              <button class="primary">创建 feature 分支</button>
-            </form>
-          </article>
-        </section>
-
         <section id="release" class="view">
           <article class="panel form-panel" data-admin-only>
             <div class="panel-title">
-              <h2>Fix 打 Tag 并同步 Baseline</h2>
+              <h2>创建 Release 分支</h2>
             </div>
             <form id="releaseForm">
               <label>
@@ -200,27 +104,109 @@
                 </select>
               </label>
               <label>
-                Fix 分支
-                <select id="releaseFix" name="fix_branch" required></select>
+                来源分支或 Tag
+                <select id="releaseRef" name="ref" required></select>
               </label>
-              <label>
-                目标 Baseline
-                <select id="releaseBaseline" name="baseline" required></select>
-              </label>
-              <label>
-                Tag 名称
-                <input name="tag_name" placeholder="留空使用 v{version}-rcN" />
-              </label>
-              <label>
-                发版说明
-                <textarea name="message" rows="4" placeholder="填写发版说明、验证范围和回滚方式"></textarea>
-              </label>
-              <button class="primary">创建 Tag 并同步 baseline</button>
+              <button class="primary">创建 release</button>
             </form>
           </article>
           <article class="panel readonly-panel" data-user-block>
             <h2>权限不足</h2>
-            <p>打 Tag 和同步 baseline 需要 admin 角色。</p>
+            <p>创建 release 分支需要 admin 角色。</p>
+          </article>
+        </section>
+
+        <section id="feature" class="view">
+          <article class="panel form-panel">
+            <div class="panel-title">
+              <h2>创建 Feature 分支</h2>
+            </div>
+            <form id="featureForm">
+              <label>
+                操作范围
+                <select name="scope">
+                  <option value="single">当前仓库</option>
+                  <option value="all">全部启用仓库</option>
+                </select>
+              </label>
+              <label>
+                来源分支
+                <select id="featureRef" name="ref" required></select>
+              </label>
+              <label>
+                任务号
+                <input name="ticket" placeholder="TASK-1234" required />
+              </label>
+              <label>
+                描述
+                <input name="desc" placeholder="user_login" required />
+              </label>
+              <button class="primary">创建 feature 分支</button>
+            </form>
+          </article>
+        </section>
+
+        <section id="bugfix" class="view">
+          <article class="panel form-panel" data-admin-only>
+            <div class="panel-title">
+              <h2>创建 Bugfix 版本分支</h2>
+            </div>
+            <form id="bugfixForm">
+              <label>
+                操作范围
+                <select name="scope">
+                  <option value="single">当前仓库</option>
+                  <option value="all">全部启用仓库</option>
+                </select>
+              </label>
+              <label>
+                来源分支或 Tag
+                <select id="bugfixRef" name="ref" required></select>
+              </label>
+              <label>
+                固定版本号
+                <input name="version" placeholder="V1.0.0" required />
+              </label>
+              <button class="primary">创建 bugfix/&lt;版本号&gt;</button>
+            </form>
+          </article>
+          <article class="panel readonly-panel" data-user-block>
+            <h2>权限不足</h2>
+            <p>创建 bugfix 版本分支需要 admin 角色。</p>
+          </article>
+        </section>
+
+        <section id="tag" class="view">
+          <article class="panel form-panel" data-admin-only>
+            <div class="panel-title">
+              <h2>创建 Tag</h2>
+            </div>
+            <form id="tagForm">
+              <label>
+                操作范围
+                <select name="scope">
+                  <option value="single">当前仓库</option>
+                  <option value="all">全部启用仓库</option>
+                </select>
+              </label>
+              <label>
+                Tag 来源
+                <select id="tagRef" name="ref" required></select>
+              </label>
+              <label>
+                Tag 名称（可选）
+                <input name="tag_name" placeholder="留空自动生成 来源-时间戳" />
+              </label>
+              <label>
+                Tag 说明
+                <textarea name="message" rows="4" placeholder="填写提测/发版用途、验证范围和回滚方式"></textarea>
+              </label>
+              <button class="primary">创建 Tag</button>
+            </form>
+          </article>
+          <article class="panel readonly-panel" data-user-block>
+            <h2>权限不足</h2>
+            <p>创建 Tag 需要 admin 角色。</p>
           </article>
         </section>
 
