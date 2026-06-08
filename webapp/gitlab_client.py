@@ -133,6 +133,17 @@ class GitLabClient:
             payload={"branch": branch, "ref": ref},
         )
 
+    def protect_branch(self, branch: str, push_access_level: int, merge_access_level: int) -> dict[str, Any]:
+        return self.request(
+            "POST",
+            self.project_api_path("/protected_branches"),
+            payload={
+                "name": branch,
+                "push_access_level": push_access_level,
+                "merge_access_level": merge_access_level,
+            },
+        )
+
     def create_tag(self, tag_name: str, ref: str, message: str = "") -> dict[str, Any]:
         payload = {"tag_name": tag_name, "ref": ref}
         if message:
