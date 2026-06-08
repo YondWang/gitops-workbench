@@ -69,6 +69,9 @@ bugfix/<版本号>
 - `bugfix/<版本号>` 由版本管理员或发布负责人创建和维护。
 - Bugfix分支是版本级长期分支，不归某个个人独占。
 - Web 工具只负责创建分支和创建 Tag，不负责合入 Feature 或同步 Bugfix；合入和同步通过 GitLab MR 完成。
+- Web 工具创建的 `release`、`bugfix/<版本号>` 默认设置为 GitLab 保护分支。
+- `release` 和 `bugfix/<版本号>` 禁止直接 Push，仅允许 Maintainer 通过 MR 合入。
+- `feature/*` 不设置为保护分支，方便开发人员进行日常开发提交。
 - 多仓库批量操作前，必须确认所有目标仓库处于同一版本节奏。
 
 ## 4. 分支模型

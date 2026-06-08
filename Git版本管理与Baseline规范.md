@@ -121,6 +121,7 @@ release
 * `release` 不带版本号
 * 禁止普通开发直接push到 `release`
 * `release` 必须开启分支保护
+* Web工具创建 `release` 后默认设置为保护分支：禁止直接Push，仅允许Maintainer通过MR合入
 
 ---
 
@@ -151,6 +152,7 @@ feature/TASK-887_fusion_refactor
 * 必须带需求号或任务号
 * 使用英文小写、数字、连字符和下划线
 * 禁止中文、空格和特殊符号
+* Web工具创建 `feature/*` 后不设置为保护分支，方便开发人员进行日常开发提交
 
 ---
 
@@ -184,6 +186,7 @@ bugfix/V2.0.0
 * Bugfix稳定节点Tag打在 `bugfix/<版本号>`
 * Bugfix达到稳定节点后，在该分支打Tag进行提测或发版
 * Bugfix发版后，修复内容必须同步回 `release`
+* Web工具创建 `bugfix/<版本号>` 后默认设置为保护分支：禁止直接Push，仅允许Maintainer通过MR合入
 
 ---
 
