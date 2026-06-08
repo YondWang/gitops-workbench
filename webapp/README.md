@@ -9,10 +9,16 @@
 - `admin` 可从指定来源分支或 Tag 创建唯一 `release` 分支。
 - `user` 和 `admin` 可从 `release`、`bugfix/<版本号>` 或迁移期 `fix` 创建 `feature/{TASKID}_{desc}`。
 - `admin` 可从指定来源分支或 Tag 创建版本级长期分支 `bugfix/<版本号>`。
+- Web 工具创建的 `release`、`bugfix/<版本号>` 默认设置为 GitLab 保护分支。
 - `admin` 可基于分支创建 Tag，默认命名为 `<来源>-<yyyyMMddHHmmss>`；来源分支中的 `/` 会替换为 `-`。
 - 写操作可选择“当前仓库”或“全部启用仓库”；全部仓库会先做预检查，预检查失败时不会写任何仓库。
 
 Web 工具只做分支创建和 Tag 创建，不做 Feature 合入、Bugfix 同步或自动 MR。Feature 合回来源分支、Bugfix 发版后同步回 `release`，统一在 GitLab MR 中完成。
+
+默认保护策略：
+
+- `release` 和 `bugfix/<版本号>`：禁止直接 Push，仅允许 Maintainer 通过 MR 合入。
+- `feature/*`：不设置为保护分支，方便开发人员进行日常开发提交。
 
 ## 分支规则
 
