@@ -64,7 +64,16 @@
             <article class="panel">
               <div class="panel-title">
                 <h2>远端分支</h2>
-                <span id="branchCount" class="badge muted">0</span>
+                <div class="button-row">
+                  <select id="branchTypeFilter" class="compact-select">
+                    <option value="all">全部类型</option>
+                    <option value="release">release</option>
+                    <option value="feature">feature</option>
+                    <option value="bugfix">bugfix</option>
+                    <option value="other">other</option>
+                  </select>
+                  <span id="branchCount" class="badge muted">0</span>
+                </div>
               </div>
               <div class="table-wrap">
                 <table>
@@ -134,11 +143,11 @@
                 <select id="featureRef" name="ref" required></select>
               </label>
               <label>
-                任务号
-                <input name="ticket" placeholder="TASK-1234" required />
+                任务号（可选）
+                <input name="ticket" placeholder="TASK-1234" />
               </label>
               <label>
-                描述
+                功能描述
                 <input name="desc" placeholder="user_login" required />
               </label>
               <button class="primary">创建 feature 分支</button>
@@ -195,7 +204,7 @@
               </label>
               <label>
                 Tag 名称（可选）
-                <input name="tag_name" placeholder="留空自动生成 来源-时间戳" />
+                <input name="tag_name" placeholder="留空自动生成 来源-时间戳 自动化生成，不建议手动命名！" />
               </label>
               <label>
                 Tag 说明

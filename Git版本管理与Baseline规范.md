@@ -73,7 +73,7 @@ bugfix发版后同步回release
 
 ```text
 release
-   ├── feature/<需求号>_<简述>
+   ├── feature/<来源>_<功能描述>
    │       ↓
    │   合入release
    │
@@ -132,15 +132,16 @@ Feature分支用于新功能开发。
 格式：
 
 ```text
-feature/<需求号>_<简述>
+feature/<来源>_<功能描述>
+feature/<来源>_<任务号>_<功能描述>
 ```
 
 示例：
 
 ```text
-feature/ADAS-1024_path_optimize
-feature/ADAS-2108_new_panel
-feature/TASK-887_fusion_refactor
+feature/release_path_optimize
+feature/release_ADAS-2108_new_panel
+feature/v1.0.0_fusion_refactor
 ```
 
 规范：
@@ -149,7 +150,8 @@ feature/TASK-887_fusion_refactor
 * 一个功能对应一个Feature分支
 * 可以从 `release` 或当前固定版本的 `bugfix/<版本号>` 拉出
 * 开发完成后必须合回来源分支
-* 必须带需求号或任务号
+* 分支名称中必须简洁体现来源分支
+* 任务号或需求号可选，填写后便于追踪需求来源
 * 使用英文小写、数字、连字符和下划线
 * 禁止中文、空格和特殊符号
 * Web工具创建 `feature/*` 后不设置为保护分支，方便开发人员进行日常开发提交
@@ -507,7 +509,7 @@ test
 ```text
 release
     ↓
-feature/ADAS-1024_path_optimize
+feature/release_ADAS-1024_path_optimize
     ↓
 合入release
 ```
