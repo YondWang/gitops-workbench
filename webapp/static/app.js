@@ -131,9 +131,11 @@ function renderRepositories() {
 }
 
 function renderBranches() {
-  $("#branchCount").textContent = String(state.branches.length);
+  const kind = $("#branchTypeFilter")?.value || "all";
+  const branches = kind === "all" ? state.branches : state.branches.filter((branch) => branch.kind === kind);
+  $("#branchCount").textContent = kind === "all" ? String(branches.length) : `${branches.length}/${state.branches.length}`;
   $("#branchesBody").innerHTML =
-    state.branches
+    branches
       .map(
         (branch) => `
           <tr>
@@ -185,7 +187,7 @@ function fillSelect(selector, values, preferred = "") {
   const previous = select.value;
   select.innerHTML =
     values.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("") ||
-    `<option value="">暂无可选分支</option>`;
+    `<option value="">暂无可选项</option>`;
   if (values.includes(previous)) {
     select.value = previous;
   } else if (preferred && values.includes(preferred)) {
@@ -307,6 +309,7 @@ function bindEvents() {
 
   $("#refreshBtn").addEventListener("click", () => refreshAll().catch((error) => appendLog("刷新失败", error.message)));
   $("#branchSearch").addEventListener("change", () => refreshAll().catch((error) => appendLog("搜索失败", error.message)));
+  $("#branchTypeFilter").addEventListener("change", () => renderBranches());
   $("#clearLogBtn").addEventListener("click", () => {
     state.log = [];
     $("#logOutput").textContent = "暂无操作。";

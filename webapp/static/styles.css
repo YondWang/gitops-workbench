@@ -168,6 +168,12 @@ nav {
   gap: 10px;
 }
 
+.compact-select {
+  min-height: 30px;
+  max-width: 150px;
+  padding: 0 8px;
+}
+
 button {
   min-height: 38px;
   border-radius: 6px;

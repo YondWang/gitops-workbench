@@ -53,8 +53,24 @@ def clean_ticket(value: str, fallback: str = "TASK") -> str:
     return ticket or fallback
 
 
-def feature_branch(ticket: str, desc: str) -> str:
-    return f"feature/{clean_ticket(ticket)}_{slug(desc)}"
+def source_slug(ref: str) -> str:
+    value = ref.strip()
+    if value == "release":
+        return "release"
+    if value == "fix":
+        return "fix"
+    if value.startswith("bugfix/"):
+        return slug(value.split("/", 1)[1], "bugfix")
+    return slug(value.replace("/", "-"), "src")
+
+
+def feature_branch(ticket: str, desc: str, ref: str = "release") -> str:
+    parts = [source_slug(ref)]
+    cleaned_ticket = clean_ticket(ticket, "")
+    if cleaned_ticket:
+        parts.append(cleaned_ticket)
+    parts.append(slug(desc))
+    return f"feature/{'_'.join(parts)}"
 
 
 def bugfix_branch(version: str) -> str:
@@ -62,9 +78,9 @@ def bugfix_branch(version: str) -> str:
 
 
 def parse_feature(name: str) -> FeatureBranch:
-    match = re.fullmatch(r"feature/([A-Za-z0-9-]+)_([A-Za-z0-9._-]+)", name.strip())
+    match = re.fullmatch(r"feature/([A-Za-z0-9._-]+)_([A-Za-z0-9._-]+)", name.strip())
     if not match:
-        raise ValueError("请选择 feature/{TASKID}_{desc} 分支")
+        raise ValueError("请选择 feature/{来源}_{功能描述} 分支")
     return FeatureBranch(name=name.strip(), ticket=match.group(1), desc=match.group(2))
 
 

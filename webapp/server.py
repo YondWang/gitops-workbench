@@ -154,7 +154,7 @@ class GitOpsApp:
         ref = require_ref_name(str(payload.get("ref", "release") or "release"), "来源分支")
         if ref != "release" and classify_branch(ref) != "bugfix":
             raise ValueError("Feature 分支只能从 release、bugfix/<版本号> 或迁移期 fix 拉出")
-        branch = feature_branch(ticket, desc)
+        branch = feature_branch(ticket, desc, ref)
 
         def precheck(target: OperationTarget) -> dict[str, Any]:
             branch_names = target.client.branch_names()

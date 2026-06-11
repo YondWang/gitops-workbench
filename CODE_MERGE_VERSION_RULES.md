@@ -80,8 +80,8 @@ bugfix/<版本号>
 
 ```text
 release
-   ├── feature/TASK-1001_xxx
-   ├── feature/TASK-1002_yyy
+   ├── feature/release_TASK-1001_xxx
+   ├── feature/release_yyy
    │
    └── bugfix/V1.0.0
            ├── 修复BUG-2001
@@ -131,22 +131,24 @@ Feature 表示新功能开发分支。
 格式：
 
 ```text
-feature/{TASKID}_{desc}
+feature/{来源}_{desc}
+feature/{来源}_{TASKID}_{desc}
 ```
 
 示例：
 
 ```text
-feature/TASK-1234_user_login
-feature/ADAS-2108_new_panel
-feature/REQ-778_map_update
+feature/release_user_login
+feature/release_TASK-1234_user_login
+feature/v1.0.0_map_update
 ```
 
 规则：
 
 - Feature 可以从 `release` 或 `bugfix/<版本号>` 拉出。
 - 一个功能对应一个 Feature 分支。
-- `TASKID` 使用任务号或需求号，便于追踪需求来源。
+- `{来源}` 简洁体现来源分支，例如 `release`、`fix`、`v1.0.0`。
+- `TASKID` 为可选任务号或需求号，填写后便于追踪需求来源。
 - `desc` 使用简短英文或拼音描述，避免中文、空格和特殊符号。
 - Feature 开发完成、自测通过、Code Review 通过后，必须合回来源分支。
 
@@ -250,11 +252,12 @@ release
 1. 使用 `user` 或 `admin` 登录 Web 工具。
 2. 进入 `Feature` 页面。
 3. 选择来源分支，通常是 `release`；如果是当前固定版本中的小需求，也可以选择对应 `bugfix/<版本号>`。
-4. 填写任务号和简短描述。
+4. 填写功能描述；任务号可选。
 5. 创建：
 
 ```text
-feature/{TASKID}_{desc}
+feature/{来源}_{功能描述}
+feature/{来源}_{任务号}_{功能描述}
 ```
 
 ### 7.3 Feature 合入来源分支
