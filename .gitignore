@@ -1,1 +1,8 @@
 gitlab-local/
+
+# Local secrets and deployment-only files
+.env
+.env.*
+!.env.example
+webapp/.env.local
+deploy/certs/

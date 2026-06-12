@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import ssl
 import sys
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -348,6 +349,19 @@ def load_json_config(path: str | None) -> dict[str, Any]:
     return config
 
 
+def configure_tls(server: ThreadingHTTPServer) -> bool:
+    cert_path = os.environ.get("GITOPS_TLS_CERT", "").strip()
+    key_path = os.environ.get("GITOPS_TLS_KEY", "").strip()
+    if not cert_path and not key_path:
+        return False
+    if not cert_path or not key_path:
+        raise ValueError("GITOPS_TLS_CERT and GITOPS_TLS_KEY must be configured together")
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert_path, key_path)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    return True
+
+
 def default_repositories(config: dict[str, Any]) -> list[RepositoryConfig]:
     repositories = config.get("repositories") or []
     if not repositories and "gitlab" in config:
@@ -557,7 +571,9 @@ def main() -> None:
     host = args.host or os.environ.get("GITOPS_HOST", config["server"]["host"])
     port = args.port or int(os.environ.get("GITOPS_PORT", config["server"]["port"]))
     server = ThreadingHTTPServer((host, port), make_handler(app))
-    print(f"GitLab Branch Workbench: http://{host}:{port}", flush=True)
+    tls_enabled = configure_tls(server)
+    scheme = "https" if tls_enabled else "http"
+    print(f"GitLab Branch Workbench: {scheme}://{host}:{port}", flush=True)
     print(f"Repositories: {len(app.store.list())}", flush=True)
     server.serve_forever()
 
