@@ -19,6 +19,16 @@
       "default_ref": "main",
       "token_env": "GITLAB_TOKEN",
       "ssl_verify": true
+    },
+    {
+      "id": "simos",
+      "name": "simos",
+      "base_url": "https://www.chancee-shanghai.cn:9900",
+      "project": "OS/simos",
+      "enabled": true,
+      "default_ref": "main",
+      "token_env": "GITLAB_TOKEN",
+      "ssl_verify": true
     }
   ]
 }

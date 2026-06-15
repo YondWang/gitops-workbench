@@ -22,6 +22,11 @@ services:
       - /etc/gitlab/ssl:/etc/gitlab/ssl:ro
     ports:
       - "9910:9910"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
     healthcheck:
       test:
         [

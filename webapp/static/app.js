@@ -5,7 +5,10 @@ const state = {
   currentRepositoryId: "",
   branches: [],
   tags: [],
+  commonRefs: null,
   log: [],
+  pendingVersionTag: null,
+  pendingVersionTimer: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -167,18 +170,53 @@ function renderTags() {
 }
 
 function renderSelectOptions() {
-  const allBranches = state.branches.map((item) => item.name).sort((a, b) => a.localeCompare(b));
-  const tagNames = state.tags.map((item) => item.name).sort((a, b) => a.localeCompare(b));
-  const refs = [...allBranches, ...tagNames];
-  const featureSources = state.branches
-    .filter((item) => item.kind === "release" || item.kind === "bugfix")
-    .map((item) => item.name)
-    .sort((a, b) => a.localeCompare(b));
+  const releaseRefs = sourceOptions(scopeValue("#releaseForm"));
+  const featureRefs = sourceOptions(scopeValue("#featureForm"));
+  const bugfixRefs = sourceOptions(scopeValue("#bugfixForm"));
+  const tagRefs = sourceOptions(scopeValue("#tagForm"));
 
-  fillSelect("#releaseRef", refs);
-  fillSelect("#featureRef", featureSources, "release");
-  fillSelect("#bugfixRef", refs, "release");
-  fillSelect("#tagRef", allBranches);
+  fillSelect("#releaseRef", releaseRefs.refs);
+  fillSelect("#featureRef", featureRefs.featureSources, "release");
+  fillSelect("#bugfixRef", bugfixRefs.refs, "release");
+  fillSelect("#tagRef", tagRefs.branches);
+  syncTagUpdateVersionControl();
+}
+
+function scopeValue(formSelector) {
+  const form = $(formSelector);
+  return form?.elements.scope?.value || "single";
+}
+
+function sourceOptions(scope) {
+  const source =
+    scope === "all"
+      ? {
+          branches: state.commonRefs?.branches || [],
+          tags: state.commonRefs?.tags || [],
+          featureSources: state.commonRefs?.feature_sources || [],
+        }
+      : {
+          branches: state.branches,
+          tags: state.tags,
+          featureSources: state.branches.filter((item) => item.kind === "release" || item.kind === "bugfix"),
+        };
+  const branches = source.branches.map((item) => item.name).sort((a, b) => a.localeCompare(b));
+  const tags = source.tags.map((item) => item.name).sort((a, b) => a.localeCompare(b));
+  const featureSources = source.featureSources.map((item) => item.name).sort((a, b) => a.localeCompare(b));
+  return { branches, tags, refs: [...branches, ...tags], featureSources };
+}
+
+function syncTagUpdateVersionControl() {
+  const form = $("#tagForm");
+  if (!form?.elements.update_version) return;
+  const checkbox = form.elements.update_version;
+  const enabled = form.elements.scope?.value === "all";
+  checkbox.disabled = !enabled;
+  checkbox.title = enabled ? "" : "仅在全部启用仓库范围可用";
+  checkbox.closest(".checkline")?.classList.toggle("disabled", !enabled);
+  if (!enabled) {
+    checkbox.checked = false;
+  }
 }
 
 function fillSelect(selector, values, preferred = "") {
@@ -206,6 +244,7 @@ async function refreshAll() {
   if (!state.currentRepositoryId) {
     state.branches = [];
     state.tags = [];
+    state.commonRefs = null;
     renderBranches();
     renderTags();
     return;
@@ -214,9 +253,17 @@ async function refreshAll() {
   const search = $("#branchSearch").value.trim();
   const params = new URLSearchParams({ repository_id: state.currentRepositoryId });
   if (search) params.set("search", search);
-  const [branches, tags] = await Promise.all([api(`/api/branches?${params}`), api(`/api/tags?${params}`)]);
+  const [branches, tags, commonRefs] = await Promise.all([
+    api(`/api/branches?${params}`),
+    api(`/api/tags?${params}`),
+    api("/api/common-refs").catch((error) => {
+      appendLog("刷新公共来源失败", error.message);
+      return null;
+    }),
+  ]);
   state.branches = branches.branches || [];
   state.tags = tags.tags || [];
+  state.commonRefs = commonRefs;
   renderBranches();
   renderTags();
 }
@@ -234,7 +281,72 @@ async function handleOperation(title, path, form) {
   const body = operationBody(form);
   const result = await postJson(path, body);
   appendLog(title, summarizeOperationResult(result));
+  if (path === "/api/tags/create") {
+    handleTagOperationResult(body, result);
+  }
   await refreshAll();
+}
+
+function handleTagOperationResult(body, result) {
+  if (result?.phase === "waiting_version_mr" && result.merge_request) {
+    const nextBody = {
+      ...body,
+      tag_name: result.tag_name || body.tag_name,
+      version_update_branch: result.version_update?.branch,
+    };
+    state.pendingVersionTag = {
+      body: nextBody,
+      mergeRequest: result.merge_request,
+      startedAt: Date.now(),
+    };
+    appendLog("等待版本号 MR 合并", {
+      merge_request: result.merge_request.web_url || result.merge_request,
+      source_branch: result.version_update?.branch,
+      next: "MR 合并后将自动继续创建 Tag",
+    });
+    $("#logOutput").dataset.pendingTag = JSON.stringify(nextBody);
+    scheduleVersionTagPoll();
+    return;
+  }
+  if (result?.ok && state.pendingVersionTag) {
+    clearVersionTagPoll();
+    delete $("#logOutput").dataset.pendingTag;
+    appendLog("版本号 MR 已合并", "已继续完成 Tag 创建");
+  }
+}
+
+function scheduleVersionTagPoll() {
+  if (state.pendingVersionTimer) {
+    clearTimeout(state.pendingVersionTimer);
+  }
+  state.pendingVersionTimer = setTimeout(pollPendingVersionTag, 8000);
+}
+
+function clearVersionTagPoll() {
+  if (state.pendingVersionTimer) {
+    clearTimeout(state.pendingVersionTimer);
+  }
+  state.pendingVersionTimer = null;
+  state.pendingVersionTag = null;
+}
+
+async function pollPendingVersionTag() {
+  const pending = state.pendingVersionTag;
+  if (!pending) return;
+  try {
+    const result = await postJson("/api/tags/create", pending.body);
+    appendLog("检查版本号 MR 状态", summarizeOperationResult(result));
+    if (result?.phase === "waiting_version_mr") {
+      state.pendingVersionTag.mergeRequest = result.merge_request || pending.mergeRequest;
+      scheduleVersionTagPoll();
+      return;
+    }
+    handleTagOperationResult(pending.body, result);
+    await refreshAll();
+  } catch (error) {
+    appendLog("检查版本号 MR 状态失败", error.message);
+    scheduleVersionTagPoll();
+  }
 }
 
 function summarizeOperationResult(result) {
@@ -255,6 +367,11 @@ function summarizeOperationResult(result) {
       error: item.error,
       result: item.result,
     })),
+    blocked: result.blocked,
+    message: result.message,
+    tag_name: result.tag_name,
+    version_update: result.version_update,
+    merge_request: result.merge_request,
   };
 }
 
@@ -318,6 +435,11 @@ function bindEvents() {
   document.querySelectorAll(".nav-item").forEach((button) => {
     button.addEventListener("click", () => switchView(button.dataset.view));
   });
+
+  document.querySelectorAll('form select[name="scope"]').forEach((select) => {
+    select.addEventListener("change", renderSelectOptions);
+  });
+  syncTagUpdateVersionControl();
 
   $("#featureForm").addEventListener("submit", (event) => {
     event.preventDefault();

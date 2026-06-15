@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import ssl
 from dataclasses import dataclass
@@ -116,6 +117,9 @@ class GitLabClient:
         query = {"search": search} if search else None
         return self.paginated(self.project_api_path("/repository/branches"), query=query)
 
+    def branch(self, branch: str) -> dict[str, Any]:
+        return self.request("GET", self.project_api_path(f"/repository/branches/{quote(branch, safe='')}"))
+
     def tags(self, search: str = "") -> list[dict[str, Any]]:
         query = {"search": search} if search else None
         return self.paginated(self.project_api_path("/repository/tags"), query=query)
@@ -150,11 +154,54 @@ class GitLabClient:
             payload["message"] = message
         return self.request("POST", self.project_api_path("/repository/tags"), payload=payload)
 
+    def get_file_text(self, file_path: str, ref: str) -> str:
+        data = self.request(
+            "GET",
+            self.project_api_path(f"/repository/files/{quote(file_path, safe='')}"),
+            query={"ref": ref},
+        )
+        content = str(data.get("content", "")) if isinstance(data, dict) else ""
+        return base64.b64decode(content).decode("utf-8")
+
+    def file_exists(self, file_path: str, ref: str) -> bool:
+        try:
+            self.get_file_text(file_path, ref)
+            return True
+        except GitLabError as exc:
+            if exc.status == 404:
+                return False
+            raise
+
+    def create_commit(self, branch: str, commit_message: str, actions: list[dict[str, str]]) -> dict[str, Any]:
+        return self.request(
+            "POST",
+            self.project_api_path("/repository/commits"),
+            payload={
+                "branch": branch,
+                "commit_message": commit_message,
+                "actions": actions,
+            },
+        )
+
+    def update_file(self, file_path: str, branch: str, content: str, commit_message: str) -> dict[str, Any]:
+        return self.request(
+            "PUT",
+            self.project_api_path(f"/repository/files/{quote(file_path, safe='')}"),
+            payload={
+                "branch": branch,
+                "content": content,
+                "commit_message": commit_message,
+            },
+        )
+
     def opened_merge_requests(self, source_branch: str, target_branch: str) -> list[dict[str, Any]]:
+        return self.merge_requests(source_branch, target_branch, state="opened")
+
+    def merge_requests(self, source_branch: str, target_branch: str, state: str = "all") -> list[dict[str, Any]]:
         return self.paginated(
             self.project_api_path("/merge_requests"),
             query={
-                "state": "opened",
+                "state": state,
                 "source_branch": source_branch,
                 "target_branch": target_branch,
             },

@@ -335,6 +335,14 @@ textarea {
   min-height: 16px;
 }
 
+.checkline.disabled {
+  color: var(--muted);
+}
+
+.checkline.disabled input {
+  cursor: not-allowed;
+}
+
 .message {
   min-height: 22px;
   margin-top: 12px;
