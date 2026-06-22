@@ -206,6 +206,15 @@ button {
   color: var(--danger);
 }
 
+.button-link {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  border-radius: 6px;
+  padding: 0 14px;
+  text-decoration: none;
+}
+
 .small {
   min-height: 30px;
   padding: 0 8px;
@@ -353,6 +362,22 @@ textarea {
   color: var(--danger);
 }
 
+.pending-flow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  border: 1px solid #facc15;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fffbeb;
+}
+
+.pending-flow > div:first-child {
+  min-width: 0;
+}
+
 .table-wrap {
   max-height: 560px;
   overflow: auto;
@@ -449,7 +474,8 @@ code {
   }
 
   .topbar,
-  .actions {
+  .actions,
+  .pending-flow {
     align-items: stretch;
     flex-direction: column;
   }

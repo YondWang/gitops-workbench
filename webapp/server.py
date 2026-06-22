@@ -70,6 +70,14 @@ PKG_INFO_PATH = "pkg.info"
 SOFTWARE_YAML_PATH = "software.yaml"
 VERSION_COMPONENTS = ("simos", "business", "localization", "perception", "mapengine", "pnc")
 SUBMODULE_COMPONENTS = ("business", "localization", "mapengine", "perception", "pnc")
+VERSION_COMPONENT_REVISIONS = {
+    "simos": 1,
+    "business": 2,
+    "localization": 4,
+    "mapengine": 8,
+    "perception": 16,
+    "pnc": 32,
+}
 
 
 @dataclass(frozen=True)
@@ -299,6 +307,20 @@ class GitOpsApp:
         simos_context["_version_plan"] = version_plan
         simos_context["version_update"] = version_plan["summary"]
         existing_mr = self.find_version_update_mr(simos_target, version_plan)
+        if version_plan["changed"] and is_merge_request_closed(existing_mr):
+            version_update = self.version_update_wait_result(version_plan, existing_mr)
+            return {
+                "ok": False,
+                "operation": "create_tag",
+                "phase": "version_update_aborted",
+                "terminated": True,
+                "tag_name": version_plan["tag_name"],
+                "message": "版本号更新 MR 已关闭，已终止发版或打 Tag 流程",
+                "precheck": precheck_results,
+                "version_update": version_update,
+                "merge_request": version_update.get("merge_request"),
+                "results": [],
+            }
         if version_plan["changed"] and not is_merge_request_merged(existing_mr):
             if existing_mr is None:
                 version_update = self.create_version_update_merge_request(simos_target, version_plan)
@@ -414,7 +436,7 @@ class GitOpsApp:
             summary["reason"] = "all component commit ids already recorded"
             summary["tag_ref"] = summary["source_commit"]
             return {**version_plan, "changed": False, "summary": summary, "component_refs": component_refs}
-        new_version, next_version_info = render_version_info_full(version_plan["version_info_fields"], component_refs, current_time)
+        new_version, next_version_info = render_version_info_full(version_plan["version_info_fields"], component_refs, current_time, changed_components)
         previous_pkg_info = self.optional_file_text(targets, PKG_INFO_PATH, version_plan["ref"])
         actions = [
             {"action": "update", "file_path": VERSION_INFO_PATH, "content": next_version_info},
@@ -790,6 +812,71 @@ def bump_version(value: str) -> str:
     return f"{prefix}{'.'.join(parts)}"
 
 
+def version_from_changed_components(previous_version: str, changed_components: list[str] | tuple[str, ...], next_version: str = "") -> str:
+    components = [component for component in changed_components if component in VERSION_COMPONENT_REVISIONS]
+    if not components:
+        return previous_version.strip().strip('"')
+    if len(components) == 1:
+        return bump_version(previous_version)
+    normalized_next_version = next_version.strip().strip('"')
+    revision = sum(VERSION_COMPONENT_REVISIONS[component] for component in components)
+    base_source = normalized_next_version or previous_version
+    candidate = append_component_revision(version_revision_base(base_source), revision)
+    if compare_versions(candidate, previous_version) > 0:
+        return candidate
+    return append_component_revision(next_version_revision_base(previous_version), revision)
+
+
+def append_component_revision(base_version: str, revision: int) -> str:
+    return f"{base_version}{revision}"
+
+
+def version_revision_base(value: str) -> str:
+    version = value.strip().strip('"')
+    prefix = ""
+    if version[:1] in {"V", "v"}:
+        prefix = version[:1]
+        version = version[1:]
+    parts = version.split(".")
+    if not parts or not all(part.isdigit() for part in parts):
+        raise ValueError(f"版本号格式无法计算模块修订位：{value}")
+    parts[-1] = "0"
+    return f"{prefix}{'.'.join(parts)}"
+
+
+def next_version_revision_base(value: str) -> str:
+    prefix, parts = split_numeric_version(value)
+    if len(parts) == 1:
+        parts[0] += 1
+    else:
+        parts[-2] += 1
+        parts[-1] = 0
+    return f"{prefix}{'.'.join(str(part) for part in parts)}"
+
+
+def compare_versions(left: str, right: str) -> int:
+    _, left_parts = split_numeric_version(left)
+    _, right_parts = split_numeric_version(right)
+    width = max(len(left_parts), len(right_parts))
+    left_parts = left_parts + [0] * (width - len(left_parts))
+    right_parts = right_parts + [0] * (width - len(right_parts))
+    if left_parts == right_parts:
+        return 0
+    return 1 if left_parts > right_parts else -1
+
+
+def split_numeric_version(value: str) -> tuple[str, list[int]]:
+    version = value.strip().strip('"')
+    prefix = ""
+    if version[:1] in {"V", "v"}:
+        prefix = version[:1]
+        version = version[1:]
+    parts = version.split(".")
+    if not parts or not all(part.isdigit() for part in parts):
+        raise ValueError(f"版本号格式无法计算模块修订位：{value}")
+    return prefix, [int(part) for part in parts]
+
+
 def version_component(repo: RepositoryConfig) -> str:
     for value in (repo.id, repo.name, repo.project.rsplit("/", 1)[-1]):
         component = clean_component(value)
@@ -861,9 +948,14 @@ def render_version_info(
     return next_version, "\n".join(lines) + "\n"
 
 
-def render_version_info_full(fields: dict[str, str], component_refs: dict[str, dict[str, str]], current_time: str) -> tuple[str, str]:
+def render_version_info_full(
+    fields: dict[str, str],
+    component_refs: dict[str, dict[str, str]],
+    current_time: str,
+    changed_components: list[str] | tuple[str, ...] | None = None,
+) -> tuple[str, str]:
     previous_version = require_existing_version(fields)
-    next_version = bump_version(previous_version)
+    next_version = version_from_changed_components(previous_version, changed_components or tuple(component_refs), fields.get("NextVersion", ""))
     next_fields = dict(fields)
     for component, item in component_refs.items():
         next_fields[f"{component}_commitid"] = item["commit_id"]
@@ -941,6 +1033,10 @@ def component_commit_changed(component: str, current_commit_id: str, version_pla
 
 def is_merge_request_merged(merge_request: dict[str, Any] | None) -> bool:
     return bool(merge_request and str(merge_request.get("state", "")).lower() == "merged")
+
+
+def is_merge_request_closed(merge_request: dict[str, Any] | None) -> bool:
+    return bool(merge_request and str(merge_request.get("state", "")).lower() in {"closed", "canceled", "cancelled"})
 
 
 def load_dotenv(path: Path) -> None:

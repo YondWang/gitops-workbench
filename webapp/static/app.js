@@ -299,6 +299,7 @@ function handleTagOperationResult(body, result) {
       mergeRequest: result.merge_request,
       startedAt: Date.now(),
     };
+    renderPendingVersionTag();
     appendLog("等待版本号 MR 合并", {
       merge_request: result.merge_request.web_url || result.merge_request,
       source_branch: result.version_update?.branch,
@@ -308,11 +309,47 @@ function handleTagOperationResult(body, result) {
     scheduleVersionTagPoll();
     return;
   }
+  if (result?.phase === "version_update_aborted" || result?.terminated) {
+    const mergeRequest = result.merge_request || state.pendingVersionTag?.mergeRequest;
+    clearVersionTagPoll();
+    appendLog("已终止发版或打 Tag 流程", {
+      reason: result.message || "版本号更新 MR 已关闭",
+      merge_request: mergeRequest?.web_url || mergeRequest || "",
+    });
+    return;
+  }
   if (result?.ok && state.pendingVersionTag) {
     clearVersionTagPoll();
-    delete $("#logOutput").dataset.pendingTag;
     appendLog("版本号 MR 已合并", "已继续完成 Tag 创建");
   }
+}
+
+function renderPendingVersionTag() {
+  const panel = $("#pendingVersionTag");
+  if (!panel) return;
+  const pending = state.pendingVersionTag;
+  panel.classList.toggle("hidden", !pending);
+  if (!pending) return;
+
+  const mergeRequest = pending.mergeRequest || {};
+  const webUrl = typeof mergeRequest === "object" ? mergeRequest.web_url || "" : "";
+  const stateText = typeof mergeRequest === "object" ? mergeRequest.state || "opened" : "opened";
+  $("#pendingVersionTagMeta").textContent = `${pending.body.tag_name || "待创建 Tag"} · ${pending.body.version_update_branch || "版本更新分支"} · MR ${stateText}`;
+  const link = $("#pendingVersionTagLink");
+  link.classList.toggle("hidden", !webUrl);
+  link.href = webUrl || "#";
+}
+
+function abortPendingVersionTag() {
+  const pending = state.pendingVersionTag;
+  if (!pending) return;
+  const mergeRequest = pending.mergeRequest || {};
+  clearVersionTagPoll();
+  appendLog("已终止发版或打 Tag 流程", {
+    tag_name: pending.body.tag_name,
+    merge_request: mergeRequest.web_url || mergeRequest,
+    note: "已停止自动检查版本号 MR，不会继续自动创建 Tag",
+  });
 }
 
 function scheduleVersionTagPoll() {
@@ -328,6 +365,8 @@ function clearVersionTagPoll() {
   }
   state.pendingVersionTimer = null;
   state.pendingVersionTag = null;
+  delete $("#logOutput").dataset.pendingTag;
+  renderPendingVersionTag();
 }
 
 async function pollPendingVersionTag() {
@@ -338,6 +377,7 @@ async function pollPendingVersionTag() {
     appendLog("检查版本号 MR 状态", summarizeOperationResult(result));
     if (result?.phase === "waiting_version_mr") {
       state.pendingVersionTag.mergeRequest = result.merge_request || pending.mergeRequest;
+      renderPendingVersionTag();
       scheduleVersionTagPoll();
       return;
     }
@@ -368,6 +408,7 @@ function summarizeOperationResult(result) {
       result: item.result,
     })),
     blocked: result.blocked,
+    terminated: result.terminated,
     message: result.message,
     tag_name: result.tag_name,
     version_update: result.version_update,
@@ -460,6 +501,7 @@ function bindEvents() {
     event.preventDefault();
     handleOperation("创建 Tag", "/api/tags/create", event.currentTarget).catch((error) => appendLog("创建 Tag 失败", error.message));
   });
+  $("#abortPendingVersionTagBtn").addEventListener("click", abortPendingVersionTag);
 
   $("#repositoryForm").addEventListener("submit", (event) => {
     event.preventDefault();

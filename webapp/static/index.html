@@ -216,6 +216,16 @@
               </label>
               <button class="primary">创建 Tag</button>
             </form>
+            <div id="pendingVersionTag" class="pending-flow hidden" aria-live="polite">
+              <div>
+                <strong>等待版本号 MR 合并</strong>
+                <div class="meta" id="pendingVersionTagMeta"></div>
+              </div>
+              <div class="button-row">
+                <a id="pendingVersionTagLink" class="secondary button-link" href="#" target="_blank" rel="noreferrer">打开 MR</a>
+                <button id="abortPendingVersionTagBtn" class="danger" type="button">终止流程</button>
+              </div>
+            </div>
           </article>
           <article class="panel readonly-panel" data-user-block>
             <h2>权限不足</h2>

@@ -15,7 +15,7 @@
       "name": "workbench",
       "base_url": "https://www.chancee-shanghai.cn:9900",
       "project": "software_hmi_app/gitops-control",
-      "enabled": true,
+      "enabled": false,
       "default_ref": "main",
       "token_env": "GITLAB_TOKEN",
       "ssl_verify": true

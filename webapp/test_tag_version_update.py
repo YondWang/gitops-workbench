@@ -258,6 +258,27 @@ version:1.0.0
     def test_bump_version_preserves_last_segment_zero_padding(self) -> None:
         self.assertEqual(server.bump_version("3.1.21.063"), "3.1.21.064")
 
+    def test_version_rule_uses_update_version_component_revisions(self) -> None:
+        self.assertEqual(server.version_from_changed_components("3.1.21.063", ["business"]), "3.1.21.064")
+        self.assertEqual(server.version_from_changed_components("3.1.22.0", ["simos", "business"]), "3.1.22.03")
+        self.assertEqual(server.version_from_changed_components("3.1.22.0", ["mapengine", "perception"]), "3.1.22.024")
+        self.assertEqual(
+            server.version_from_changed_components("3.1.22.055", ["simos", "business", "localization", "mapengine", "pnc"]),
+            "3.1.23.047",
+        )
+        self.assertEqual(
+            server.version_from_changed_components("3.1.22.055", ["simos", "business", "localization", "mapengine", "pnc"], '""'),
+            "3.1.23.047",
+        )
+        self.assertEqual(
+            server.version_from_changed_components("3.1.22.055", ["simos", "business", "localization", "mapengine", "pnc"], "3.1.23.0"),
+            "3.1.23.047",
+        )
+        self.assertEqual(
+            server.version_from_changed_components("3.1.22.0", ["simos", "business", "localization", "mapengine", "perception", "pnc"]),
+            "3.1.22.063",
+        )
+
     def test_submodule_path_mapping_skips_simos_main_component(self) -> None:
         refs = {
             "simos": {"ref": "release", "commit_id": "simos-new"},
@@ -319,13 +340,13 @@ version:1.0.0
 
         actions = version_commit[3]
         version_action = next(action for action in actions if action["file_path"] == "version.info")
-        self.assertIn("Version:1.0.1", version_action["content"])
+        self.assertIn("Version:1.0.03", version_action["content"])
         self.assertIn("simos_commitid:simos-new", version_action["content"])
         self.assertIn("business_commitid:business-new", version_action["content"])
         pkg_action = next(action for action in actions if action["file_path"] == "pkg.info")
         self.assertIn("simos_branch:fix", pkg_action["content"])
         self.assertIn("business_branch:fix", pkg_action["content"])
-        self.assertIn("version:1.0.1.0", pkg_action["content"])
+        self.assertIn("version:1.0.03.0", pkg_action["content"])
         self.assertEqual(pkg_action["content"].count("_branch:"), 6)
         self.assertIn("pkg.info", result["version_update"]["files"])
         self.assertEqual(result["merge_request"]["state"], "opened")
@@ -370,6 +391,34 @@ version:1.0.0
         self.assertEqual(workbench_tag, ("create_tag", "release-20260615100000", "release", "candidate build"))
         self.assertEqual(simos_tag, ("create_tag", "release-20260615100000", "version-head", "candidate build"))
 
+    def test_closed_version_mr_terminates_pending_tag_workflow(self) -> None:
+        self.simos_client._merge_requests = [
+            {
+                "iid": 7,
+                "source_branch": "automation/version-info/release-20260615100000",
+                "target_branch": "release",
+                "title": "Update version info before tag release-20260615100000",
+                "state": "closed",
+                "web_url": "https://gitlab.example/simos/-/merge_requests/7",
+            }
+        ]
+
+        result = self.app.create_tag(
+            {
+                "scope": "all",
+                "ref": "release",
+                "tag_name": "release-20260615100000",
+                "message": "candidate build",
+                "update_version": True,
+            }
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["phase"], "version_update_aborted")
+        self.assertTrue(result["terminated"])
+        self.assertIn("已终止发版或打 Tag 流程", result["message"])
+        self.assertNotIn("create_tag", [call[0] for call in self.simos_client.calls])
+
     def test_version_mr_is_created_when_non_simos_component_changed(self) -> None:
         self.simos_client.version_info = SIMOS_CURRENT_VERSION_INFO
 
@@ -387,6 +436,7 @@ version:1.0.0
         self.assertEqual(result["phase"], "waiting_version_mr")
         version_commit = next(call for call in self.simos_client.calls if call[0] == "create_commit")
         version_action = next(action for action in version_commit[3] if action["file_path"] == "version.info")
+        self.assertIn("Version:1.0.1", version_action["content"])
         self.assertIn("business_commitid:business-new", version_action["content"])
 
     def test_version_update_falls_back_to_file_api_when_commit_api_returns_500(self) -> None:
