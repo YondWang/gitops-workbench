@@ -260,19 +260,32 @@ version:1.0.0
 
     def test_version_rule_uses_update_version_component_revisions(self) -> None:
         self.assertEqual(server.version_from_changed_components("3.1.21.063", ["business"]), "3.1.21.064")
-        self.assertEqual(server.version_from_changed_components("3.1.22.0", ["simos", "business"]), "3.1.22.03")
+        self.assertEqual(server.version_from_changed_components("3.1.22.0", ["simos", "business"], package_version="3.1.22.0"), "3.1.22.02")
         self.assertEqual(server.version_from_changed_components("3.1.22.0", ["mapengine", "perception"]), "3.1.22.024")
         self.assertEqual(
-            server.version_from_changed_components("3.1.22.055", ["simos", "business", "localization", "mapengine", "pnc"]),
-            "3.1.23.047",
+            server.version_from_changed_components(
+                "3.1.22.055",
+                ["simos", "business", "localization", "mapengine", "pnc"],
+                package_version="3.1.22.0",
+            ),
+            "3.1.22.046",
         )
         self.assertEqual(
-            server.version_from_changed_components("3.1.22.055", ["simos", "business", "localization", "mapengine", "pnc"], '""'),
-            "3.1.23.047",
+            server.version_from_changed_components(
+                "3.1.22.055",
+                ["simos", "business", "localization", "mapengine", "pnc"],
+                '""',
+                package_version="3.1.22.0",
+            ),
+            "3.1.22.046",
         )
         self.assertEqual(
-            server.version_from_changed_components("3.1.22.055", ["simos", "business", "localization", "mapengine", "pnc"], "3.1.23.0"),
-            "3.1.23.047",
+            server.version_from_changed_components(
+                "3.1.22.055",
+                ["simos", "business", "localization", "mapengine", "pnc"],
+                package_version="3.1.23.0",
+            ),
+            "3.1.23.046",
         )
         self.assertEqual(
             server.version_from_changed_components("3.1.22.0", ["simos", "business", "localization", "mapengine", "perception", "pnc"]),
@@ -327,7 +340,7 @@ version:1.0.0
         self.assertEqual(version_commit[1], "automation/version-info/release-20260615100000")
         self.assertEqual(version_commit[2], "Update version info before tag release-20260615100000")
         action_paths = [action["file_path"] for action in version_commit[3]]
-        self.assertEqual(action_paths, ["version.info", "pkg.info", "software.yaml"])
+        self.assertEqual(action_paths, ["version.info", "software.yaml"])
         self.assertEqual(
             next(call for call in self.simos_client.calls if call[0] == "create_merge_request"),
             (
@@ -340,15 +353,12 @@ version:1.0.0
 
         actions = version_commit[3]
         version_action = next(action for action in actions if action["file_path"] == "version.info")
-        self.assertIn("Version:1.0.03", version_action["content"])
+        self.assertIn("Version:1.0.02", version_action["content"])
         self.assertIn("simos_commitid:simos-new", version_action["content"])
         self.assertIn("business_commitid:business-new", version_action["content"])
-        pkg_action = next(action for action in actions if action["file_path"] == "pkg.info")
-        self.assertIn("simos_branch:fix", pkg_action["content"])
-        self.assertIn("business_branch:fix", pkg_action["content"])
-        self.assertIn("version:1.0.03.0", pkg_action["content"])
-        self.assertEqual(pkg_action["content"].count("_branch:"), 6)
-        self.assertIn("pkg.info", result["version_update"]["files"])
+        software_action = next(action for action in actions if action["file_path"] == "software.yaml")
+        self.assertIn('version: "1.0.02"', software_action["content"])
+        self.assertNotIn("pkg.info", result["version_update"]["files"])
         self.assertEqual(result["merge_request"]["state"], "opened")
 
     def test_all_repository_tag_waits_for_merged_version_mr_then_tags_all_repositories(self) -> None:

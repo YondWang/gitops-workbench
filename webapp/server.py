@@ -436,11 +436,17 @@ class GitOpsApp:
             summary["reason"] = "all component commit ids already recorded"
             summary["tag_ref"] = summary["source_commit"]
             return {**version_plan, "changed": False, "summary": summary, "component_refs": component_refs}
-        new_version, next_version_info = render_version_info_full(version_plan["version_info_fields"], component_refs, current_time, changed_components)
         previous_pkg_info = self.optional_file_text(targets, PKG_INFO_PATH, version_plan["ref"])
+        package_version = parse_pkg_info_version(previous_pkg_info)
+        new_version, next_version_info = render_version_info_full(
+            version_plan["version_info_fields"],
+            component_refs,
+            current_time,
+            changed_components,
+            package_version,
+        )
         actions = [
             {"action": "update", "file_path": VERSION_INFO_PATH, "content": next_version_info},
-            {"action": "update", "file_path": PKG_INFO_PATH, "content": render_pkg_info(new_version, previous_pkg_info)},
             {"action": "update", "file_path": SOFTWARE_YAML_PATH, "content": render_software_yaml(new_version, component_refs, current_time)},
         ]
         summary = dict(version_plan["summary"])
@@ -543,7 +549,7 @@ class GitOpsApp:
                 self.run_git(["update-index", "--cacheinfo", "160000", commit_id, path], cwd=str(repo_dir), env=git_env)
             self.run_git(["config", "user.name", "GitOps Workbench"], cwd=str(repo_dir), env=git_env)
             self.run_git(["config", "user.email", "gitops-workbench@local"], cwd=str(repo_dir), env=git_env)
-            self.run_git(["add", VERSION_INFO_PATH, PKG_INFO_PATH, SOFTWARE_YAML_PATH], cwd=str(repo_dir), env=git_env)
+            self.run_git(["add", VERSION_INFO_PATH, SOFTWARE_YAML_PATH], cwd=str(repo_dir), env=git_env)
             self.run_git(["commit", "-m", commit_message], cwd=str(repo_dir), env=git_env)
             commit_id = self.run_git(["rev-parse", "HEAD"], cwd=str(repo_dir), env=git_env).strip()
             self.run_git(["push", "origin", f"HEAD:{branch}"], cwd=str(repo_dir), env=git_env)
@@ -812,19 +818,25 @@ def bump_version(value: str) -> str:
     return f"{prefix}{'.'.join(parts)}"
 
 
-def version_from_changed_components(previous_version: str, changed_components: list[str] | tuple[str, ...], next_version: str = "") -> str:
+def version_from_changed_components(
+    previous_version: str,
+    changed_components: list[str] | tuple[str, ...],
+    next_version: str = "",
+    previous_baseline_version: str = "",
+    package_version: str = "",
+) -> str:
     components = [component for component in changed_components if component in VERSION_COMPONENT_REVISIONS]
     if not components:
         return previous_version.strip().strip('"')
     if len(components) == 1:
         return bump_version(previous_version)
+    normalized_baseline_version = previous_baseline_version.strip().strip('"')
     normalized_next_version = next_version.strip().strip('"')
-    revision = sum(VERSION_COMPONENT_REVISIONS[component] for component in components)
-    base_source = normalized_next_version or previous_version
-    candidate = append_component_revision(version_revision_base(base_source), revision)
-    if compare_versions(candidate, previous_version) > 0:
-        return candidate
-    return append_component_revision(next_version_revision_base(previous_version), revision)
+    normalized_package_version = package_version.strip().strip('"')
+    revision_components = components if not normalized_package_version else [component for component in components if component != "simos"]
+    revision = sum(VERSION_COMPONENT_REVISIONS[component] for component in revision_components)
+    base_source = normalized_package_version or normalized_baseline_version or normalized_next_version or previous_version
+    return append_component_revision(version_revision_base(base_source), revision)
 
 
 def append_component_revision(base_version: str, revision: int) -> str:
@@ -844,37 +856,11 @@ def version_revision_base(value: str) -> str:
     return f"{prefix}{'.'.join(parts)}"
 
 
-def next_version_revision_base(value: str) -> str:
-    prefix, parts = split_numeric_version(value)
-    if len(parts) == 1:
-        parts[0] += 1
-    else:
-        parts[-2] += 1
-        parts[-1] = 0
-    return f"{prefix}{'.'.join(str(part) for part in parts)}"
-
-
-def compare_versions(left: str, right: str) -> int:
-    _, left_parts = split_numeric_version(left)
-    _, right_parts = split_numeric_version(right)
-    width = max(len(left_parts), len(right_parts))
-    left_parts = left_parts + [0] * (width - len(left_parts))
-    right_parts = right_parts + [0] * (width - len(right_parts))
-    if left_parts == right_parts:
-        return 0
-    return 1 if left_parts > right_parts else -1
-
-
-def split_numeric_version(value: str) -> tuple[str, list[int]]:
-    version = value.strip().strip('"')
-    prefix = ""
-    if version[:1] in {"V", "v"}:
-        prefix = version[:1]
-        version = version[1:]
-    parts = version.split(".")
-    if not parts or not all(part.isdigit() for part in parts):
-        raise ValueError(f"版本号格式无法计算模块修订位：{value}")
-    return prefix, [int(part) for part in parts]
+def parse_pkg_info_version(text: str) -> str:
+    for line in text.splitlines():
+        if line.strip().startswith("version:"):
+            return line.split(":", 1)[1].strip().strip('"')
+    return ""
 
 
 def version_component(repo: RepositoryConfig) -> str:
@@ -953,9 +939,16 @@ def render_version_info_full(
     component_refs: dict[str, dict[str, str]],
     current_time: str,
     changed_components: list[str] | tuple[str, ...] | None = None,
+    package_version: str = "",
 ) -> tuple[str, str]:
     previous_version = require_existing_version(fields)
-    next_version = version_from_changed_components(previous_version, changed_components or tuple(component_refs), fields.get("NextVersion", ""))
+    next_version = version_from_changed_components(
+        previous_version,
+        changed_components or tuple(component_refs),
+        fields.get("NextVersion", ""),
+        fields.get("PreVersion", ""),
+        package_version,
+    )
     next_fields = dict(fields)
     for component, item in component_refs.items():
         next_fields[f"{component}_commitid"] = item["commit_id"]
