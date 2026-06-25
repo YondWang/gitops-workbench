@@ -5,11 +5,16 @@ const state = {
   currentRepositoryId: "",
   branches: [],
   tags: [],
+  simosTags: [],
   commonRefs: null,
   log: [],
   pendingVersionTag: null,
   pendingVersionTimer: null,
+  residentPackage: null,
+  residentPackageTimer: null,
 };
+
+const RESIDENT_PACKAGE_TAG_RE = /^(?:release|fix|bugfix-[A-Za-z0-9._-]+)_[Vv]?\d+(?:\.\d+)+_\d{8}$/;
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -37,13 +42,17 @@ function formValues(form) {
   form.querySelectorAll('input[type="checkbox"]').forEach((input) => {
     data[input.name] = input.checked;
   });
+  form.querySelectorAll('select[multiple]').forEach((select) => {
+    data[select.name] = Array.from(select.selectedOptions).map((option) => option.value).filter(Boolean);
+  });
   return data;
 }
 
 function operationBody(form) {
+  const body = formValues(form);
   return {
-    ...formValues(form),
-    repository_id: state.currentRepositoryId,
+    ...body,
+    repository_id: body.repository_id || state.currentRepositoryId,
   };
 }
 
@@ -51,11 +60,134 @@ function currentRepository() {
   return state.repositories.find((repo) => repo.id === state.currentRepositoryId) || state.repositories[0] || null;
 }
 
+function simosRepository() {
+  return state.repositories.find((repo) => repo.id === "simos") || null;
+}
+
 function appendLog(title, payload) {
   const stamp = new Date().toLocaleTimeString();
   const body = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
   state.log.unshift(`[${stamp}] ${title}\n${body}`);
   $("#logOutput").textContent = state.log.join("\n\n");
+}
+
+function isResidentPackageTag(tag) {
+  return RESIDENT_PACKAGE_TAG_RE.test(String(tag || ""));
+}
+
+function tagNameFromOperationResult(body, result) {
+  if (result?.tag_name) return result.tag_name;
+  const precheckTag = result?.precheck?.find((item) => item?.context?.tag_name)?.context?.tag_name;
+  if (precheckTag) return precheckTag;
+  const resultTag = result?.results?.find((item) => item?.result?.tag_name || item?.result?.tag?.name)?.result;
+  return resultTag?.tag_name || resultTag?.tag?.name || body?.tag_name || "";
+}
+
+function residentStatusText(status) {
+  const value = String(status || "");
+  if (value === "success" || value === "ready") return "成功";
+  if (value === "failed" || value === "error") return "失败";
+  if (value === "checking") return "查询中";
+  if (value === "pending_or_missing") return "构建中/未找到";
+  return value || "未知";
+}
+
+function residentStatusClass(status) {
+  const value = String(status || "");
+  if (value === "success" || value === "ready") return "badge ok";
+  if (value === "failed" || value === "error") return "badge error";
+  return "badge muted";
+}
+
+function residentPipelineUrl(packageInfo) {
+  return (
+    packageInfo?.pipeline_url ||
+    packageInfo?.job_url ||
+    packageInfo?.web_url ||
+    packageInfo?.pipeline?.web_url ||
+    packageInfo?.job?.web_url ||
+    ""
+  );
+}
+
+function renderResidentPackage() {
+  const panel = $("#residentPackagePanel");
+  if (!panel) return;
+  const packageInfo = state.residentPackage;
+  panel.classList.toggle("hidden", !packageInfo);
+  if (!packageInfo) return;
+
+  const status = packageInfo.status || "checking";
+  const badge = $("#residentPackageStatus");
+  badge.textContent = residentStatusText(status);
+  badge.className = residentStatusClass(status);
+  $("#residentPackageTag").textContent = packageInfo.tag || "-";
+  $("#residentPackagePath").textContent = packageInfo.artifact_path || `/data/simos-ci/artifacts/${packageInfo.tag || "<tag>"}/resident.tar.gz`;
+  $("#residentPackageSha").textContent = packageInfo.sha256 || "-";
+  $("#residentPackageBuiltAt").textContent = packageInfo.built_at || packageInfo.finished_at || "-";
+  $("#residentPackageMeta").textContent = packageInfo.message || packageInfo.error || "Tag Pipeline 会在 GitLab Runner 上自动构建 resident.tar.gz";
+
+  const pipelineUrl = residentPipelineUrl(packageInfo);
+  const link = $("#residentPackagePipelineLink");
+  link.classList.toggle("hidden", !pipelineUrl);
+  link.href = pipelineUrl || "#";
+}
+
+function clearResidentPackagePoll() {
+  if (state.residentPackageTimer) {
+    clearTimeout(state.residentPackageTimer);
+  }
+  state.residentPackageTimer = null;
+}
+
+function scheduleResidentPackagePoll(tag) {
+  clearResidentPackagePoll();
+  state.residentPackageTimer = setTimeout(() => fetchResidentPackage(tag), 15000);
+}
+
+async function fetchResidentPackage(tag) {
+  if (!isResidentPackageTag(tag)) return;
+  const previousStatus = state.residentPackage?.status || "";
+  try {
+    const data = await api(`/api/resident-packages?tag=${encodeURIComponent(tag)}`);
+    if (state.residentPackage?.tag && state.residentPackage.tag !== tag) return;
+    state.residentPackage = data;
+    renderResidentPackage();
+    if (data.status === "pending_or_missing") {
+      scheduleResidentPackagePoll(tag);
+      return;
+    }
+    clearResidentPackagePoll();
+    if (previousStatus !== data.status) {
+      appendLog("resident 包状态", data);
+    }
+  } catch (error) {
+    state.residentPackage = {
+      tag,
+      status: "error",
+      artifact_path: `/data/simos-ci/artifacts/${tag}/resident.tar.gz`,
+      error: error.message,
+    };
+    renderResidentPackage();
+    scheduleResidentPackagePoll(tag);
+  }
+}
+
+function watchResidentPackage(tag) {
+  if (!isResidentPackageTag(tag)) return;
+  clearResidentPackagePoll();
+  state.residentPackage = {
+    tag,
+    status: "checking",
+    artifact_path: `/data/simos-ci/artifacts/${tag}/resident.tar.gz`,
+    message: "正在等待 GitLab Tag Pipeline 生成 resident 包",
+  };
+  renderResidentPackage();
+  appendLog("已触发 resident 包状态跟踪", {
+    tag,
+    artifact_path: state.residentPackage.artifact_path,
+  });
+  fetchResidentPackage(tag);
 }
 
 function showLoginMessage(text, isError = false) {
@@ -91,6 +223,10 @@ function renderConfig() {
   if (!state.config) return;
   const repo = currentRepository();
   $("#projectName").textContent = repo ? `${repo.name} / ${repo.project}` : "暂无仓库";
+  const baseInput = $("#tagForm")?.elements.base_version;
+  if (baseInput && !baseInput.value) {
+    baseInput.value = defaultVersionBase();
+  }
   $("#configOutput").textContent = JSON.stringify(state.config, null, 2);
 }
 
@@ -179,6 +315,7 @@ function renderSelectOptions() {
   fillSelect("#featureRef", featureRefs.featureSources, "release");
   fillSelect("#bugfixRef", bugfixRefs.refs, "release");
   fillSelect("#tagRef", tagRefs.branches);
+  renderTagDeleteOptions();
   syncTagUpdateVersionControl();
 }
 
@@ -206,16 +343,78 @@ function sourceOptions(scope) {
   return { branches, tags, refs: [...branches, ...tags], featureSources };
 }
 
+function fillMultiSelect(selector, values) {
+  const select = $(selector);
+  if (!select) return;
+  const previous = Array.from(select.selectedOptions).map((option) => option.value);
+  if (!values.length) {
+    select.innerHTML = "<option value=\"\" disabled>暂无可选 Tag</option>";
+    select.disabled = true;
+    return;
+  }
+  const open = "<option value=\"";
+  const mid = '">';
+  const close = "</option>";
+  select.innerHTML = values.map((value) => open + escapeHtml(value) + mid + escapeHtml(value) + close).join("");
+  const nextSelected = previous.filter((value) => values.includes(value));
+  Array.from(select.options).forEach((option) => {
+    option.selected = nextSelected.includes(option.value);
+  });
+  select.disabled = false;
+}
+
+function tagDeleteOptions(scope) {
+  const tags = scope === "all" ? state.commonRefs?.tags || [] : state.tags;
+  return tags.map((item) => item.name).sort((a, b) => a.localeCompare(b));
+}
+
+function renderTagDeleteOptions() {
+  const deleteScope = $("#tagDeleteForm")?.elements.scope?.value || "single";
+  const deleteOptions = tagDeleteOptions(deleteScope);
+  fillMultiSelect("#tagDeleteSelect", deleteOptions);
+  const deleteHint = $("#tagDeleteHint");
+  if (deleteHint) {
+    deleteHint.textContent = deleteScope === "all" ? `显示全部启用仓库共有 Tag，共 ${deleteOptions.length} 个` : `显示当前仓库 Tag，共 ${deleteOptions.length} 个`;
+  }
+
+  const simosRepo = simosRepository();
+  const simosPanel = $("#simosTagPanel");
+  simosPanel?.classList.toggle("hidden", !simosRepo);
+  if (!simosRepo) {
+    return;
+  }
+  const simosOptions = state.simosTags.map((item) => item.name).sort((a, b) => a.localeCompare(b));
+  fillMultiSelect("#simosTagDeleteSelect", simosOptions);
+  const simosHint = $("#simosTagHint");
+  if (simosHint) {
+    simosHint.textContent = `显示 simos 主库 Tag，共 ${simosOptions.length} 个`;
+  }
+}
+
+function defaultVersionBase() {
+  return state.config?.version_update?.base_version || "";
+}
+
 function syncTagUpdateVersionControl() {
   const form = $("#tagForm");
   if (!form?.elements.update_version) return;
   const checkbox = form.elements.update_version;
+  const baseField = $("#tagBaseVersionField");
+  const baseInput = form.elements.base_version;
   const enabled = form.elements.scope?.value === "all";
   checkbox.disabled = !enabled;
   checkbox.title = enabled ? "" : "仅在全部启用仓库范围可用";
   checkbox.closest(".checkline")?.classList.toggle("disabled", !enabled);
   if (!enabled) {
     checkbox.checked = false;
+  }
+  const showBaseVersion = enabled && checkbox.checked;
+  baseField?.classList.toggle("hidden", !showBaseVersion);
+  if (baseInput) {
+    baseInput.disabled = !showBaseVersion;
+    if (showBaseVersion && !baseInput.value) {
+      baseInput.value = defaultVersionBase();
+    }
   }
 }
 
@@ -244,6 +443,7 @@ async function refreshAll() {
   if (!state.currentRepositoryId) {
     state.branches = [];
     state.tags = [];
+    state.simosTags = [];
     state.commonRefs = null;
     renderBranches();
     renderTags();
@@ -253,16 +453,24 @@ async function refreshAll() {
   const search = $("#branchSearch").value.trim();
   const params = new URLSearchParams({ repository_id: state.currentRepositoryId });
   if (search) params.set("search", search);
-  const [branches, tags, commonRefs] = await Promise.all([
+  const simosRepo = simosRepository();
+  const [branches, tags, commonRefs, simosTags] = await Promise.all([
     api(`/api/branches?${params}`),
     api(`/api/tags?${params}`),
     api("/api/common-refs").catch((error) => {
       appendLog("刷新公共来源失败", error.message);
       return null;
     }),
+    simosRepo
+      ? api(`/api/repositories/${encodeURIComponent(simosRepo.id)}/tags`).catch((error) => {
+          appendLog("刷新 simos Tag 失败", error.message);
+          return null;
+        })
+      : Promise.resolve(null),
   ]);
   state.branches = branches.branches || [];
   state.tags = tags.tags || [];
+  state.simosTags = simosTags?.tags || [];
   state.commonRefs = commonRefs;
   renderBranches();
   renderTags();
@@ -292,8 +500,13 @@ function handleTagOperationResult(body, result) {
     const nextBody = {
       ...body,
       tag_name: result.tag_name || body.tag_name,
+      base_version: result.version_update?.base_version || body.base_version,
       version_update_branch: result.version_update?.branch,
     };
+    if (result.version_update?.base_version) {
+      state.config = state.config || {};
+      state.config.version_update = { ...(state.config.version_update || {}), base_version: result.version_update.base_version };
+    }
     state.pendingVersionTag = {
       body: nextBody,
       mergeRequest: result.merge_request,
@@ -321,6 +534,12 @@ function handleTagOperationResult(body, result) {
   if (result?.ok && state.pendingVersionTag) {
     clearVersionTagPoll();
     appendLog("版本号 MR 已合并", "已继续完成 Tag 创建");
+  }
+  if (result?.ok) {
+    const tagName = tagNameFromOperationResult(body, result);
+    if (isResidentPackageTag(tagName)) {
+      watchResidentPackage(tagName);
+    }
   }
 }
 
@@ -480,6 +699,8 @@ function bindEvents() {
   document.querySelectorAll('form select[name="scope"]').forEach((select) => {
     select.addEventListener("change", renderSelectOptions);
   });
+  $("#tagDeleteForm")?.elements.scope?.addEventListener("change", renderTagDeleteOptions);
+  $("#tagForm")?.elements.update_version?.addEventListener("change", syncTagUpdateVersionControl);
   syncTagUpdateVersionControl();
 
   $("#featureForm").addEventListener("submit", (event) => {
@@ -500,6 +721,14 @@ function bindEvents() {
   $("#tagForm").addEventListener("submit", (event) => {
     event.preventDefault();
     handleOperation("创建 Tag", "/api/tags/create", event.currentTarget).catch((error) => appendLog("创建 Tag 失败", error.message));
+  });
+  $("#tagDeleteForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    handleOperation("批量删除 Tag", "/api/tags/delete", event.currentTarget).catch((error) => appendLog("批量删除 Tag 失败", error.message));
+  });
+  $("#simosTagDeleteForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    handleOperation("删除 simos Tag", "/api/tags/delete", event.currentTarget).catch((error) => appendLog("删除 simos Tag 失败", error.message));
   });
   $("#abortPendingVersionTagBtn").addEventListener("click", abortPendingVersionTag);
 

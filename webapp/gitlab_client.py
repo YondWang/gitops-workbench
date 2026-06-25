@@ -154,6 +154,10 @@ class GitLabClient:
             payload["message"] = message
         return self.request("POST", self.project_api_path("/repository/tags"), payload=payload)
 
+    def delete_tag(self, tag_name: str) -> dict[str, Any]:
+        self.request("DELETE", self.project_api_path(f"/repository/tags/{quote(tag_name, safe='')}"))
+        return {"name": tag_name, "deleted": True}
+
     def get_file_text(self, file_path: str, ref: str) -> str:
         data = self.request(
             "GET",

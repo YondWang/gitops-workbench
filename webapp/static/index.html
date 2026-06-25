@@ -186,47 +186,118 @@
         </section>
 
         <section id="tag" class="view">
-          <article class="panel form-panel" data-admin-only>
-            <div class="panel-title">
-              <h2>创建 Tag</h2>
-            </div>
-            <form id="tagForm">
-              <label>
-                操作范围
-                <select name="scope">
-                  <option value="single">当前仓库</option>
-                  <option value="all">全部启用仓库</option>
-                </select>
-              </label>
-              <label>
-                Tag 来源
-                <select id="tagRef" name="ref" required></select>
-              </label>
-              <label>
-                Tag 名称（可选）
-                <input name="tag_name" placeholder="留空自动生成 来源-时间戳 自动化生成，不建议手动命名！" />
-              </label>
-              <label>
-                Tag 说明
-                <textarea name="message" rows="4" placeholder="填写提测/发版用途、验证范围和回滚方式"></textarea>
-              </label>
-              <label class="checkline">
-                <input name="update_version" type="checkbox" />
-                打 Tag 前先更新版本号
-              </label>
-              <button class="primary">创建 Tag</button>
-            </form>
-            <div id="pendingVersionTag" class="pending-flow hidden" aria-live="polite">
-              <div>
-                <strong>等待版本号 MR 合并</strong>
-                <div class="meta" id="pendingVersionTagMeta"></div>
+          <div class="grid two tag-grid">
+            <article class="panel form-panel tag-primary-panel" data-admin-only>
+              <div class="panel-title">
+                <h2>创建 Tag</h2>
               </div>
-              <div class="button-row">
-                <a id="pendingVersionTagLink" class="secondary button-link" href="#" target="_blank" rel="noreferrer">打开 MR</a>
-                <button id="abortPendingVersionTagBtn" class="danger" type="button">终止流程</button>
+              <form id="tagForm">
+                <label>
+                  操作范围
+                  <select name="scope">
+                    <option value="single">当前仓库</option>
+                    <option value="all">全部启用仓库</option>
+                  </select>
+                </label>
+                <label>
+                  Tag 来源
+                  <select id="tagRef" name="ref" required></select>
+                </label>
+                <label>
+                  Tag 名称（可选）
+                  <input name="tag_name" placeholder="留空自动生成 来源分支_版本号_yyyyMMdd，建议保持自动命名" />
+                </label>
+                <label>
+                  Tag 说明
+                  <textarea name="message" rows="4" placeholder="填写提测/发版用途、验证范围和回滚方式"></textarea>
+                </label>
+                <label class="checkline">
+                  <input name="update_version" type="checkbox" />
+                  打 Tag 前先更新版本号
+                </label>
+                <label id="tagBaseVersionField" class="version-base-field hidden">
+                  本周基线版本（可选）
+                  <input name="base_version" placeholder="如 3.1.23.0，留空使用默认值" disabled />
+                </label>
+                <button class="primary">创建 Tag</button>
+              </form>
+              <div id="pendingVersionTag" class="pending-flow hidden" aria-live="polite">
+                <div>
+                  <strong>等待版本号 MR 合并</strong>
+                  <div class="meta" id="pendingVersionTagMeta"></div>
+                </div>
+                <div class="button-row">
+                  <a id="pendingVersionTagLink" class="secondary button-link" href="#" target="_blank" rel="noreferrer">打开 MR</a>
+                  <button id="abortPendingVersionTagBtn" class="danger" type="button">终止流程</button>
+                </div>
               </div>
+              <div id="residentPackagePanel" class="resident-package hidden" aria-live="polite">
+                <div class="panel-title compact-title">
+                  <h2>resident 包</h2>
+                  <span id="residentPackageStatus" class="badge muted">未触发</span>
+                </div>
+                <div class="resident-package-grid">
+                  <div>
+                    <div class="eyebrow">Tag</div>
+                    <code id="residentPackageTag">-</code>
+                  </div>
+                  <div>
+                    <div class="eyebrow">固定路径</div>
+                    <code id="residentPackagePath">-</code>
+                  </div>
+                  <div>
+                    <div class="eyebrow">SHA256</div>
+                    <code id="residentPackageSha">-</code>
+                  </div>
+                  <div>
+                    <div class="eyebrow">构建时间</div>
+                    <span id="residentPackageBuiltAt">-</span>
+                  </div>
+                </div>
+                <div class="meta" id="residentPackageMeta"></div>
+                <a id="residentPackagePipelineLink" class="secondary button-link hidden" href="#" target="_blank" rel="noreferrer">打开 Pipeline</a>
+              </div>
+            </article>
+            <div class="tag-side-stack" data-admin-only>
+              <article class="panel form-panel danger-panel">
+                <div class="panel-title">
+                  <h2>批量删除 Tag</h2>
+                </div>
+                <p class="meta">当前仓库显示本仓库 Tag；全部仓库只显示全部启用仓库共有的 Tag。</p>
+                <form id="tagDeleteForm">
+                  <label>
+                    操作范围
+                    <select name="scope">
+                      <option value="single">当前仓库</option>
+                      <option value="all">全部启用仓库</option>
+                    </select>
+                  </label>
+                  <label>
+                    选择 Tag
+                    <select id="tagDeleteSelect" name="tags" multiple size="10" required></select>
+                  </label>
+                  <div id="tagDeleteHint" class="meta tag-manage-meta"></div>
+                  <button class="danger">删除选中 Tag</button>
+                </form>
+              </article>
+              <article id="simosTagPanel" class="panel form-panel danger-panel hidden">
+                <div class="panel-title">
+                  <h2>simos Tag 管理</h2>
+                </div>
+                <p class="meta">单独管理 simos 主库的 Tag，不受当前仓库选择影响。</p>
+                <form id="simosTagDeleteForm">
+                  <input type="hidden" name="repository_id" value="simos" />
+                  <input type="hidden" name="scope" value="single" />
+                  <label>
+                    选择 simos Tag
+                    <select id="simosTagDeleteSelect" name="tags" multiple size="10" required></select>
+                  </label>
+                  <div id="simosTagHint" class="meta tag-manage-meta"></div>
+                  <button class="danger">删除选中 simos Tag</button>
+                </form>
+              </article>
             </div>
-          </article>
+          </div>
           <article class="panel readonly-panel" data-user-block>
             <h2>权限不足</h2>
             <p>创建 Tag 需要 admin 角色。</p>

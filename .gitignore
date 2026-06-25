@@ -6,3 +6,4 @@ gitlab-local/
 !.env.example
 webapp/.env.local
 deploy/certs/
+webapp/data/version-settings.json

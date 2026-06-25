@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
+import branch_policy
 import server
 from repository_store import RepositoryConfig
 
@@ -157,6 +160,11 @@ date: "2026-06-01 10:00:00"
         self.record(("create_tag", tag_name, ref, message))
         return {"name": tag_name, "target": ref}
 
+    def delete_tag(self, tag_name: str) -> dict[str, Any]:
+        self.record(("delete_tag", tag_name))
+        self._tag_names = [name for name in self._tag_names if name != tag_name]
+        return {"name": tag_name, "deleted": True}
+
     def create_branch(self, branch: str, ref: str) -> dict[str, Any]:
         self.record(("create_branch", branch, ref))
         self.created_branches.add(branch)
@@ -198,6 +206,9 @@ date: "2026-06-01 10:00:00"
 
 class TagVersionUpdateTest(unittest.TestCase):
     def setUp(self) -> None:
+        self.version_settings_tmp = tempfile.TemporaryDirectory()
+        self.original_version_settings_path = server.VERSION_SETTINGS_PATH
+        server.VERSION_SETTINGS_PATH = Path(self.version_settings_tmp.name) / "version-settings.json"
         self.business_repo = RepositoryConfig(
             id="business",
             name="business",
@@ -242,6 +253,10 @@ version:1.0.0
         }
         self.app.client_for = lambda repo: self.clients[repo.id]  # type: ignore[method-assign]
 
+    def tearDown(self) -> None:
+        server.VERSION_SETTINGS_PATH = self.original_version_settings_path
+        self.version_settings_tmp.cleanup()
+
     def test_update_version_is_only_allowed_for_all_repositories_scope(self) -> None:
         with self.assertRaisesRegex(ValueError, "只能在全部启用仓库"):
             self.app.create_tag(
@@ -257,6 +272,13 @@ version:1.0.0
 
     def test_bump_version_preserves_last_segment_zero_padding(self) -> None:
         self.assertEqual(server.bump_version("3.1.21.063"), "3.1.21.064")
+
+    def test_default_tag_name_uses_source_version_and_day_stamp(self) -> None:
+        self.assertEqual(branch_policy.default_tag_name("fix", "3.1.22.046", "20260624"), "fix_3.1.22.046_20260624")
+        self.assertEqual(
+            branch_policy.default_tag_name("bugfix/V3.1.23.0", "3.1.23.046", "20260624"),
+            "bugfix-V3.1.23.0_3.1.23.046_20260624",
+        )
 
     def test_version_rule_uses_update_version_component_revisions(self) -> None:
         self.assertEqual(server.version_from_changed_components("3.1.21.063", ["business"]), "3.1.21.064")
@@ -307,6 +329,86 @@ version:1.0.0
             },
         )
 
+    def test_single_repository_tag_without_version_info_falls_back_to_simos_version(self) -> None:
+        with mock.patch.object(server, "default_tag_name", side_effect=lambda ref, version: f"{ref}_{version}_DATE"):
+            result = self.app.create_tag(
+                {
+                    "repository_id": "business",
+                    "scope": "single",
+                    "ref": "release",
+                    "message": "candidate build",
+                }
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            next(call for call in self.business_client.calls if call[0] == "create_tag"),
+            ("create_tag", "release_1.0.0_DATE", "release", "candidate build"),
+        )
+
+    def test_all_repository_update_version_autogenerates_tag_name_from_planned_version(self) -> None:
+        with mock.patch.object(server, "default_tag_name", side_effect=lambda ref, version: f"{ref}_{version}_DATE"):
+            result = self.app.create_tag(
+                {
+                    "scope": "all",
+                    "ref": "release",
+                    "message": "candidate build",
+                    "update_version": True,
+                }
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["phase"], "waiting_version_mr")
+        self.assertEqual(result["tag_name"], "release_1.0.02_DATE")
+
+    def test_delete_tags_deletes_requested_tags_in_single_repository(self) -> None:
+        self.business_client._tag_names = ["release-20260615100000", "fix-20260615110000", "keep-me"]
+
+        result = self.app.delete_tags(
+            {
+                "repository_id": "business",
+                "scope": "single",
+                "tags": "release-20260615100000\nfix-20260615110000",
+            }
+        )
+
+        self.assertTrue(result["ok"])
+        deleted = result["results"][0]["result"]["deleted_tags"]
+        self.assertEqual([item["name"] for item in deleted], ["release-20260615100000", "fix-20260615110000"])
+        self.assertEqual(result["results"][0]["result"]["missing_tags"], [])
+        self.assertEqual(self.business_client._tag_names, ["keep-me"])
+
+    def test_delete_tags_reports_missing_tags_across_repositories(self) -> None:
+        self.business_client._tag_names = ["release-20260615100000"]
+        self.simos_client._tag_names = ["keep-me"]
+
+        result = self.app.delete_tags(
+            {
+                "scope": "all",
+                "tags": "release-20260615100000\nfix-20260615110000",
+            }
+        )
+
+        self.assertFalse(result["ok"])
+        by_repo = {item["repository"]["id"]: item for item in result["results"]}
+        self.assertEqual([item["name"] for item in by_repo["business"]["result"]["deleted_tags"]], ["release-20260615100000"])
+        self.assertEqual(by_repo["business"]["result"]["missing_tags"], ["fix-20260615110000"])
+        self.assertEqual(by_repo["simos"]["result"]["missing_tags"], ["release-20260615100000", "fix-20260615110000"])
+
+    def test_delete_tags_accepts_tag_arrays(self) -> None:
+        self.business_client._tag_names = ["release-20260615100000", "fix-20260615110000"]
+
+        result = self.app.delete_tags(
+            {
+                "repository_id": "business",
+                "scope": "single",
+                "tags": ["release-20260615100000", "fix-20260615110000"],
+            }
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.business_client._tag_names, [])
+
     def test_all_repository_tag_creates_simos_version_mr_before_any_tag(self) -> None:
         result = self.app.create_tag(
             {
@@ -356,10 +458,37 @@ version:1.0.0
         self.assertIn("Version:1.0.02", version_action["content"])
         self.assertIn("simos_commitid:simos-new", version_action["content"])
         self.assertIn("business_commitid:business-new", version_action["content"])
+        self.assertIn("simos_branch:release-20260615100000", version_action["content"])
+        self.assertIn("business_branch:release-20260615100000", version_action["content"])
         software_action = next(action for action in actions if action["file_path"] == "software.yaml")
         self.assertIn('version: "1.0.02"', software_action["content"])
+        self.assertIn('business: "release-20260615100000"', software_action["content"])
         self.assertNotIn("pkg.info", result["version_update"]["files"])
         self.assertEqual(result["merge_request"]["state"], "opened")
+
+    def test_all_repository_tag_uses_manual_base_version_and_saves_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            original_settings_path = server.VERSION_SETTINGS_PATH
+            server.VERSION_SETTINGS_PATH = Path(tmp) / "version-settings.json"
+            try:
+                result = self.app.create_tag(
+                    {
+                        "scope": "all",
+                        "ref": "release",
+                        "tag_name": "release-20260615100000",
+                        "message": "candidate build",
+                        "update_version": True,
+                        "base_version": "1.1.0",
+                    }
+                )
+                version_commit = next(call for call in self.simos_client.calls if call[0] == "create_commit")
+                version_action = next(action for action in version_commit[3] if action["file_path"] == "version.info")
+
+                self.assertIn("Version:1.1.02", version_action["content"])
+                self.assertEqual(result["version_update"]["base_version"], "1.1.0")
+                self.assertEqual(self.app.public_config()["version_update"]["base_version"], "1.1.0")
+            finally:
+                server.VERSION_SETTINGS_PATH = original_settings_path
 
     def test_all_repository_tag_waits_for_merged_version_mr_then_tags_all_repositories(self) -> None:
         self.simos_client.version_info = CURRENT_VERSION_INFO
@@ -448,6 +577,33 @@ version:1.0.0
         version_action = next(action for action in version_commit[3] if action["file_path"] == "version.info")
         self.assertIn("Version:1.0.1", version_action["content"])
         self.assertIn("business_commitid:business-new", version_action["content"])
+
+    def test_version_update_uses_tag_name_not_source_branch_in_software_yaml_and_version_info(self) -> None:
+        self.simos_client._branch_names = ["fix", "release"]
+        self.business_client._branch_names = ["fix", "release"]
+        self.workbench_client._branch_names = ["fix", "release"]
+
+        result = self.app.create_tag(
+            {
+                "scope": "all",
+                "ref": "fix",
+                "tag_name": "fix_3.1.22.046_20260624",
+                "message": "fix build",
+                "update_version": True,
+            }
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["phase"], "waiting_version_mr")
+        version_commit = next(call for call in self.simos_client.calls if call[0] == "create_commit")
+        actions = version_commit[3]
+        version_action = next(action for action in actions if action["file_path"] == "version.info")
+        software_action = next(action for action in actions if action["file_path"] == "software.yaml")
+        self.assertIn("simos_branch:fix_3.1.22.046_20260624", version_action["content"])
+        self.assertIn("business_branch:fix_3.1.22.046_20260624", version_action["content"])
+        self.assertNotIn("simos_branch:fix\n", version_action["content"])
+        self.assertIn('business: "fix_3.1.22.046_20260624"', software_action["content"])
+        self.assertNotIn('business: "fix"', software_action["content"])
 
     def test_version_update_falls_back_to_file_api_when_commit_api_returns_500(self) -> None:
         self.skipTest("Direct release update is replaced by version MR flow.")

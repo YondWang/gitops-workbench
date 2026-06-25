@@ -242,6 +242,11 @@ button {
   grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.6fr);
 }
 
+.tag-grid {
+  grid-template-columns: minmax(0, 1.15fr) minmax(360px, 0.85fr);
+  align-items: start;
+}
+
 .panel {
   background: var(--surface);
   border: 1px solid var(--line);
@@ -254,8 +259,38 @@ button {
   max-width: 720px;
 }
 
+.tag-primary-panel,
+.tag-side-stack > .form-panel {
+  max-width: none;
+}
+
 .readonly-panel {
   max-width: 520px;
+}
+
+.tag-side-stack {
+  display: grid;
+  gap: 16px;
+  align-content: start;
+}
+
+.danger-panel {
+  max-width: none;
+}
+
+.danger-panel textarea,
+.danger-panel select[multiple] {
+  min-height: 220px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.danger-panel select[multiple] {
+  padding: 10px;
+}
+
+.tag-manage-meta {
+  min-height: 20px;
+  margin-bottom: 12px;
 }
 
 .panel-title {
@@ -288,6 +323,12 @@ button {
 .badge.muted {
   background: var(--surface-soft);
   color: var(--muted);
+}
+
+.badge.error {
+  background: #fee2e2;
+  color: var(--danger);
+  border-color: #fecaca;
 }
 
 .pill {
@@ -352,6 +393,15 @@ textarea {
   cursor: not-allowed;
 }
 
+.version-base-field.hidden {
+  display: none;
+}
+
+.version-base-field input:disabled {
+  cursor: not-allowed;
+  background: var(--surface-muted);
+}
+
 .message {
   min-height: 22px;
   margin-top: 12px;
@@ -376,6 +426,33 @@ textarea {
 
 .pending-flow > div:first-child {
   min-width: 0;
+}
+
+.resident-package {
+  margin-top: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--surface-soft);
+}
+
+.compact-title {
+  margin-bottom: 10px;
+}
+
+.resident-package-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+}
+
+.resident-package code {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.resident-package .button-link {
+  margin-top: 10px;
 }
 
 .table-wrap {
@@ -480,11 +557,21 @@ code {
     flex-direction: column;
   }
 
+  .resident-package-grid {
+    grid-template-columns: 1fr;
+  }
+
   .search {
     width: 100%;
   }
 
   .repo-select {
     width: 100%;
+  }
+}
+
+@media (max-width: 1120px) {
+  .tag-grid {
+    grid-template-columns: 1fr;
   }
 }

@@ -76,6 +76,29 @@ upper_ticket() {
     | sed -E 's/[^A-Z0-9]+//g; s/^$/TASK/'
 }
 
+tag_source_name() {
+  require_safe_ref_name "$1" "tag source"
+  printf '%s' "$1" | sed 's#/#-#g'
+}
+
+tag_date_now() {
+  date '+%Y%m%d'
+}
+
+version_from_ref_name() {
+  printf '%s' "$1" | grep -oE '[Vv]?[0-9]+(\.[0-9]+)+' | head -n1
+}
+
+compose_tag_name() {
+  source_ref="$1"
+  version_value="${2:-$(version_from_ref_name "$source_ref")}"
+  if [ -z "$version_value" ]; then
+    err "cannot derive version from ref for tag naming: ${source_ref}"
+    exit 2
+  fi
+  printf '%s_%s_%s' "$(tag_source_name "$source_ref")" "$version_value" "$(tag_date_now)"
+}
+
 require_safe_ref_name() {
   value="$1"
   label="${2:-ref}"
@@ -255,11 +278,11 @@ cherry_pick_commits() {
 }
 
 derive_tag_from_fix() {
-  printf '%s' "$1" | sed -E 's#^fix/([^/]+)$#v\1#'
+  compose_tag_name "$1"
 }
 
 derive_tag_from_hotfix() {
-  printf '%s' "$1" | awk -F/ '{print "v"$2}'
+  compose_tag_name "$1"
 }
 
 derive_feature_branch() {

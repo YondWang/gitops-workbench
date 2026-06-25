@@ -89,12 +89,15 @@ def tag_source_name(ref: str) -> str:
     return value.replace("/", "-")
 
 
-def timestamp_now() -> str:
-    return datetime.now().strftime("%Y%m%d%H%M%S")
+def tag_date_now() -> str:
+    return datetime.now().strftime("%Y%m%d")
 
 
-def default_tag_name(ref: str, timestamp: str | None = None) -> str:
-    return f"{tag_source_name(ref)}-{timestamp or timestamp_now()}"
+def default_tag_name(ref: str, version: str, stamp: str | None = None) -> str:
+    normalized_version = version.strip().strip('"')
+    if not normalized_version:
+        raise ValueError("缺少 Tag 版本号")
+    return f"{tag_source_name(ref)}_{normalized_version}_{stamp or tag_date_now()}"
 
 
 def classify_branch(name: str) -> str:
