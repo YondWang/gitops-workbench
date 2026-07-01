@@ -14,7 +14,7 @@ const state = {
   residentPackageTimer: null,
 };
 
-const RESIDENT_PACKAGE_TAG_RE = /^(?:release|fix|bugfix-[A-Za-z0-9._-]+)_[Vv]?\d+(?:\.\d+)+_\d{8}$/;
+const RESIDENT_PACKAGE_TAG_RE = /^(?:release|fix|bugfix-[A-Za-z0-9._-]+)_[Vv]?\d+(?:\.\d+)+_\d{12}$/;
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -110,6 +110,11 @@ function residentPipelineUrl(packageInfo) {
   );
 }
 
+function residentArtifactUrl(packageInfo) {
+  const value = packageInfo?.artifact_url || packageInfo?.download_url || packageInfo?.artifact_path || "";
+  return String(value).startsWith("http") ? value : "";
+}
+
 function renderResidentPackage() {
   const panel = $("#residentPackagePanel");
   if (!panel) return;
@@ -131,6 +136,13 @@ function renderResidentPackage() {
   const link = $("#residentPackagePipelineLink");
   link.classList.toggle("hidden", !pipelineUrl);
   link.href = pipelineUrl || "#";
+
+  const artifactUrl = residentArtifactUrl(packageInfo);
+  const artifactLink = $("#residentPackageArtifactLink");
+  artifactLink?.classList.toggle("hidden", !artifactUrl);
+  if (artifactLink) {
+    artifactLink.href = artifactUrl || "#";
+  }
 }
 
 function clearResidentPackagePoll() {

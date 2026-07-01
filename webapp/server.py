@@ -71,7 +71,16 @@ VERSION_INFO_PATH = "version.info"
 PKG_INFO_PATH = "pkg.info"
 SOFTWARE_YAML_PATH = "software.yaml"
 RESIDENT_ARTIFACT_ROOT = Path(os.environ.get("SIMOS_CI_ARTIFACT_ROOT", "/data/simos-ci/artifacts"))
-RESIDENT_TAG_PATTERN = re.compile(r"^(?:release|fix|bugfix-[A-Za-z0-9._-]+)_[Vv]?\d+(?:\.\d+)+_\d{8}$")
+RESIDENT_ARTIFACT_FILE = os.environ.get("SIMOS_CI_ARTIFACT_FILE", "resident.tar.gz")
+RESIDENT_BUILD_INFO_FILE = os.environ.get("SIMOS_CI_BUILD_INFO_FILE", "build-info.json")
+RESIDENT_ARTIFACT_JOB_NAMES = tuple(
+    name.strip().lower()
+    for name in os.environ.get("SIMOS_CI_ARTIFACT_JOB_NAMES", "resident,resident-package,package,build").split(",")
+    if name.strip()
+)
+RESIDENT_TAG_PATTERN = re.compile(
+    r"^(?:release(?:-[A-Za-z0-9._-]+)?|fix(?:-[A-Za-z0-9._-]+)?|bugfix-[A-Za-z0-9._-]+)_[Vv]?\d+(?:\.\d+)+_\d{12}$"
+)
 TAG_VERSION_HINT_RE = re.compile(r"[Vv]?\d+(?:\.\d+)+")
 VERSION_COMPONENTS = ("simos", "business", "localization", "perception", "mapengine", "pnc")
 SUBMODULE_COMPONENTS = ("business", "localization", "mapengine", "perception", "pnc")
@@ -184,9 +193,16 @@ class GitOpsApp:
 
     def resident_package(self, tag: str) -> dict[str, Any]:
         tag = require_resident_tag(tag)
+        local_package = self.local_resident_package(tag)
+        if local_package.get("status") != "pending_or_missing":
+            return local_package
+        gitlab_package = self.gitlab_resident_package(tag)
+        return gitlab_package or local_package
+
+    def local_resident_package(self, tag: str) -> dict[str, Any]:
         artifact_dir = RESIDENT_ARTIFACT_ROOT / tag
-        build_info_path = artifact_dir / "build-info.json"
-        artifact_path = artifact_dir / "resident.tar.gz"
+        build_info_path = artifact_dir / RESIDENT_BUILD_INFO_FILE
+        artifact_path = artifact_dir / RESIDENT_ARTIFACT_FILE
         if not build_info_path.exists():
             return {
                 "ok": True,
@@ -202,6 +218,144 @@ class GitOpsApp:
         package.setdefault("artifact_path", str(artifact_path))
         package.setdefault("status", "ready")
         return {"ok": True, **package}
+
+    def gitlab_resident_package(self, tag: str) -> dict[str, Any] | None:
+        target = self.optional_simos_target()
+        if target is None or not self.token_loaded(target.repo):
+            return None
+        pipelines = getattr(target.client, "pipelines", None)
+        pipeline_jobs = getattr(target.client, "pipeline_jobs", None)
+        artifact_url = getattr(target.client, "job_artifact_file_url", None)
+        if not callable(pipelines) or not callable(pipeline_jobs) or not callable(artifact_url):
+            return None
+        try:
+            pipeline = self.select_tag_pipeline(target.client.pipelines(ref=tag), tag)
+        except GitLabError as exc:
+            return self.resident_gitlab_error(tag, str(exc))
+        if pipeline is None:
+            return None
+
+        pipeline_status = str(pipeline.get("status", ""))
+        pipeline_url = str(pipeline.get("web_url", ""))
+        pipeline_id = pipeline.get("id")
+        if not pipeline_id:
+            return self.resident_gitlab_status(tag, pipeline_status or "pending_or_missing", pipeline_url, message="未读取到 Tag Pipeline 编号")
+        try:
+            jobs = target.client.pipeline_jobs(pipeline_id)
+        except GitLabError as exc:
+            return self.resident_gitlab_error(tag, str(exc), pipeline_url=pipeline_url)
+
+        job = self.select_resident_artifact_job(jobs)
+        if job is not None:
+            job_status = str(job.get("status", ""))
+            job_url = str(job.get("web_url", ""))
+            job_id = job.get("id")
+            package = {
+                "ok": True,
+                "tag": tag,
+                "pipeline": pipeline,
+                "pipeline_url": pipeline_url,
+                "job": job,
+                "job_url": job_url,
+                "artifact_source": "gitlab",
+                "artifact_name": RESIDENT_ARTIFACT_FILE,
+                "artifact_path": target.client.job_artifact_file_url(job_id, RESIDENT_ARTIFACT_FILE) if job_id else "",
+                "artifact_url": target.client.job_artifact_file_url(job_id, RESIDENT_ARTIFACT_FILE) if job_id else "",
+                "built_at": job.get("finished_at") or pipeline.get("updated_at") or pipeline.get("created_at") or "",
+            }
+            package.update(self.load_gitlab_build_info(target.client, job_id))
+            if job_status == "success":
+                package.setdefault("status", "success")
+                package.setdefault("message", "resident 包已上传到 GitLab job artifacts")
+                return package
+            if job_status in {"failed", "canceled"}:
+                package["status"] = "failed"
+                package.setdefault("message", f"resident 产物 Job 状态：{job_status}")
+                return package
+
+        if pipeline_status == "success":
+            return self.resident_gitlab_status(
+                tag,
+                "failed",
+                pipeline_url,
+                message=f"Tag Pipeline 已成功，但未找到 GitLab artifact：{RESIDENT_ARTIFACT_FILE}。请在目标仓库对应 job 的 artifacts.paths 中上传该文件",
+            )
+        if pipeline_status in {"failed", "canceled"}:
+            return self.resident_gitlab_status(tag, "failed", pipeline_url, message=f"Tag Pipeline 状态：{pipeline_status}")
+        return self.resident_gitlab_status(tag, "pending_or_missing", pipeline_url, message="正在等待云端 Runner 生成并上传 resident artifact")
+
+    @staticmethod
+    def select_tag_pipeline(pipelines: list[dict[str, Any]], tag: str) -> dict[str, Any] | None:
+        items = [item for item in pipelines if str(item.get("ref", "")) == tag] or list(pipelines)
+        if not items:
+            return None
+        def pipeline_score(item: dict[str, Any]) -> tuple[int, int]:
+            source = str(item.get("source", ""))
+            return (1 if source == "push" else 0, int(item.get("id") or 0))
+        return max(items, key=pipeline_score)
+
+    @staticmethod
+    def select_resident_artifact_job(jobs: list[dict[str, Any]]) -> dict[str, Any] | None:
+        candidates: list[tuple[int, int, dict[str, Any]]] = []
+        for job in jobs:
+            artifacts_file = job.get("artifacts_file") or {}
+            filename = str(artifacts_file.get("filename", "")).strip()
+            artifacts = job.get("artifacts") or []
+            if not filename and not artifacts:
+                continue
+            name = str(job.get("name", "")).strip().lower()
+            score = 0
+            if name in RESIDENT_ARTIFACT_JOB_NAMES:
+                score += 100
+            elif any(pref in name for pref in RESIDENT_ARTIFACT_JOB_NAMES):
+                score += 60
+            if str(job.get("status", "")) == "success":
+                score += 20
+            if filename:
+                score += 10
+            candidates.append((score, int(job.get("id") or 0), job))
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: (item[0], item[1]))[2]
+
+    @staticmethod
+    def load_gitlab_build_info(client: GitLabClient, job_id: Any) -> dict[str, Any]:
+        if not job_id:
+            return {}
+        loader = getattr(client, "job_artifact_file_text", None)
+        if not callable(loader):
+            return {}
+        try:
+            payload = client.job_artifact_file_text(job_id, RESIDENT_BUILD_INFO_FILE)
+        except GitLabError as exc:
+            if exc.status == 404:
+                return {}
+            return {"error": str(exc)}
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            return {"build_info_error": f"{RESIDENT_BUILD_INFO_FILE} 不是合法 JSON"}
+        return dict(data) if isinstance(data, dict) else {}
+
+    @staticmethod
+    def resident_gitlab_status(tag: str, status: str, pipeline_url: str = "", message: str = "") -> dict[str, Any]:
+        return {
+            "ok": True,
+            "tag": tag,
+            "status": status,
+            "pipeline_url": pipeline_url,
+            "message": message,
+        }
+
+    @staticmethod
+    def resident_gitlab_error(tag: str, error: str, pipeline_url: str = "") -> dict[str, Any]:
+        return {
+            "ok": True,
+            "tag": tag,
+            "status": "error",
+            "pipeline_url": pipeline_url,
+            "error": error,
+        }
 
     def create_release(self, payload: dict[str, Any]) -> dict[str, Any]:
         ref = require_ref_name(str(payload.get("ref", "")), "来源分支或Tag")

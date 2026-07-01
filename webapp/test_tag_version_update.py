@@ -273,11 +273,11 @@ version:1.0.0
     def test_bump_version_preserves_last_segment_zero_padding(self) -> None:
         self.assertEqual(server.bump_version("3.1.21.063"), "3.1.21.064")
 
-    def test_default_tag_name_uses_source_version_and_day_stamp(self) -> None:
-        self.assertEqual(branch_policy.default_tag_name("fix", "3.1.22.046", "20260624"), "fix_3.1.22.046_20260624")
+    def test_default_tag_name_uses_source_version_and_minute_stamp(self) -> None:
+        self.assertEqual(branch_policy.default_tag_name("fix", "3.1.22.046", "202606241430"), "fix_3.1.22.046_202606241430")
         self.assertEqual(
-            branch_policy.default_tag_name("bugfix/V3.1.23.0", "3.1.23.046", "20260624"),
-            "bugfix-V3.1.23.0_3.1.23.046_20260624",
+            branch_policy.default_tag_name("bugfix/V3.1.23.0", "3.1.23.046", "202606241430"),
+            "bugfix-V3.1.23.0_3.1.23.046_202606241430",
         )
 
     def test_version_rule_uses_update_version_component_revisions(self) -> None:
@@ -587,7 +587,7 @@ version:1.0.0
             {
                 "scope": "all",
                 "ref": "fix",
-                "tag_name": "fix_3.1.22.046_20260624",
+                "tag_name": "fix_3.1.22.046_202606241430",
                 "message": "fix build",
                 "update_version": True,
             }
@@ -599,10 +599,10 @@ version:1.0.0
         actions = version_commit[3]
         version_action = next(action for action in actions if action["file_path"] == "version.info")
         software_action = next(action for action in actions if action["file_path"] == "software.yaml")
-        self.assertIn("simos_branch:fix_3.1.22.046_20260624", version_action["content"])
-        self.assertIn("business_branch:fix_3.1.22.046_20260624", version_action["content"])
+        self.assertIn("simos_branch:fix_3.1.22.046_202606241430", version_action["content"])
+        self.assertIn("business_branch:fix_3.1.22.046_202606241430", version_action["content"])
         self.assertNotIn("simos_branch:fix\n", version_action["content"])
-        self.assertIn('business: "fix_3.1.22.046_20260624"', software_action["content"])
+        self.assertIn('business: "fix_3.1.22.046_202606241430"', software_action["content"])
         self.assertNotIn('business: "fix"', software_action["content"])
 
     def test_version_update_falls_back_to_file_api_when_commit_api_returns_500(self) -> None:

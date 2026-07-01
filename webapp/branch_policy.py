@@ -90,7 +90,7 @@ def tag_source_name(ref: str) -> str:
 
 
 def tag_date_now() -> str:
-    return datetime.now().strftime("%Y%m%d")
+    return datetime.now().strftime("%Y%m%d%H%M")
 
 
 def default_tag_name(ref: str, version: str, stamp: str | None = None) -> str:
