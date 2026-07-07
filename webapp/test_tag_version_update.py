@@ -359,7 +359,46 @@ version:1.0.0
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["phase"], "waiting_version_mr")
-        self.assertEqual(result["tag_name"], "release_1.0.02_DATE")
+        self.assertEqual(result["tag_name"], "release_F1.0.02_DATE")
+
+    def test_fix_source_uses_v_version_prefix(self) -> None:
+        for client in (self.business_client, self.workbench_client, self.simos_client):
+            client._branch_names.append("fix")
+        with mock.patch.object(server, "default_tag_name", side_effect=lambda ref, version: f"{ref}_{version}_DATE"):
+            result = self.app.create_tag(
+                {
+                    "scope": "all",
+                    "ref": "fix",
+                    "message": "candidate build",
+                    "update_version": True,
+                }
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["tag_name"], "fix_V1.0.02_DATE")
+        version_commit = next(call for call in self.simos_client.calls if call[0] == "create_commit")
+        version_action = next(action for action in version_commit[3] if action["file_path"] == "version.info")
+        self.assertIn("Version:V1.0.02", version_action["content"])
+
+    def test_manual_t_version_prefix_is_written_to_version_files(self) -> None:
+        result = self.app.create_tag(
+            {
+                "scope": "all",
+                "ref": "release",
+                "tag_name": "release_T1.0.02_202606151000",
+                "message": "custom build",
+                "update_version": True,
+                "version_prefix": "T",
+            }
+        )
+
+        self.assertFalse(result["ok"])
+        version_commit = next(call for call in self.simos_client.calls if call[0] == "create_commit")
+        actions = version_commit[3]
+        version_action = next(action for action in actions if action["file_path"] == "version.info")
+        software_action = next(action for action in actions if action["file_path"] == "software.yaml")
+        self.assertIn("Version:T1.0.02", version_action["content"])
+        self.assertIn('version: "T1.0.02"', software_action["content"])
 
     def test_delete_tags_deletes_requested_tags_in_single_repository(self) -> None:
         self.business_client._tag_names = ["release-20260615100000", "fix-20260615110000", "keep-me"]
@@ -455,13 +494,13 @@ version:1.0.0
 
         actions = version_commit[3]
         version_action = next(action for action in actions if action["file_path"] == "version.info")
-        self.assertIn("Version:1.0.02", version_action["content"])
+        self.assertIn("Version:F1.0.02", version_action["content"])
         self.assertIn("simos_commitid:simos-new", version_action["content"])
         self.assertIn("business_commitid:business-new", version_action["content"])
         self.assertIn("simos_branch:release-20260615100000", version_action["content"])
         self.assertIn("business_branch:release-20260615100000", version_action["content"])
         software_action = next(action for action in actions if action["file_path"] == "software.yaml")
-        self.assertIn('version: "1.0.02"', software_action["content"])
+        self.assertIn('version: "F1.0.02"', software_action["content"])
         self.assertIn('business: "release-20260615100000"', software_action["content"])
         self.assertNotIn("pkg.info", result["version_update"]["files"])
         self.assertEqual(result["merge_request"]["state"], "opened")
@@ -484,7 +523,7 @@ version:1.0.0
                 version_commit = next(call for call in self.simos_client.calls if call[0] == "create_commit")
                 version_action = next(action for action in version_commit[3] if action["file_path"] == "version.info")
 
-                self.assertIn("Version:1.1.02", version_action["content"])
+                self.assertIn("Version:F1.1.02", version_action["content"])
                 self.assertEqual(result["version_update"]["base_version"], "1.1.0")
                 self.assertEqual(self.app.public_config()["version_update"]["base_version"], "1.1.0")
             finally:
@@ -575,7 +614,7 @@ version:1.0.0
         self.assertEqual(result["phase"], "waiting_version_mr")
         version_commit = next(call for call in self.simos_client.calls if call[0] == "create_commit")
         version_action = next(action for action in version_commit[3] if action["file_path"] == "version.info")
-        self.assertIn("Version:1.0.1", version_action["content"])
+        self.assertIn("Version:F1.0.1", version_action["content"])
         self.assertIn("business_commitid:business-new", version_action["content"])
 
     def test_version_update_uses_tag_name_not_source_branch_in_software_yaml_and_version_info(self) -> None:

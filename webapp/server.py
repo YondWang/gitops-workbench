@@ -10,12 +10,15 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse, urlunparse
+from zoneinfo import ZoneInfo
 
 from auth import AuthManager, login_cookie, logout_cookie, parse_cookie
 from branch_policy import (
@@ -25,6 +28,7 @@ from branch_policy import (
     feature_branch,
     require_ref_name,
     require_version,
+    tag_source_name,
 )
 from gitlab_client import GitLabClient, GitLabConfig, GitLabError
 from repository_store import RepositoryConfig, RepositoryStore
@@ -34,6 +38,10 @@ ROOT = Path(__file__).resolve().parent
 STATIC_ROOT = ROOT / "static"
 REPOSITORIES_PATH = ROOT / "data" / "repositories.json"
 VERSION_SETTINGS_PATH = ROOT / "data" / "version-settings.json"
+SCHEDULES_PATH = ROOT / "data" / "schedules.json"
+SCHEDULE_RUNS_PATH = ROOT / "data" / "schedule-runs.json"
+RELEASE_TASKS_PATH = Path(os.environ.get("GITOPS_RELEASE_TASKS_PATH", str(ROOT / "data" / "release_tasks.json")))
+RELEASE_RUNS_PATH = Path(os.environ.get("GITOPS_RELEASE_RUNS_PATH", str(ROOT / "data" / "release_runs.json")))
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "gitlab": {
@@ -79,9 +87,9 @@ RESIDENT_ARTIFACT_JOB_NAMES = tuple(
     if name.strip()
 )
 RESIDENT_TAG_PATTERN = re.compile(
-    r"^(?:release(?:-[A-Za-z0-9._-]+)?|fix(?:-[A-Za-z0-9._-]+)?|bugfix-[A-Za-z0-9._-]+)_[Vv]?\d+(?:\.\d+)+_\d{12}$"
+    r"^(?:release(?:-[A-Za-z0-9._-]+)?|fix(?:-[A-Za-z0-9._-]+)?|bugfix-[A-Za-z0-9._-]+|[A-Za-z0-9._-]+)_[VvFfTt]?\d+(?:\.\d+)+_\d{12}$"
 )
-TAG_VERSION_HINT_RE = re.compile(r"[Vv]?\d+(?:\.\d+)+")
+TAG_VERSION_HINT_RE = re.compile(r"[VvFfTt]?\d+(?:\.\d+)+")
 VERSION_COMPONENTS = ("simos", "business", "localization", "perception", "mapengine", "pnc")
 SUBMODULE_COMPONENTS = ("business", "localization", "mapengine", "perception", "pnc")
 VERSION_COMPONENT_REVISIONS = {
@@ -91,6 +99,23 @@ VERSION_COMPONENT_REVISIONS = {
     "mapengine": 8,
     "perception": 16,
     "pnc": 32,
+}
+
+DEFAULT_SCHEDULE: dict[str, Any] = {
+    "id": "daily-simos-resident-release",
+    "enabled": True,
+    "name": "SimOS 每日 resident 自动构建",
+    "timezone": "Asia/Shanghai",
+    "cron": "0 16 * * *",
+    "daily_time": "16:00",
+    "source_ref_strategy": "fixed_ref",
+    "default_ref": "fix",
+    "version_source": "simos_version_info",
+    "manual_version_number": "",
+    "version_prefix_mode": "auto",
+    "manual_version_prefix": "V",
+    "cloud_category": "车机/CI自动构建",
+    "execution_type": "full_release",
 }
 
 
@@ -203,6 +228,7 @@ class GitOpsApp:
         artifact_dir = RESIDENT_ARTIFACT_ROOT / tag
         build_info_path = artifact_dir / RESIDENT_BUILD_INFO_FILE
         artifact_path = artifact_dir / RESIDENT_ARTIFACT_FILE
+        manifest_path = artifact_dir / "manifest.json"
         if not build_info_path.exists():
             return {
                 "ok": True,
@@ -217,7 +243,336 @@ class GitOpsApp:
         package.setdefault("artifact_dir", str(artifact_dir))
         package.setdefault("artifact_path", str(artifact_path))
         package.setdefault("status", "ready")
+        if manifest_path.exists():
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(manifest, dict):
+                package.update({key: value for key, value in manifest.items() if key not in {"status"}})
+                if package.get("cloud_dir"):
+                    package["artifact_path"] = package["cloud_dir"]
+                package.setdefault("artifact_source", "cloud")
+                package.setdefault("message", "resident 包已发布到云盘")
         return {"ok": True, **package}
+
+    def schedules(self) -> dict[str, Any]:
+        data = self.release_tasks()
+        return {"ok": True, "schedules": data["tasks"], "runs": data["runs"], "tasks": data["tasks"]}
+
+    def release_tasks(self) -> dict[str, Any]:
+        return {"ok": True, "tasks": load_release_tasks(), "runs": load_release_runs()}
+
+    def save_schedule(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.save_release_task(payload)
+
+    def save_release_task(self, payload: dict[str, Any]) -> dict[str, Any]:
+        task = normalize_release_task(payload)
+        tasks = load_release_tasks()
+        next_tasks = [item for item in tasks if item["id"] != task["id"]]
+        next_tasks.append(task)
+        save_release_tasks(sorted(next_tasks, key=lambda item: item["id"]))
+        return {"ok": True, "task": task, "schedule": task, "tasks": load_release_tasks(), "runs": load_release_runs()}
+
+    def delete_schedule(self, schedule_id: str) -> dict[str, Any]:
+        return self.delete_release_task(schedule_id)
+
+    def delete_release_task(self, task_id: str) -> dict[str, Any]:
+        task_id = require_schedule_id(task_id)
+        tasks = load_release_tasks()
+        next_tasks = [item for item in tasks if item["id"] != task_id]
+        if len(next_tasks) == len(tasks):
+            raise ValueError(f"自动任务不存在：{task_id}")
+        save_release_tasks(next_tasks)
+        runs = [item for item in load_release_runs() if item.get("task_id") != task_id and item.get("schedule_id") != task_id]
+        save_release_runs(runs)
+        return {"ok": True, "deleted": task_id, "tasks": load_release_tasks(), "runs": load_release_runs()}
+
+    def schedule_runs(self, schedule_id: str) -> dict[str, Any]:
+        schedule_id = require_schedule_id(schedule_id)
+        runs = [item for item in load_release_runs() if item.get("task_id") == schedule_id or item.get("schedule_id") == schedule_id]
+        return {"ok": True, "schedule_id": schedule_id, "runs": sorted(runs, key=lambda item: item.get("started_at", ""), reverse=True)}
+
+    def schedule_dry_run(self, schedule_id: str, now: str | None = None) -> dict[str, Any]:
+        task = self.get_release_task(schedule_id)
+        return {"ok": True, "schedule": task, "task": task, "plan": self.resolve_release_plan(task, now)}
+
+    def schedule_run_now(self, schedule_id: str, now: str | None = None) -> dict[str, Any]:
+        task = self.get_release_task(schedule_id)
+        plan = self.resolve_release_plan(task, now)
+        run = self.start_full_release_run(task, plan, trigger="manual")
+        return {"ok": True, "schedule": task, "task": task, "plan": plan, "run": run}
+
+    def manual_release_run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        task = normalize_release_task(
+            {
+                **DEFAULT_SCHEDULE,
+                "id": str(payload.get("task_id") or "manual-release"),
+                "enabled": False,
+                "name": str(payload.get("name") or "手动完整发版构建"),
+                "default_ref": str(payload.get("source_ref") or payload.get("default_ref") or "fix"),
+                "source_ref_strategy": "fixed_ref",
+                "version_source": str(payload.get("version_source") or "simos_version_info"),
+                "manual_version_number": str(payload.get("manual_version_number") or payload.get("manual_version") or ""),
+                "version_prefix_mode": str(payload.get("version_prefix_mode") or "auto"),
+                "manual_version_prefix": str(payload.get("manual_version_prefix") or payload.get("version_prefix") or "V"),
+                "cloud_category": str(payload.get("cloud_category") or DEFAULT_SCHEDULE["cloud_category"]),
+            }
+        )
+        plan = self.resolve_release_plan(task, str(payload.get("now") or "") or None)
+        run = self.start_full_release_run(task, plan, trigger="manual")
+        return {"ok": True, "task": task, "plan": plan, "run": run}
+
+    def rerun_tag_release(self, payload: dict[str, Any]) -> dict[str, Any]:
+        tag = require_resident_tag(str(payload.get("tag_name") or payload.get("tag") or ""))
+        now = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
+        package = self.resident_package(tag)
+        status = "published" if package.get("status") in {"ready", "success"} else "building"
+        run = {
+            "id": new_release_run_id("rerun"),
+            "task_id": "",
+            "schedule_id": "",
+            "trigger": "rerun_tag",
+            "execution_type": "rerun_existing_tag",
+            "status": status,
+            "tag_name": tag,
+            "source_ref": tag,
+            "started_at": now,
+            "updated_at": now,
+            "finished_at": now if status == "published" else "",
+            "package": package,
+            "cloud_dir": package.get("cloud_dir") or package.get("artifact_path") or "",
+            "pipeline_url": package.get("pipeline_url") or package.get("job_url") or "",
+        }
+        append_release_run(run)
+        return {"ok": True, "run": run}
+
+    def continue_release_run(self, run_id: str) -> dict[str, Any]:
+        runs = load_release_runs()
+        run = next((item for item in runs if item.get("id") == run_id), None)
+        if run is None:
+            raise ValueError(f"发版运行不存在：{run_id}")
+        if run.get("execution_type") != "full_release":
+            raise ValueError("只有完整发版运行可以继续")
+        payload = dict(run.get("create_tag_payload") or {})
+        if not payload:
+            raise ValueError("运行记录缺少继续发版所需参数")
+        result = self.create_tag(payload)
+        updated = self.release_run_from_result(run.get("task") or {}, run.get("plan") or {}, result, str(run.get("trigger") or "manual"), run_id=run_id)
+        save_release_runs([updated if item.get("id") == run_id else item for item in runs])
+        return {"ok": True, "run": updated, "result": result}
+
+    def run_due_schedules(self, now: datetime | None = None) -> list[dict[str, Any]]:
+        runs: list[dict[str, Any]] = []
+        for task in load_release_tasks():
+            if not task.get("enabled", False):
+                continue
+            local_now = coerce_schedule_now(task, now)
+            due_key = schedule_due_key(task, local_now)
+            if not due_key or schedule_already_ran(task["id"], due_key):
+                continue
+            try:
+                result = self.schedule_run_now(task["id"], local_now.isoformat())
+                result["run"]["due_key"] = due_key
+                result["run"]["trigger"] = "schedule"
+                append_release_run(result["run"])
+                runs.append(result["run"])
+            except Exception as exc:
+                run = {
+                    "id": new_release_run_id("failed"),
+                    "task_id": task["id"],
+                    "schedule_id": task["id"],
+                    "trigger": "schedule",
+                    "execution_type": "full_release",
+                    "status": "failed",
+                    "error": str(exc),
+                    "due_key": due_key,
+                    "started_at": local_now.isoformat(),
+                    "finished_at": datetime.now(ZoneInfo(task.get("timezone", "Asia/Shanghai"))).isoformat(),
+                }
+                append_release_run(run)
+                runs.append(run)
+        return runs
+
+    def get_schedule(self, schedule_id: str) -> dict[str, Any]:
+        return self.get_release_task(schedule_id)
+
+    def get_release_task(self, schedule_id: str) -> dict[str, Any]:
+        schedule_id = require_schedule_id(schedule_id)
+        for schedule in load_release_tasks():
+            if schedule["id"] == schedule_id:
+                return schedule
+        raise ValueError(f"自动任务不存在：{schedule_id}")
+
+    def resolve_schedule_plan(self, schedule: dict[str, Any], now: str | None = None) -> dict[str, Any]:
+        return self.resolve_release_plan(schedule, now)
+
+    def resolve_release_plan(self, schedule: dict[str, Any], now: str | None = None) -> dict[str, Any]:
+        target = self.optional_simos_target()
+        if target is None:
+            raise ValueError("发版任务需要启用 simos 仓库")
+        local_now = coerce_schedule_now(schedule, parse_schedule_now(now) if now else None)
+        ref = self.resolve_schedule_ref(schedule, target)
+        version_prefix = resolve_version_prefix(ref, schedule)
+        version_number = self.resolve_release_version_number(schedule, ref, version_prefix)
+        weekly_version = resolve_weekly_version_policy(target.client.tag_names(), version_number, local_now)
+        version_number = weekly_version["version_number"]
+        release_version = apply_version_prefix(version_number, version_prefix)
+        stamp = local_now.strftime("%Y%m%d%H%M")
+        source_ref_slug = tag_source_name(ref)
+        tag_name = default_tag_name(ref, release_version, stamp)
+        cloud_date = local_now.strftime("%Y-%m-%d")
+        cloud_category = str(schedule.get("cloud_category") or DEFAULT_SCHEDULE["cloud_category"]).strip("/")
+        plan = {
+            "schedule_id": schedule["id"],
+            "task_id": schedule["id"],
+            "repository_id": target.repo.id,
+            "project": target.repo.project,
+            "ref": ref,
+            "source_ref": ref,
+            "source_ref_slug": source_ref_slug,
+            "version": release_version,
+            "version_number": version_number,
+            "version_prefix": version_prefix,
+            "release_version": release_version,
+            "tag_name": tag_name,
+            "message": "resident release build",
+            "cloud_dir": f"/public/Versions/{cloud_date}_{release_version}/{cloud_category}",
+            "planned_at": local_now.isoformat(),
+            "repositories": [repo.public_dict(self.token_loaded(repo)) for repo in self.store.enabled()],
+            "weekly_version": weekly_version,
+        }
+        if weekly_version.get("requires_confirmation"):
+            plan["requires_weekly_version_confirmation"] = True
+            plan["confirmation_message"] = "周五首次发版需要人工确认第三位版本号变更"
+        return plan
+
+    def resolve_schedule_ref(self, schedule: dict[str, Any], target: OperationTarget) -> str:
+        strategy = str(schedule.get("source_ref_strategy") or schedule.get("ref_strategy") or "fixed_ref")
+        if strategy == "latest_fix_rc":
+            version = str(schedule.get("manual_version_number") or schedule.get("manual_version") or "").strip()
+            branches = target.client.branch_names()
+            prefix = f"fix/{version}-rc" if version else "fix/"
+            candidates = [name for name in branches if name.startswith(prefix)]
+            if not candidates:
+                raise ValueError(f"未找到匹配的 fix RC 分支：{prefix}")
+            return sorted(candidates, key=natural_ref_key)[-1]
+        ref = str(schedule.get("default_ref") or "fix").strip()
+        require_ref_name(ref, "自动任务来源 ref")
+        if ref not in set(target.client.branch_names()) | set(target.client.tag_names()):
+            raise ValueError(f"自动任务来源 ref 不存在：{ref}")
+        return ref
+
+    def resolve_schedule_version(self, schedule: dict[str, Any], target: OperationTarget, ref: str) -> str:
+        source = str(schedule.get("version_source") or "simos_version_info")
+        if source == "manual":
+            version = normalize_version_number(str(schedule.get("manual_version_number") or schedule.get("manual_version") or ""))
+            if not version:
+                raise ValueError("自动任务使用手动版本时必须填写版本号")
+            return version
+        return normalize_version_number(self.version_from_version_info(target, ref))
+
+    def resolve_release_version_number(self, schedule: dict[str, Any], ref: str, version_prefix: str) -> str:
+        if str(schedule.get("version_source") or "simos_version_info") == "manual":
+            return self.resolve_schedule_version(schedule, self.optional_simos_target() or self.target("simos"), ref)
+        version = self.default_tag_version_for_request(
+            {"scope": "all", "version_prefix": version_prefix},
+            ref,
+            True,
+            "",
+        )
+        return normalize_version_number(version)
+
+    def create_schedule_tag(self, schedule: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
+        return self.start_full_release_run(schedule, plan, trigger="manual")
+
+    def start_full_release_run(self, task: dict[str, Any], plan: dict[str, Any], trigger: str) -> dict[str, Any]:
+        payload = {
+            "scope": "all",
+            "ref": plan["source_ref"],
+            "tag_name": plan["tag_name"],
+            "message": plan["message"],
+            "update_version": True,
+            "base_version": plan["version_number"],
+            "base_version_is_final": True,
+            "version_prefix": plan["version_prefix"],
+        }
+        if plan.get("requires_weekly_version_confirmation") and not plan.get("weekly_version_confirmed"):
+            result = {
+                "ok": False,
+                "operation": "create_tag",
+                "phase": "waiting_weekly_version_confirmation",
+                "blocked": True,
+                "tag_name": plan["tag_name"],
+                "message": plan.get("confirmation_message") or "等待人工确认周版本号",
+            }
+            run = self.release_run_from_result(task, plan, result, trigger)
+            append_release_run(run)
+            return run
+        result = self.create_tag(payload)
+        run = self.release_run_from_result(task, plan, result, trigger)
+        append_release_run(run)
+        return run
+
+    def release_run_from_result(
+        self,
+        task: dict[str, Any],
+        plan: dict[str, Any],
+        result: dict[str, Any],
+        trigger: str,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        now = datetime.now(ZoneInfo(str(task.get("timezone") or "Asia/Shanghai"))).isoformat()
+        phase = str(result.get("phase") or "")
+        if result.get("ok"):
+            status = "building"
+        elif phase == "waiting_weekly_version_confirmation":
+            status = "waiting_weekly_version_confirmation"
+        elif phase == "waiting_version_mr":
+            status = "waiting_version_mr"
+        elif phase == "precheck":
+            status = "precheck_failed"
+        else:
+            status = "failed"
+        run = {
+            "id": run_id or new_release_run_id("release"),
+            "task_id": task.get("id", ""),
+            "schedule_id": task.get("id", ""),
+            "trigger": trigger,
+            "execution_type": "full_release",
+            "status": status,
+            "source_ref": plan.get("source_ref") or plan.get("ref"),
+            "source_ref_slug": plan.get("source_ref_slug", ""),
+            "version_number": plan.get("version_number", ""),
+            "version_prefix": plan.get("version_prefix", ""),
+            "release_version": plan.get("release_version") or plan.get("version", ""),
+            "version": plan.get("release_version") or plan.get("version", ""),
+            "tag_name": plan.get("tag_name", ""),
+            "cloud_dir": plan.get("cloud_dir", ""),
+            "started_at": plan.get("planned_at", now),
+            "updated_at": now,
+            "finished_at": now if status in {"failed", "precheck_failed"} else "",
+            "phase": phase,
+            "result": result,
+            "task": task,
+            "plan": plan,
+            "create_tag_payload": {
+                "scope": "all",
+                "ref": plan.get("source_ref") or plan.get("ref"),
+                "tag_name": plan.get("tag_name"),
+                "message": plan.get("message"),
+                "update_version": True,
+                "base_version": plan.get("version_number"),
+                "base_version_is_final": True,
+                "version_prefix": plan.get("version_prefix"),
+            },
+        }
+        version_update = result.get("version_update") or {}
+        if isinstance(version_update, dict):
+            run["version_update_branch"] = version_update.get("branch", "")
+        merge_request = result.get("merge_request") or version_update.get("merge_request") if isinstance(version_update, dict) else None
+        if merge_request:
+            run["merge_request"] = merge_request
+        if not result.get("ok") and result.get("message"):
+            run["error"] = result.get("message")
+        return run
 
     def gitlab_resident_package(self, tag: str) -> dict[str, Any] | None:
         target = self.optional_simos_target()
@@ -419,6 +774,8 @@ class GitOpsApp:
         ref = require_ref_name(str(payload.get("ref", "")), "Tag 来源")
         update_version = truthy(payload.get("update_version", False))
         base_version = normalize_optional_version(str(payload.get("base_version", ""))) if update_version else ""
+        base_version_is_final = truthy(payload.get("base_version_is_final", payload.get("version_number_is_final", False))) if update_version else False
+        requested_version_prefix = normalize_version_prefix(str(payload.get("version_prefix") or resolve_version_prefix(ref))) if update_version else ""
         scope = str(payload.get("scope", "single")).strip() or "single"
         if update_version and scope != "all":
             raise ValueError("打 Tag 前更新版本号只能在全部启用仓库范围使用")
@@ -438,7 +795,7 @@ class GitOpsApp:
             if update_version and is_simos_repo(target.repo):
                 if ref not in branch_names:
                     raise ValueError("更新版本号时 Tag 来源必须是分支")
-                version_plan = self.plan_version_update(target, ref, tag_name, base_version)
+                version_plan = self.plan_version_update(target, ref, tag_name, base_version, requested_version_prefix, base_version_is_final)
                 context["_version_plan"] = version_plan
                 context["version_update"] = version_plan["summary"]
             return context
@@ -581,7 +938,15 @@ class GitOpsApp:
                 results.append({"repository": target.repo.public_dict(self.token_loaded(target.repo)), "ok": False, "error": str(exc)})
         return {"ok": overall_ok, "operation": "create_tag", "phase": "execute", "precheck": precheck_results, "results": results}
 
-    def plan_version_update(self, target: OperationTarget, ref: str, tag_name: str, base_version: str = "") -> dict[str, Any]:
+    def plan_version_update(
+        self,
+        target: OperationTarget,
+        ref: str,
+        tag_name: str,
+        base_version: str = "",
+        requested_version_prefix: str = "",
+        base_version_is_final: bool = False,
+    ) -> dict[str, Any]:
         branch = target.client.branch(ref)
         commit = branch.get("commit") or {}
         source_commit_id = str(commit.get("id") or commit.get("short_id") or "")
@@ -601,18 +966,23 @@ class GitOpsApp:
         previous_version = require_existing_version(fields)
         previous_component_commit = fields.get(f"{component}_commitid", "")
         version_already_current = previous_component_commit == source_commit_id or previous_component_commit in parent_ids
-        new_version = bump_version(previous_version)
+        prefix = normalize_version_prefix(requested_version_prefix or version_prefix(previous_version) or resolve_version_prefix(ref))
+        new_version = apply_version_prefix(base_version, prefix) if base_version and base_version_is_final else apply_version_prefix(bump_version(previous_version), prefix)
         summary = {
             "updated": not version_already_current,
             "component": component,
             "previous_version": previous_version,
             "version": new_version,
+            "version_number": normalize_version_number(new_version),
+            "version_prefix": prefix,
             "previous_commit": previous_component_commit,
             "source_commit": source_commit_id,
             "files": [],
         }
         if base_version:
             summary["base_version"] = base_version
+        if base_version_is_final:
+            summary["base_version_is_final"] = True
         return {
             "changed": not version_already_current,
             "ref": ref,
@@ -620,6 +990,8 @@ class GitOpsApp:
             "version_info_fields": fields,
             "source_parent_ids": parent_ids,
             "base_version": base_version,
+            "base_version_is_final": base_version_is_final,
+            "version_prefix": prefix,
             "summary": summary,
         }
 
@@ -651,14 +1023,21 @@ class GitOpsApp:
             summary["reason"] = "all component commit ids already recorded"
             summary["tag_ref"] = summary["source_commit"]
             return {**version_plan, "changed": False, "summary": summary, "component_refs": component_refs}
-        previous_pkg_info = self.optional_file_text(targets, PKG_INFO_PATH, version_plan["ref"])
-        package_version = version_plan.get("base_version") or parse_pkg_info_version(previous_pkg_info)
+        forced_version = ""
+        if version_plan.get("base_version_is_final") and version_plan.get("base_version"):
+            forced_version = apply_version_prefix(str(version_plan["base_version"]), str(version_plan.get("version_prefix") or "V"))
+            package_version = ""
+        else:
+            previous_pkg_info = self.optional_file_text(targets, PKG_INFO_PATH, version_plan["ref"])
+            package_version = version_plan.get("base_version") or parse_pkg_info_version(previous_pkg_info)
         new_version, next_version_info = render_version_info_full(
             version_plan["version_info_fields"],
             component_refs,
             current_time,
             changed_components,
             package_version,
+            str(version_plan.get("version_prefix") or "V"),
+            forced_version,
         )
         actions = [
             {"action": "update", "file_path": VERSION_INFO_PATH, "content": next_version_info},
@@ -667,6 +1046,8 @@ class GitOpsApp:
         summary = dict(version_plan["summary"])
         summary["updated"] = True
         summary["version"] = new_version
+        summary["version_number"] = normalize_version_number(new_version)
+        summary["version_prefix"] = version_prefix(new_version)
         summary["files"] = [action["file_path"] for action in actions]
         summary["changed_components"] = changed_components
         if package_version:
@@ -891,10 +1272,11 @@ class GitOpsApp:
     def default_tag_version_for_request(self, payload: dict[str, Any], ref: str, update_version: bool, base_version: str) -> str:
         targets = self.targets(payload)
         simos_target = next((target for target in targets if is_simos_repo(target.repo)), None) or self.optional_simos_target()
+        requested_prefix = normalize_version_prefix(str(payload.get("version_prefix") or resolve_version_prefix(ref))) if update_version else ""
         if update_version:
             if simos_target is None:
                 raise ValueError("打 Tag 前更新版本号需要启用 simos 仓库")
-            version_plan = self.plan_version_update(simos_target, ref, "<auto>", base_version)
+            version_plan = self.plan_version_update(simos_target, ref, "<auto>", base_version, requested_prefix)
             contexts: dict[str, dict[str, Any]] = {}
             for target in targets:
                 context: dict[str, Any] = {"ref": ref}
@@ -1126,11 +1508,119 @@ def normalize_optional_version(value: str) -> str:
     version = value.strip().strip('"')
     if not version:
         return ""
-    raw = version[1:] if version[:1] in {"V", "v"} else version
+    raw = strip_version_prefix(version)
     parts = raw.split(".")
     if not parts or not all(part.isdigit() for part in parts):
         raise ValueError(f"版本基线格式无法识别：{value}")
+    return f"{version_prefix(version)}{raw}" if version_prefix(version) else raw
+
+
+def version_prefix(value: str) -> str:
+    first = value.strip().strip('"')[:1].upper()
+    return first if first in {"V", "F", "T"} else ""
+
+
+def strip_version_prefix(value: str) -> str:
+    version = value.strip().strip('"')
+    return version[1:] if version[:1].upper() in {"V", "F", "T"} else version
+
+
+def normalize_version_number(value: str) -> str:
+    version = strip_version_prefix(value)
+    if not version:
+        return ""
+    parts = version.split(".")
+    if not parts or not all(part.isdigit() for part in parts):
+        raise ValueError(f"版本号格式无法识别：{value}")
     return version
+
+
+def apply_version_prefix(value: str, prefix: str) -> str:
+    normalized_prefix = normalize_version_prefix(prefix)
+    return f"{normalized_prefix}{normalize_version_number(value)}"
+
+
+def normalize_version_prefix(value: str) -> str:
+    prefix = str(value or "").strip().upper()
+    if prefix not in {"V", "F", "T"}:
+        raise ValueError("版本类型只能是 V、F 或 T")
+    return prefix
+
+
+def resolve_weekly_version_policy(tag_names: list[str], computed_version_number: str, local_now: datetime) -> dict[str, Any]:
+    version_number = normalize_version_number(computed_version_number)
+    parts = version_number.split(".")
+    if len(parts) < 4:
+        return {"version_number": version_number, "requires_confirmation": False, "reason": "version_has_less_than_four_parts"}
+    current = [int(part) for part in parts[:4]]
+    fourth_width = max(len(parts[3]), 3)
+    week_versions = versions_from_tags_in_week(tag_names, local_now)
+    if week_versions:
+        third = max(item[2] for item in week_versions)
+        fourth = max(item[3] for item in week_versions if item[2] == third) + 1
+        current[2] = third
+        current[3] = fourth
+        return {
+            "version_number": format_four_part_version(current, fourth_width),
+            "requires_confirmation": False,
+            "reason": "current_week_existing_third",
+            "week": week_key(local_now),
+        }
+    if local_now.weekday() == 4:
+        current[2] += 1
+        return {
+            "version_number": format_four_part_version(current, fourth_width),
+            "requires_confirmation": True,
+            "reason": "friday_first_weekly_third_bump",
+            "week": week_key(local_now),
+        }
+    return {
+        "version_number": version_number,
+        "requires_confirmation": False,
+        "reason": "not_friday_no_weekly_bump",
+        "week": week_key(local_now),
+    }
+
+
+def versions_from_tags_in_week(tag_names: list[str], local_now: datetime) -> list[tuple[int, int, int, int]]:
+    values: list[tuple[int, int, int, int]] = []
+    target_week = week_key(local_now)
+    for tag in tag_names:
+        match = re.search(r"_([VvFfTt]?\d+(?:\.\d+)+)_(\d{12})$", tag)
+        if not match:
+            continue
+        try:
+            stamp = datetime.strptime(match.group(2), "%Y%m%d%H%M").replace(tzinfo=local_now.tzinfo)
+        except ValueError:
+            continue
+        if week_key(stamp) != target_week:
+            continue
+        parts = normalize_version_number(match.group(1)).split(".")
+        if len(parts) < 4 or not all(part.isdigit() for part in parts[:4]):
+            continue
+        values.append(tuple(int(part) for part in parts[:4]))
+    return values
+
+
+def week_key(value: datetime) -> str:
+    iso = value.isocalendar()
+    return f"{iso.year}-W{iso.week:02d}"
+
+
+def format_four_part_version(parts: list[int], fourth_width: int) -> str:
+    return ".".join([str(parts[0]), str(parts[1]), str(parts[2]), str(parts[3]).zfill(fourth_width)])
+
+
+def resolve_version_prefix(ref: str, task: dict[str, Any] | None = None) -> str:
+    task = task or {}
+    mode = str(task.get("version_prefix_mode") or "auto")
+    if mode == "manual":
+        return normalize_version_prefix(str(task.get("manual_version_prefix") or "V"))
+    if ref == "release":
+        return "F"
+    if ref == "fix" or ref.startswith("bugfix/"):
+        return "V"
+    return "V"
 
 
 def version_hint_from_ref(value: str) -> str:
@@ -1159,10 +1649,8 @@ def save_version_settings(settings: dict[str, str]) -> None:
 
 def bump_version(value: str) -> str:
     version = value.strip().strip('"')
-    prefix = ""
-    if version[:1] in {"V", "v"}:
-        prefix = version[:1]
-        version = version[1:]
+    prefix = version_prefix(version)
+    version = strip_version_prefix(version)
     parts = version.split(".")
     if not parts or not all(part.isdigit() for part in parts):
         raise ValueError(f"版本号格式无法自动递增：{value}")
@@ -1179,13 +1667,15 @@ def version_from_changed_components(
     package_version: str = "",
 ) -> str:
     components = [component for component in changed_components if component in VERSION_COMPONENT_REVISIONS]
+    normalized_package_version = package_version.strip().strip('"')
     if not components:
         return previous_version.strip().strip('"')
+    if normalized_package_version and len(components) == 1 and explicit_fourth_part(normalized_package_version):
+        return normalized_package_version
     if len(components) == 1:
         return bump_version(previous_version)
     normalized_baseline_version = previous_baseline_version.strip().strip('"')
     normalized_next_version = next_version.strip().strip('"')
-    normalized_package_version = package_version.strip().strip('"')
     revision_components = components if not normalized_package_version else [component for component in components if component != "simos"]
     revision = sum(VERSION_COMPONENT_REVISIONS[component] for component in revision_components)
     base_source = normalized_package_version or normalized_baseline_version or normalized_next_version or previous_version
@@ -1196,12 +1686,15 @@ def append_component_revision(base_version: str, revision: int) -> str:
     return f"{base_version}{revision}"
 
 
+def explicit_fourth_part(value: str) -> bool:
+    parts = normalize_version_number(value).split(".")
+    return len(parts) >= 4 and parts[3].isdigit() and int(parts[3]) > 0
+
+
 def version_revision_base(value: str) -> str:
     version = value.strip().strip('"')
-    prefix = ""
-    if version[:1] in {"V", "v"}:
-        prefix = version[:1]
-        version = version[1:]
+    prefix = version_prefix(version)
+    version = strip_version_prefix(version)
     parts = version.split(".")
     if not parts or not all(part.isdigit() for part in parts):
         raise ValueError(f"版本号格式无法计算模块修订位：{value}")
@@ -1293,15 +1786,25 @@ def render_version_info_full(
     current_time: str,
     changed_components: list[str] | tuple[str, ...] | None = None,
     package_version: str = "",
+    requested_version_prefix: str = "",
+    forced_version: str = "",
 ) -> tuple[str, str]:
     previous_version = require_existing_version(fields)
-    next_version = version_from_changed_components(
-        previous_version,
-        changed_components or tuple(component_refs),
-        fields.get("NextVersion", ""),
-        fields.get("PreVersion", ""),
-        package_version,
-    )
+    if forced_version:
+        next_version_number = normalize_version_number(forced_version)
+    else:
+        next_version_number = normalize_version_number(
+            version_from_changed_components(
+                previous_version,
+                changed_components or tuple(component_refs),
+                fields.get("NextVersion", ""),
+                fields.get("PreVersion", ""),
+                package_version,
+            )
+        )
+    next_prefix = normalize_version_prefix(requested_version_prefix or version_prefix(previous_version) or "V")
+    next_version = apply_version_prefix(next_version_number, next_prefix)
+    previous_version_for_file = apply_version_prefix(previous_version, next_prefix)
     next_fields = dict(fields)
     for component, item in component_refs.items():
         next_fields[f"{component}_commitid"] = item["commit_id"]
@@ -1310,7 +1813,7 @@ def render_version_info_full(
     lines = [
         f"Version:{next_version}",
         'NextVersion:""',
-        f"PreVersion:{previous_version}",
+        f"PreVersion:{previous_version_for_file}",
         "",
     ]
     components = ordered_components("simos", next_fields)
@@ -1385,6 +1888,205 @@ def is_merge_request_closed(merge_request: dict[str, Any] | None) -> bool:
     return bool(merge_request and str(merge_request.get("state", "")).lower() in {"closed", "canceled", "cancelled"})
 
 
+def require_schedule_id(value: str) -> str:
+    schedule_id = value.strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{1,62}", schedule_id):
+        raise ValueError("自动任务 ID 只能包含字母、数字、下划线和中划线，长度 2-63")
+    return schedule_id
+
+
+def normalize_schedule(payload: dict[str, Any]) -> dict[str, Any]:
+    return normalize_release_task(payload)
+
+
+def normalize_release_task(payload: dict[str, Any]) -> dict[str, Any]:
+    task = {**DEFAULT_SCHEDULE, **payload}
+    task["id"] = require_schedule_id(str(task.get("id") or DEFAULT_SCHEDULE["id"]))
+    task["enabled"] = truthy(task.get("enabled", True))
+    task["name"] = str(task.get("name") or task["id"]).strip()
+    task["timezone"] = str(task.get("timezone") or "Asia/Shanghai").strip()
+    ZoneInfo(task["timezone"])
+    daily_time = str(task.get("daily_time") or time_from_cron(str(task.get("cron") or DEFAULT_SCHEDULE["cron"]))).strip()
+    task["daily_time"] = normalize_daily_time(daily_time)
+    task["cron"] = cron_from_daily_time(task["daily_time"])
+    strategy = str(task.get("source_ref_strategy") or task.get("ref_strategy") or "fixed_ref").strip()
+    if strategy == "editable":
+        strategy = "fixed_ref"
+    if strategy not in {"fixed_ref", "latest_fix_rc", "manual_ref"}:
+        raise ValueError("source_ref_strategy 只能是 fixed_ref、latest_fix_rc 或 manual_ref")
+    task["source_ref_strategy"] = strategy
+    task["ref_strategy"] = "latest_fix_rc" if strategy == "latest_fix_rc" else "editable"
+    task["default_ref"] = str(task.get("default_ref") or "fix").strip()
+    task["version_source"] = str(task.get("version_source") or "simos_version_info").strip()
+    if task["version_source"] not in {"simos_version_info", "manual"}:
+        raise ValueError("version_source 只能是 simos_version_info 或 manual")
+    task["manual_version_number"] = normalize_version_number(str(task.get("manual_version_number") or task.get("manual_version") or ""))
+    task["manual_version"] = task["manual_version_number"]
+    task["version_prefix_mode"] = str(task.get("version_prefix_mode") or "auto").strip()
+    if task["version_prefix_mode"] not in {"auto", "manual"}:
+        raise ValueError("version_prefix_mode 只能是 auto 或 manual")
+    task["manual_version_prefix"] = normalize_version_prefix(str(task.get("manual_version_prefix") or "V"))
+    task["cloud_category"] = str(task.get("cloud_category") or DEFAULT_SCHEDULE["cloud_category"]).strip("/")
+    if not task["cloud_category"] or ".." in task["cloud_category"] or task["cloud_category"].startswith("/"):
+        raise ValueError("云盘分类目录非法")
+    task["execution_type"] = "full_release"
+    return task
+
+
+def normalize_daily_time(value: str) -> str:
+    match = re.fullmatch(r"(\d{1,2}):(\d{1,2})", value.strip())
+    if not match:
+        raise ValueError("执行时间格式应为 HH:mm")
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError("执行时间超出范围")
+    return f"{hour:02d}:{minute:02d}"
+
+
+def cron_from_daily_time(value: str) -> str:
+    hour, minute = normalize_daily_time(value).split(":")
+    return f"{int(minute)} {int(hour)} * * *"
+
+
+def time_from_cron(value: str) -> str:
+    minute, hour, *_ = normalize_daily_cron(value).split()
+    return f"{int(hour):02d}:{int(minute):02d}"
+
+
+def normalize_daily_cron(value: str) -> str:
+    parts = value.split()
+    if len(parts) != 5 or parts[2:] != ["*", "*", "*"]:
+        raise ValueError("自动任务当前支持每日 cron，格式例如：0 16 * * *")
+    minute = int(parts[0])
+    hour = int(parts[1])
+    if not (0 <= minute <= 59 and 0 <= hour <= 23):
+        raise ValueError("cron 小时或分钟超出范围")
+    return f"{minute} {hour} * * *"
+
+
+def load_schedules() -> list[dict[str, Any]]:
+    return load_release_tasks()
+
+
+def save_schedules(schedules: list[dict[str, Any]]) -> None:
+    save_release_tasks(schedules)
+
+
+def load_release_tasks() -> list[dict[str, Any]]:
+    if RELEASE_TASKS_PATH.exists():
+        raw = json.loads(RELEASE_TASKS_PATH.read_text(encoding="utf-8"))
+        items = raw.get("tasks", raw.get("schedules", raw if isinstance(raw, list) else []))
+        return [normalize_release_task(item) for item in items]
+    if SCHEDULES_PATH.exists():
+        raw = json.loads(SCHEDULES_PATH.read_text(encoding="utf-8"))
+        items = raw.get("schedules", raw if isinstance(raw, list) else [])
+        tasks = [normalize_release_task(item) for item in items]
+        save_release_tasks(tasks)
+        return tasks
+    tasks = [dict(DEFAULT_SCHEDULE)]
+    save_release_tasks(tasks)
+    return [normalize_release_task(item) for item in tasks]
+
+
+def save_release_tasks(tasks: list[dict[str, Any]]) -> None:
+    RELEASE_TASKS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    normalized = [normalize_release_task(item) for item in tasks]
+    RELEASE_TASKS_PATH.write_text(json.dumps({"tasks": normalized}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def load_schedule_runs() -> list[dict[str, Any]]:
+    return load_release_runs()
+
+
+def save_schedule_runs(runs: list[dict[str, Any]]) -> None:
+    save_release_runs(runs)
+
+
+def append_schedule_run(run: dict[str, Any]) -> None:
+    append_release_run(run)
+
+
+def load_release_runs() -> list[dict[str, Any]]:
+    if RELEASE_RUNS_PATH.exists():
+        raw = json.loads(RELEASE_RUNS_PATH.read_text(encoding="utf-8"))
+        items = raw.get("runs", raw if isinstance(raw, list) else [])
+        return [item for item in items if isinstance(item, dict)]
+    if SCHEDULE_RUNS_PATH.exists():
+        raw = json.loads(SCHEDULE_RUNS_PATH.read_text(encoding="utf-8"))
+        items = raw.get("runs", raw if isinstance(raw, list) else [])
+        runs = [item for item in items if isinstance(item, dict)]
+        save_release_runs(runs)
+        return runs
+    return []
+
+
+def save_release_runs(runs: list[dict[str, Any]]) -> None:
+    RELEASE_RUNS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    RELEASE_RUNS_PATH.write_text(json.dumps({"runs": runs[-300:]}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def append_release_run(run: dict[str, Any]) -> None:
+    runs = [item for item in load_release_runs() if item.get("id") != run.get("id")]
+    save_release_runs(runs + [run])
+
+
+def new_release_run_id(prefix: str = "run") -> str:
+    return f"{prefix}-{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y%m%d%H%M%S%f')}"
+
+
+def parse_schedule_now(value: str) -> datetime:
+    return datetime.fromisoformat(value)
+
+
+def coerce_schedule_now(schedule: dict[str, Any], now: datetime | None = None) -> datetime:
+    tz = ZoneInfo(str(schedule.get("timezone") or "Asia/Shanghai"))
+    current = now or datetime.now(tz)
+    if current.tzinfo is None:
+        return current.replace(tzinfo=tz)
+    return current.astimezone(tz)
+
+
+def schedule_due_key(schedule: dict[str, Any], local_now: datetime) -> str:
+    minute_s, hour_s, *_ = normalize_daily_cron(str(schedule.get("cron") or "0 16 * * *")).split()
+    scheduled = local_now.replace(hour=int(hour_s), minute=int(minute_s), second=0, microsecond=0)
+    if local_now < scheduled or local_now >= scheduled + timedelta(minutes=5):
+        return ""
+    return f"{schedule['id']}:{scheduled.strftime('%Y-%m-%dT%H:%M')}"
+
+
+def schedule_already_ran(schedule_id: str, due_key: str) -> bool:
+    return any(item.get("schedule_id") == schedule_id and item.get("due_key") == due_key for item in load_release_runs())
+
+
+def render_schedule_tag_name(template: str, version: str, stamp: str) -> str:
+    value = template.replace("{version}", version).replace("{yyyyMMddHHmm}", stamp)
+    return require_ref_name(value, "自动任务 Tag 名称")
+
+
+def natural_ref_key(value: str) -> tuple[Any, ...]:
+    parts: list[Any] = []
+    for item in re.split(r"(\d+)", value):
+        parts.append(int(item) if item.isdigit() else item)
+    return tuple(parts)
+
+
+def start_schedule_worker(app: GitOpsApp) -> None:
+    if os.environ.get("GITOPS_SCHEDULER_ENABLED", "true").lower() in {"0", "false", "no"}:
+        return
+
+    def loop() -> None:
+        while True:
+            try:
+                app.run_due_schedules()
+            except Exception as exc:
+                print(f"[schedule] {exc}", file=sys.stderr, flush=True)
+            time.sleep(60)
+
+    thread = threading.Thread(target=loop, name="gitops-schedule-worker", daemon=True)
+    thread.start()
+
+
 def load_dotenv(path: Path) -> None:
     if not path.exists():
         return
@@ -1423,7 +2125,7 @@ def configure_tls(server: ThreadingHTTPServer) -> bool:
         raise ValueError("GITOPS_TLS_CERT and GITOPS_TLS_KEY must be configured together")
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(cert_path, key_path)
-    server.socket = context.wrap_socket(server.socket, server_side=True)
+    server.socket = context.wrap_socket(server.socket, server_side=True, do_handshake_on_connect=False)
     return True
 
 
@@ -1474,7 +2176,19 @@ def make_handler(app: GitOpsApp):
                 "/api/tags": ("view", lambda: app.tags(query.get("repository_id", ""), query.get("search", ""))),
                 "/api/common-refs": ("view", app.common_refs),
                 "/api/resident-packages": ("view", lambda: app.resident_package(query.get("tag", ""))),
+                "/api/schedules": ("view", app.schedules),
+                "/api/release-tasks": ("view", app.release_tasks),
+                "/api/release-runs": ("view", lambda: {"ok": True, "runs": load_release_runs()}),
             }
+            schedule_route = match_schedule_path(path)
+            if schedule_route and schedule_route[1] == "runs":
+                routes[path] = ("view", lambda schedule_id=schedule_route[0]: app.schedule_runs(schedule_id))
+            release_task_route = match_release_task_path(path)
+            if release_task_route and release_task_route[1] == "runs":
+                routes[path] = ("view", lambda task_id=release_task_route[0]: app.schedule_runs(task_id))
+            release_run_id = match_release_run_path(path)
+            if release_run_id:
+                routes[path] = ("view", lambda run_id=release_run_id: {"ok": True, "run": next((item for item in load_release_runs() if item.get("id") == run_id), None)})
             repo_route = match_repo_get(path)
             if repo_route:
                 repo_id, resource = repo_route
@@ -1502,12 +2216,45 @@ def make_handler(app: GitOpsApp):
                 "/api/bugfix/create": ("create_bugfix", lambda: app.create_bugfix(payload)),
                 "/api/tags/create": ("create_tag", lambda: app.create_tag(payload)),
                 "/api/tags/delete": ("create_tag", lambda: app.delete_tags(payload)),
+                "/api/schedules": ("admin", lambda: app.save_schedule(payload)),
+                "/api/release-tasks": ("admin", lambda: app.save_release_task(payload)),
+                "/api/release-runs/manual": ("create_tag", lambda: app.manual_release_run(payload)),
+                "/api/release-runs/rerun-tag": ("create_tag", lambda: app.rerun_tag_release(payload)),
             }
+            schedule_route = match_schedule_path(path)
+            if schedule_route:
+                schedule_id, action = schedule_route
+                if action == "dry-run":
+                    routes[path] = ("create_tag", lambda schedule_id=schedule_id: app.schedule_dry_run(schedule_id))
+                elif action == "run-now":
+                    routes[path] = ("create_tag", lambda schedule_id=schedule_id: app.schedule_run_now(schedule_id))
+            release_task_route = match_release_task_path(path)
+            if release_task_route:
+                task_id, action = release_task_route
+                if action == "dry-run":
+                    routes[path] = ("create_tag", lambda task_id=task_id: app.schedule_dry_run(task_id))
+                elif action == "run-now":
+                    routes[path] = ("create_tag", lambda task_id=task_id: app.schedule_run_now(task_id))
+            release_run_action = match_release_run_action_path(path)
+            if release_run_action:
+                run_id, action = release_run_action
+                if action == "continue":
+                    routes[path] = ("create_tag", lambda run_id=run_id: app.continue_release_run(run_id))
             self.dispatch_route(path, routes)
 
         def do_PUT(self) -> None:
             path = urlparse(self.path).path
             payload = self.read_json()
+            schedule_route = match_schedule_path(path)
+            if schedule_route and not schedule_route[1]:
+                schedule_id = schedule_route[0]
+                self.handle_api("admin", lambda schedule_id=schedule_id: app.save_schedule({**payload, "id": schedule_id}))
+                return
+            release_task_route = match_release_task_path(path)
+            if release_task_route and not release_task_route[1]:
+                task_id = release_task_route[0]
+                self.handle_api("admin", lambda task_id=task_id: app.save_release_task({**payload, "id": task_id}))
+                return
             repo_id = match_repository_path(path)
             if not repo_id:
                 json_response(self, 404, {"ok": False, "error": "Unknown endpoint."})
@@ -1516,6 +2263,16 @@ def make_handler(app: GitOpsApp):
 
         def do_DELETE(self) -> None:
             path = urlparse(self.path).path
+            schedule_route = match_schedule_path(path)
+            if schedule_route and not schedule_route[1]:
+                schedule_id = schedule_route[0]
+                self.handle_api("admin", lambda schedule_id=schedule_id: app.delete_schedule(schedule_id))
+                return
+            release_task_route = match_release_task_path(path)
+            if release_task_route and not release_task_route[1]:
+                task_id = release_task_route[0]
+                self.handle_api("admin", lambda task_id=task_id: app.delete_release_task(task_id))
+                return
             repo_id = match_repository_path(path)
             if not repo_id:
                 json_response(self, 404, {"ok": False, "error": "Unknown endpoint."})
@@ -1608,6 +2365,38 @@ def match_repo_get(path: str) -> tuple[str, str] | None:
     return None
 
 
+def match_schedule_path(path: str) -> tuple[str, str] | None:
+    parts = [item for item in path.split("/") if item]
+    if len(parts) == 3 and parts[0] == "api" and parts[1] == "schedules":
+        return parts[2], ""
+    if len(parts) == 4 and parts[0] == "api" and parts[1] == "schedules":
+        return parts[2], parts[3]
+    return None
+
+
+def match_release_task_path(path: str) -> tuple[str, str] | None:
+    parts = [item for item in path.split("/") if item]
+    if len(parts) == 3 and parts[0] == "api" and parts[1] == "release-tasks":
+        return parts[2], ""
+    if len(parts) == 4 and parts[0] == "api" and parts[1] == "release-tasks":
+        return parts[2], parts[3]
+    return None
+
+
+def match_release_run_path(path: str) -> str:
+    parts = [item for item in path.split("/") if item]
+    if len(parts) == 3 and parts[0] == "api" and parts[1] == "release-runs":
+        return parts[2]
+    return ""
+
+
+def match_release_run_action_path(path: str) -> tuple[str, str] | None:
+    parts = [item for item in path.split("/") if item]
+    if len(parts) == 4 and parts[0] == "api" and parts[1] == "release-runs":
+        return parts[2], parts[3]
+    return None
+
+
 def json_response(handler: BaseHTTPRequestHandler, status: int, payload: Any) -> None:
     body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
     handler.send_response(status)
@@ -1643,6 +2432,7 @@ def main() -> None:
     scheme = "https" if tls_enabled else "http"
     print(f"GitLab Branch Workbench: {scheme}://{host}:{port}", flush=True)
     print(f"Repositories: {len(app.store.list())}", flush=True)
+    start_schedule_worker(app)
     server.serve_forever()
 
 

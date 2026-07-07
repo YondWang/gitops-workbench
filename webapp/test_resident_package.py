@@ -105,6 +105,45 @@ class ResidentPackageTest(unittest.TestCase):
         self.assertTrue(result["artifact_dir"].endswith("/release_3.1.22.046_202606241430"))
         self.assertTrue(result["artifact_path"].endswith("/release_3.1.22.046_202606241430/resident.tar.gz"))
 
+    def test_existing_manifest_adds_cloud_package_details(self) -> None:
+        artifact_dir = server.RESIDENT_ARTIFACT_ROOT / "release_3.1.24.019_202607031600"
+        artifact_dir.mkdir(parents=True)
+        (artifact_dir / "build-info.json").write_text(
+            json.dumps(
+                {
+                    "tag": "release_3.1.24.019_202607031600",
+                    "status": "success",
+                    "sha256": "root-sha",
+                    "built_at": "2026-07-03T16:45:00+08:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (artifact_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "cloud_dir": "/public/Versions/2026-07-03_3.1.24.019/车机/CI自动构建",
+                    "packages": {
+                        "dev": {
+                            "prefix": "Vd",
+                            "path": "Vd-3.1.24.019/resident.tar.gz",
+                            "sha256": "dev-sha",
+                        }
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        result = self.app.resident_package("release_3.1.24.019_202607031600")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["artifact_source"], "cloud")
+        self.assertEqual(result["cloud_dir"], "/public/Versions/2026-07-03_3.1.24.019/车机/CI自动构建")
+        self.assertEqual(result["artifact_path"], "/public/Versions/2026-07-03_3.1.24.019/车机/CI自动构建")
+        self.assertEqual(result["packages"]["dev"]["sha256"], "dev-sha")
+
     def test_source_branch_suffix_tag_is_accepted(self) -> None:
         artifact_dir = server.RESIDENT_ARTIFACT_ROOT / "fix-3.2.0.0-rc1_3.2.0.0_202606261528"
         artifact_dir.mkdir(parents=True)

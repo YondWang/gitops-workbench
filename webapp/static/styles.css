@@ -399,7 +399,7 @@ textarea {
 
 .version-base-field input:disabled {
   cursor: not-allowed;
-  background: var(--surface-muted);
+  background: var(--surface-soft);
 }
 
 .message {
@@ -453,6 +453,35 @@ textarea {
 
 .resident-package .button-link {
   margin-top: 10px;
+}
+
+.schedule-table {
+  max-height: 260px;
+  margin-bottom: 16px;
+}
+
+.compact-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 12px 0 18px;
+}
+
+.compact-form .button-row {
+  grid-column: 1 / -1;
+}
+
+.readonly-field {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--surface-soft);
+}
+
+.readonly-field code {
+  display: block;
+  overflow-wrap: anywhere;
+  margin-top: 4px;
 }
 
 .table-wrap {

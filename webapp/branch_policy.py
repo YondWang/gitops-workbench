@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 
-VERSION_RE = re.compile(r"^[Vv]?(\d{1,4})\.(\d{1,4})\.(\d{1,4})$")
+VERSION_RE = re.compile(r"^[VvFfTt]?(\d{1,4})\.(\d{1,4})\.(\d{1,4})$")
 SAFE_REF_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 
 

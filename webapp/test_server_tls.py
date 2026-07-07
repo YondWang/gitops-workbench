@@ -28,7 +28,11 @@ class ConfigureTlsTest(unittest.TestCase):
         self.assertTrue(result)
         ssl_context.assert_called_once()
         context.load_cert_chain.assert_called_once_with("/certs/fullchain.pem", "/certs/privkey.pem")
-        context.wrap_socket.assert_called_once_with(original_socket, server_side=True)
+        context.wrap_socket.assert_called_once_with(
+            original_socket,
+            server_side=True,
+            do_handshake_on_connect=False,
+        )
         self.assertEqual(httpd.socket, "wrapped-socket")
 
 
