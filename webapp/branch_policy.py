@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 
-VERSION_RE = re.compile(r"^[Vv]?(\d{1,4})\.(\d{1,4})\.(\d{1,4})$")
+VERSION_RE = re.compile(r"^[VvFfTt]?(\d{1,4})\.(\d{1,4})\.(\d{1,4})$")
 SAFE_REF_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 
 
@@ -90,7 +90,7 @@ def tag_source_name(ref: str) -> str:
 
 
 def tag_date_now() -> str:
-    return datetime.now().strftime("%Y%m%d")
+    return datetime.now().strftime("%Y%m%d%H%M")
 
 
 def default_tag_name(ref: str, version: str, stamp: str | None = None) -> str:

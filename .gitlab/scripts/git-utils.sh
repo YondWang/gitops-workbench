@@ -82,7 +82,7 @@ tag_source_name() {
 }
 
 tag_date_now() {
-  date '+%Y%m%d'
+  date '+%Y%m%d%H%M'
 }
 
 version_from_ref_name() {

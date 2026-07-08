@@ -50,13 +50,7 @@ class GitLabClient:
         suffix = suffix if suffix.startswith("/") or not suffix else f"/{suffix}"
         return f"/projects/{self.config.project_id}{suffix}"
 
-    def request(
-        self,
-        method: str,
-        path: str,
-        payload: dict[str, Any] | None = None,
-        query: dict[str, Any] | None = None,
-    ) -> Any:
+    def api_url(self, path: str, query: dict[str, Any] | None = None) -> str:
         if not self.config.base_url:
             raise GitLabError("缺少 GITLAB_BASE_URL 配置")
         if not self.config.project:
@@ -69,11 +63,21 @@ class GitLabClient:
             clean_query = {key: value for key, value in query.items() if value not in (None, "")}
             if clean_query:
                 url = f"{url}?{urlencode(clean_query)}"
+        return url
 
+    def request_bytes(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        query: dict[str, Any] | None = None,
+        accept: str = "application/octet-stream",
+    ) -> bytes:
+        url = self.api_url(path, query=query)
         body = None
         headers = {
             "PRIVATE-TOKEN": self.config.token,
-            "Accept": "application/json",
+            "Accept": accept,
         }
         if payload is not None:
             body = json.dumps(payload).encode("utf-8")
@@ -83,8 +87,7 @@ class GitLabClient:
         context = None if self.config.ssl_verify else ssl._create_unverified_context()
         try:
             with urlopen(request, timeout=30, context=context) as response:
-                raw = response.read().decode("utf-8")
-                return json.loads(raw) if raw else None
+                return response.read()
         except HTTPError as exc:
             raw = exc.read().decode("utf-8", errors="replace")
             try:
@@ -94,6 +97,17 @@ class GitLabClient:
             raise GitLabError(self._format_error(exc.code, payload), exc.code, payload) from exc
         except URLError as exc:
             raise GitLabError(f"GitLab API 连接失败：{exc.reason}") from exc
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        query: dict[str, Any] | None = None,
+    ) -> Any:
+        raw = self.request_bytes(method, path, payload=payload, query=query, accept="application/json")
+        text = raw.decode("utf-8")
+        return json.loads(text) if text else None
 
     def paginated(self, path: str, query: dict[str, Any] | None = None) -> list[Any]:
         items: list[Any] = []
@@ -123,6 +137,23 @@ class GitLabClient:
     def tags(self, search: str = "") -> list[dict[str, Any]]:
         query = {"search": search} if search else None
         return self.paginated(self.project_api_path("/repository/tags"), query=query)
+
+    def pipelines(self, ref: str = "", status: str = "", source: str = "") -> list[dict[str, Any]]:
+        query = {"ref": ref, "status": status, "source": source}
+        return self.paginated(self.project_api_path("/pipelines"), query=query)
+
+    def pipeline_jobs(self, pipeline_id: int | str) -> list[dict[str, Any]]:
+        return self.paginated(self.project_api_path(f"/pipelines/{pipeline_id}/jobs"), query={"include_retried": "true"})
+
+    def job_artifact_file_url(self, job_id: int | str, artifact_path: str) -> str:
+        return self.api_url(self.project_api_path(f"/jobs/{job_id}/artifacts/{quote(artifact_path, safe='/')}") )
+
+    def job_artifact_file_text(self, job_id: int | str, artifact_path: str) -> str:
+        return self.request_bytes(
+            "GET",
+            self.project_api_path(f"/jobs/{job_id}/artifacts/{quote(artifact_path, safe='/')}") ,
+            accept="text/plain, application/octet-stream",
+        ).decode("utf-8")
 
     def branch_names(self) -> list[str]:
         return [str(item.get("name", "")) for item in self.branches()]

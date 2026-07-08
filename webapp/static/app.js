@@ -12,9 +12,11 @@ const state = {
   pendingVersionTimer: null,
   residentPackage: null,
   residentPackageTimer: null,
+  schedules: [],
+  scheduleRuns: [],
 };
 
-const RESIDENT_PACKAGE_TAG_RE = /^(?:release|fix|bugfix-[A-Za-z0-9._-]+)_[Vv]?\d+(?:\.\d+)+_\d{8}$/;
+const RESIDENT_PACKAGE_TAG_RE = /^[A-Za-z0-9._-]+_[VvFfTt]?\d+(?:\.\d+)+_\d{12}$/;
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -110,6 +112,19 @@ function residentPipelineUrl(packageInfo) {
   );
 }
 
+function residentArtifactUrl(packageInfo) {
+  const value = packageInfo?.artifact_url || packageInfo?.download_url || packageInfo?.artifact_path || "";
+  return String(value).startsWith("http") ? value : "";
+}
+
+function packageShaSummary(packageInfo) {
+  if (packageInfo?.sha256) return packageInfo.sha256;
+  const packages = packageInfo?.packages || {};
+  return Object.entries(packages)
+    .map(([name, item]) => `${name}:${item?.sha256 || item?.md5 || "-"}`)
+    .join("  ");
+}
+
 function renderResidentPackage() {
   const panel = $("#residentPackagePanel");
   if (!panel) return;
@@ -122,15 +137,22 @@ function renderResidentPackage() {
   badge.textContent = residentStatusText(status);
   badge.className = residentStatusClass(status);
   $("#residentPackageTag").textContent = packageInfo.tag || "-";
-  $("#residentPackagePath").textContent = packageInfo.artifact_path || `/data/simos-ci/artifacts/${packageInfo.tag || "<tag>"}/resident.tar.gz`;
-  $("#residentPackageSha").textContent = packageInfo.sha256 || "-";
-  $("#residentPackageBuiltAt").textContent = packageInfo.built_at || packageInfo.finished_at || "-";
+  $("#residentPackagePath").textContent = packageInfo.cloud_dir || packageInfo.artifact_path || `/data/simos-ci/artifacts/${packageInfo.tag || "<tag>"}/resident.tar.gz`;
+  $("#residentPackageSha").textContent = packageShaSummary(packageInfo) || "-";
+  $("#residentPackageBuiltAt").textContent = packageInfo.published_at || packageInfo.built_at || packageInfo.finished_at || "-";
   $("#residentPackageMeta").textContent = packageInfo.message || packageInfo.error || "Tag Pipeline 会在 GitLab Runner 上自动构建 resident.tar.gz";
 
   const pipelineUrl = residentPipelineUrl(packageInfo);
   const link = $("#residentPackagePipelineLink");
   link.classList.toggle("hidden", !pipelineUrl);
   link.href = pipelineUrl || "#";
+
+  const artifactUrl = residentArtifactUrl(packageInfo);
+  const artifactLink = $("#residentPackageArtifactLink");
+  artifactLink?.classList.toggle("hidden", !artifactUrl);
+  if (artifactLink) {
+    artifactLink.href = artifactUrl || "#";
+  }
 }
 
 function clearResidentPackagePoll() {
@@ -214,7 +236,7 @@ function renderSession() {
   const isAdmin = state.session.role === "admin";
   document.querySelectorAll("[data-admin-only]").forEach((el) => el.classList.toggle("hidden", !isAdmin));
   document.querySelectorAll("[data-user-block]").forEach((el) => el.classList.toggle("hidden", isAdmin));
-  if (!isAdmin && ["release", "bugfix", "tag", "repositories"].some((id) => $(`#${id}`).classList.contains("active-view"))) {
+  if (!isAdmin && ["release", "bugfix", "tag", "schedules", "repositories"].some((id) => $(`#${id}`).classList.contains("active-view"))) {
     switchView("overview");
   }
 }
@@ -267,6 +289,173 @@ function renderRepositories() {
         `,
       )
       .join("") || `<tr><td colspan="5">暂无仓库配置</td></tr>`;
+}
+
+function renderSchedules() {
+  const currentId = $("#scheduleForm")?.elements.id?.value || "";
+  const schedule = state.schedules.find((item) => item.id === currentId) || null;
+  const status = $("#scheduleStatus");
+  if (status) {
+    status.textContent = schedule ? (schedule.enabled ? "已启用" : "已停用") : "编辑中";
+    status.className = schedule?.enabled ? "badge ok" : "badge muted";
+  }
+  renderSchedulePreviewFromForm();
+  renderScheduleList();
+  renderScheduleRuns();
+}
+
+function renderScheduleList() {
+  const body = $("#scheduleListBody");
+  if (!body) return;
+  $("#scheduleCount").textContent = String(state.schedules.length);
+  body.innerHTML =
+    state.schedules
+      .map(
+        (schedule) => `
+          <tr>
+            <td>
+              <strong>${escapeHtml(schedule.name || schedule.id)}</strong>
+              <div class="meta"><code>${escapeHtml(schedule.id)}</code> ${schedule.enabled ? "启用" : "停用"}</div>
+            </td>
+            <td><code>${escapeHtml(schedule.daily_time || timeFromCron(schedule.cron || "0 16 * * *"))}</code><div class="meta">${escapeHtml(schedule.timezone || "Asia/Shanghai")}</div></td>
+            <td><code>${escapeHtml(schedule.default_ref || "-")}</code><div class="meta">${escapeHtml(versionPrefixLabel(schedule))}</div></td>
+            <td>
+              <button class="secondary small" type="button" data-edit-schedule="${escapeHtml(schedule.id)}">编辑</button>
+              <button class="danger small" type="button" data-delete-schedule="${escapeHtml(schedule.id)}">删除</button>
+            </td>
+          </tr>
+        `,
+      )
+      .join("") || `<tr><td colspan="4">暂无自动任务</td></tr>`;
+}
+
+function renderScheduleRuns() {
+  const body = $("#scheduleRunsBody");
+  if (!body) return;
+  body.innerHTML =
+    state.scheduleRuns
+      .slice(0, 20)
+      .map(
+        (run) => `
+          <tr>
+            <td><span class="${releaseRunStatusClass(run.status)}">${escapeHtml(releaseRunStatusText(run.status))}</span></td>
+            <td><code>${escapeHtml(run.tag_name || "-")}</code><div class="meta">${escapeHtml(run.started_at || "")}</div></td>
+            <td><code>${escapeHtml(run.source_ref || run.ref || "-")}</code><div class="meta">${escapeHtml(run.release_version || run.version || "")}</div></td>
+            <td>
+              <code>${escapeHtml(run.cloud_dir || run.error || "-")}</code>
+              ${run.status === "waiting_version_mr" ? `<div><button class="secondary small" type="button" data-continue-run="${escapeHtml(run.id)}">继续</button></div>` : ""}
+            </td>
+          </tr>
+        `,
+      )
+      .join("") || `<tr><td colspan="4">暂无运行记录</td></tr>`;
+  const newest = state.scheduleRuns.find((run) => run.tag_name);
+  if (newest?.tag_name && (!state.residentPackage || state.residentPackage.tag !== newest.tag_name)) {
+    state.residentPackage = {
+      tag: newest.tag_name,
+      status: newest.status === "published" ? "ready" : "checking",
+      artifact_path: newest.cloud_dir || `/data/simos-ci/artifacts/${newest.tag_name}/resident.tar.gz`,
+      message: newest.status === "waiting_version_mr" ? "等待版本号 MR 合并" : "正在等待 resident 包状态",
+    };
+    renderResidentPackage();
+  }
+}
+
+function timeFromCron(cron) {
+  const parts = String(cron || "0 16 * * *").split(/\s+/);
+  const minute = String(parts[0] || "0").padStart(2, "0");
+  const hour = String(parts[1] || "16").padStart(2, "0");
+  return `${hour}:${minute}`;
+}
+
+function cronFromTime(value) {
+  const [hour = "16", minute = "0"] = String(value || "16:00").split(":");
+  return `${Number(minute)} ${Number(hour)} * * *`;
+}
+
+function fillScheduleForm(schedule = null) {
+  const form = $("#scheduleForm");
+  if (!form) return;
+  const next = schedule || {
+    id: `simos-resident-${Date.now()}`,
+    enabled: true,
+    name: "SimOS resident 自动构建",
+    timezone: "Asia/Shanghai",
+    daily_time: "16:00",
+    source_ref_strategy: "fixed_ref",
+    default_ref: "fix",
+    dependency_ref: "",
+    version_source: "simos_version_info",
+    manual_version_number: "",
+    version_prefix_mode: "auto",
+    manual_version_prefix: "V",
+    cloud_category: "车机/CI自动构建",
+  };
+  Object.entries(next).forEach(([key, value]) => {
+    const field = form.elements[key];
+    if (!field) return;
+    if (field.type === "checkbox") {
+      field.checked = Boolean(value);
+    } else {
+      field.value = value ?? "";
+    }
+  });
+  form.elements.daily_time.value = next.daily_time || timeFromCron(next.cron || "0 16 * * *");
+  renderSchedulePreviewFromForm();
+}
+
+function scheduleFormBody() {
+  const body = formValues($("#scheduleForm"));
+  body.daily_time = body.daily_time || timeFromCron(body.cron || "0 16 * * *");
+  return body;
+}
+
+function versionPrefixLabel(schedule) {
+  if (schedule.version_prefix_mode === "manual") return `手动 ${schedule.manual_version_prefix || "V"}`;
+  return "自动 V/F";
+}
+
+function releaseRunStatusText(status) {
+  const value = String(status || "");
+  return {
+    planned: "已计划",
+    precheck_failed: "预检失败",
+    waiting_version_mr: "等待 MR",
+    tagging: "打 Tag",
+    building: "构建中",
+    published: "已发布",
+    failed: "失败",
+    canceled: "已取消",
+  }[value] || value || "-";
+}
+
+function releaseRunStatusClass(status) {
+  const value = String(status || "");
+  if (["published", "building"].includes(value)) return "badge ok";
+  if (["failed", "precheck_failed", "canceled"].includes(value)) return "badge error";
+  return "badge muted";
+}
+
+function sourceRefSlug(ref) {
+  return String(ref || "fix").replaceAll("/", "-");
+}
+
+function previewVersionPrefix(ref, mode, manualPrefix) {
+  if (mode === "manual") return manualPrefix || "V";
+  if (ref === "release") return "F";
+  return "V";
+}
+
+function renderSchedulePreviewFromForm() {
+  const form = $("#scheduleForm");
+  const preview = $("#scheduleTagPreview");
+  if (!form || !preview) return;
+  const body = scheduleFormBody();
+  const ref = body.default_ref || "fix";
+  const prefix = previewVersionPrefix(ref, body.version_prefix_mode, body.manual_version_prefix);
+  const versionNumber = body.manual_version_number || "版本号";
+  const dependency = body.dependency_ref || ref;
+  preview.textContent = `${sourceRefSlug(ref)}_${prefix}${versionNumber}_${new Date().toISOString().slice(0, 16).replace(/[-T:]/g, "").slice(0, 12)} · 子库:${dependency}`;
 }
 
 function renderBranches() {
@@ -454,7 +643,7 @@ async function refreshAll() {
   const params = new URLSearchParams({ repository_id: state.currentRepositoryId });
   if (search) params.set("search", search);
   const simosRepo = simosRepository();
-  const [branches, tags, commonRefs, simosTags] = await Promise.all([
+  const [branches, tags, commonRefs, simosTags, schedules] = await Promise.all([
     api(`/api/branches?${params}`),
     api(`/api/tags?${params}`),
     api("/api/common-refs").catch((error) => {
@@ -467,13 +656,47 @@ async function refreshAll() {
           return null;
         })
       : Promise.resolve(null),
+    api("/api/release-tasks").catch((error) => {
+      appendLog("刷新自动任务失败", error.message);
+      return null;
+    }),
   ]);
   state.branches = branches.branches || [];
   state.tags = tags.tags || [];
   state.simosTags = simosTags?.tags || [];
   state.commonRefs = commonRefs;
+  state.schedules = schedules?.tasks || schedules?.schedules || [];
+  state.scheduleRuns = schedules?.runs || [];
   renderBranches();
   renderTags();
+  renderSchedules();
+}
+
+async function refreshWorkspace() {
+  const button = $("#refreshBtn");
+  const previousText = button?.textContent || "刷新";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "刷新中";
+  }
+  try {
+    await refreshAll();
+    if (state.residentPackage?.tag && $("#schedules")?.classList.contains("active-view")) {
+      await fetchResidentPackage(state.residentPackage.tag);
+    }
+    appendLog("刷新完成", {
+      view: document.querySelector(".view.active-view")?.id || "",
+      repository: state.currentRepositoryId,
+      schedules: state.schedules.length,
+      branches: state.branches.length,
+      tags: state.tags.length,
+    });
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = previousText;
+    }
+  }
 }
 
 async function loadSession() {
@@ -534,12 +757,6 @@ function handleTagOperationResult(body, result) {
   if (result?.ok && state.pendingVersionTag) {
     clearVersionTagPoll();
     appendLog("版本号 MR 已合并", "已继续完成 Tag 创建");
-  }
-  if (result?.ok) {
-    const tagName = tagNameFromOperationResult(body, result);
-    if (isResidentPackageTag(tagName)) {
-      watchResidentPackage(tagName);
-    }
   }
 }
 
@@ -659,6 +876,80 @@ async function saveRepository(form) {
   fillRepositoryForm(null);
 }
 
+async function saveSchedule(form) {
+  const body = scheduleFormBody();
+  const path = `/api/release-tasks/${encodeURIComponent(body.id)}`;
+  const result = await api(path, { method: "PUT", body: JSON.stringify(body) });
+  appendLog("保存自动任务", result);
+  state.schedules = result.tasks || result.schedules || state.schedules;
+  state.scheduleRuns = result.runs || state.scheduleRuns;
+  renderSchedules();
+  return result;
+}
+
+async function refreshSchedules() {
+  const data = await api("/api/release-tasks");
+  state.schedules = data.tasks || data.schedules || [];
+  state.scheduleRuns = data.runs || [];
+  renderSchedules();
+}
+
+async function dryRunSchedule() {
+  const schedule = scheduleFormBody();
+  await saveSchedule($("#scheduleForm"));
+  const result = await postJson(`/api/release-tasks/${encodeURIComponent(schedule.id)}/dry-run`, {});
+  $("#schedulePreview").textContent = JSON.stringify(result.plan || result, null, 2);
+  if (result?.plan?.tag_name) {
+    $("#scheduleTagPreview").textContent = result.plan.tag_name;
+  }
+  appendLog("自动任务试运行", result);
+}
+
+async function deleteSchedule(scheduleId) {
+  if (!confirm(`确认删除自动任务 ${scheduleId}？`)) return;
+  const result = await api(`/api/release-tasks/${encodeURIComponent(scheduleId)}`, { method: "DELETE" });
+  appendLog("删除自动任务", result);
+  state.schedules = result.tasks || result.schedules || [];
+  state.scheduleRuns = result.runs || [];
+  const currentId = $("#scheduleForm")?.elements.id?.value || "";
+  if (currentId === scheduleId) {
+    fillScheduleForm(state.schedules[0] || null);
+  }
+  renderSchedules();
+}
+
+async function runManualRelease(form) {
+  const body = formValues(form);
+  const result = await postJson("/api/release-runs/manual", body);
+  $("#schedulePreview").textContent = JSON.stringify(result.run || result, null, 2);
+  appendLog("手动完整发版构建", result);
+  await refreshSchedules();
+  if (result?.run?.tag_name) {
+    watchResidentPackage(result.run.tag_name);
+  }
+}
+
+async function rerunExistingTag(form) {
+  const body = formValues(form);
+  const result = await postJson("/api/release-runs/rerun-tag", body);
+  $("#schedulePreview").textContent = JSON.stringify(result.run || result, null, 2);
+  appendLog("重跑/刷新已有 Tag 构建", result);
+  await refreshSchedules();
+  if (result?.run?.tag_name) {
+    watchResidentPackage(result.run.tag_name);
+  }
+}
+
+async function continueReleaseRun(runId) {
+  const result = await postJson(`/api/release-runs/${encodeURIComponent(runId)}/continue`, {});
+  $("#schedulePreview").textContent = JSON.stringify(result.run || result, null, 2);
+  appendLog("继续发版任务", result);
+  await refreshSchedules();
+  if (result?.run?.tag_name) {
+    watchResidentPackage(result.run.tag_name);
+  }
+}
+
 function bindEvents() {
   $("#loginForm").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -684,7 +975,7 @@ function bindEvents() {
     await refreshAll().catch((error) => appendLog("切换仓库失败", error.message));
   });
 
-  $("#refreshBtn").addEventListener("click", () => refreshAll().catch((error) => appendLog("刷新失败", error.message)));
+  $("#refreshBtn").addEventListener("click", () => refreshWorkspace().catch((error) => appendLog("刷新失败", error.message)));
   $("#branchSearch").addEventListener("change", () => refreshAll().catch((error) => appendLog("搜索失败", error.message)));
   $("#branchTypeFilter").addEventListener("change", () => renderBranches());
   $("#clearLogBtn").addEventListener("click", () => {
@@ -731,6 +1022,40 @@ function bindEvents() {
     handleOperation("删除 simos Tag", "/api/tags/delete", event.currentTarget).catch((error) => appendLog("删除 simos Tag 失败", error.message));
   });
   $("#abortPendingVersionTagBtn").addEventListener("click", abortPendingVersionTag);
+  $("#scheduleForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    saveSchedule(event.currentTarget).catch((error) => appendLog("保存自动任务失败", error.message));
+  });
+  $("#scheduleForm")?.addEventListener("input", renderSchedulePreviewFromForm);
+  $("#scheduleForm")?.addEventListener("change", renderSchedulePreviewFromForm);
+  $("#newScheduleBtn")?.addEventListener("click", () => fillScheduleForm(null));
+  $("#scheduleDryRunBtn")?.addEventListener("click", () => dryRunSchedule().catch((error) => appendLog("自动任务试运行失败", error.message)));
+  $("#refreshSchedulesBtn")?.addEventListener("click", () => refreshSchedules().catch((error) => appendLog("刷新自动任务失败", error.message)));
+  $("#manualReleaseForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    runManualRelease(event.currentTarget).catch((error) => appendLog("手动完整发版失败", error.message));
+  });
+  $("#rerunTagForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    rerunExistingTag(event.currentTarget).catch((error) => appendLog("重跑已有 Tag 失败", error.message));
+  });
+  $("#scheduleListBody")?.addEventListener("click", (event) => {
+    const editId = event.target.dataset.editSchedule;
+    const deleteId = event.target.dataset.deleteSchedule;
+    if (editId) {
+      const schedule = state.schedules.find((item) => item.id === editId);
+      if (schedule) fillScheduleForm(schedule);
+    }
+    if (deleteId) {
+      deleteSchedule(deleteId).catch((error) => appendLog("删除自动任务失败", error.message));
+    }
+  });
+  $("#scheduleRunsBody")?.addEventListener("click", (event) => {
+    const runId = event.target.dataset.continueRun;
+    if (runId) {
+      continueReleaseRun(runId).catch((error) => appendLog("继续发版任务失败", error.message));
+    }
+  });
 
   $("#repositoryForm").addEventListener("submit", (event) => {
     event.preventDefault();
