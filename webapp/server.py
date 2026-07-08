@@ -433,7 +433,8 @@ class GitOpsApp:
             "version_prefix": version_prefix,
             "release_version": release_version,
             "tag_name": tag_name,
-            "message": "resident release build",
+            "message": release_tag_message("resident release build", cloud_category),
+            "cloud_category": cloud_category,
             "cloud_dir": f"/public/Versions/{cloud_date}_{release_version}/{cloud_category}",
             "planned_at": local_now.isoformat(),
             "repositories": [repo.public_dict(self.token_loaded(repo)) for repo in self.store.enabled()],
@@ -1621,6 +1622,12 @@ def resolve_version_prefix(ref: str, task: dict[str, Any] | None = None) -> str:
     if ref == "fix" or ref.startswith("bugfix/"):
         return "V"
     return "V"
+
+
+def release_tag_message(message: str, cloud_category: str) -> str:
+    base = str(message or "resident release build").strip() or "resident release build"
+    category = str(cloud_category or DEFAULT_SCHEDULE["cloud_category"]).strip("/")
+    return f"{base}\n\nSIMOS_CLOUD_CATEGORY={category}"
 
 
 def version_hint_from_ref(value: str) -> str:

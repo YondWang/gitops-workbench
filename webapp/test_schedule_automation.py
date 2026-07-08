@@ -155,7 +155,10 @@ class ScheduleAutomationTest(unittest.TestCase):
         self.assertEqual(result["plan"]["version_prefix"], "V")
         self.assertEqual(result["plan"]["ref"], "fix")
         self.assertEqual(result["plan"]["tag_name"], "fix_V3.1.25.020_202607031600")
+        self.assertEqual(result["plan"]["cloud_category"], "车机/CI自动构建")
+        self.assertNotIn("effective_cloud_category", result["plan"])
         self.assertEqual(result["plan"]["cloud_dir"], "/public/Versions/2026-07-03_V3.1.25.020/车机/CI自动构建")
+        self.assertIn("SIMOS_CLOUD_CATEGORY=车机/CI自动构建", result["plan"]["message"])
         self.assertTrue(result["plan"]["requires_weekly_version_confirmation"])
         self.assertFalse(any(call[0] == "create_tag" for call in self.client.calls))
 
@@ -209,6 +212,24 @@ class ScheduleAutomationTest(unittest.TestCase):
         deleted = self.app.delete_schedule("evening-simos-resident-release")
         self.assertTrue(deleted["ok"])
         self.assertEqual([item["id"] for item in self.app.schedules()["schedules"]], ["daily-simos-resident-release"])
+
+    def test_custom_cloud_category_is_written_to_tag_message(self) -> None:
+        self.app.save_schedule(
+            {
+                "id": "daily-simos-resident-release",
+                "daily_time": "16:00",
+                "default_ref": "fix",
+                "cloud_category": "车机/夜间构建",
+            }
+        )
+        self.client._tag_names.append("fix_V3.1.25.020_202607031600")
+        result = self.app.schedule_run_now("daily-simos-resident-release", now="2026-07-04T16:00:00+08:00")
+        continued = self.app.continue_release_run(result["run"]["id"])
+
+        self.assertEqual(continued["run"]["cloud_dir"], "/public/Versions/2026-07-04_V3.1.25.021/车机/夜间构建")
+        self.assertTrue(any(call[0] == "create_merge_request" for call in self.client.calls))
+        payload_message = continued["run"]["create_tag_payload"]["message"]
+        self.assertIn("SIMOS_CLOUD_CATEGORY=车机/夜间构建", payload_message)
 
     def test_deleting_last_schedule_leaves_empty_list(self) -> None:
         deleted = self.app.delete_schedule("daily-simos-resident-release")
