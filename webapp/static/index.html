@@ -310,8 +310,12 @@
                   </select>
                 </label>
                 <label>
-                  默认来源 ref
+                  主库来源 ref
                   <input name="default_ref" value="fix" required />
+                </label>
+                <label>
+                  子库来源 ref
+                  <input name="dependency_ref" placeholder="留空则同主库来源 ref" />
                 </label>
                 <label>
                   版本来源
@@ -377,8 +381,12 @@
               </div>
               <form id="manualReleaseForm" class="compact-form">
                 <label>
-                  来源 ref
+                  主库来源 ref
                   <input name="source_ref" value="fix" required />
+                </label>
+                <label>
+                  子库来源 ref
+                  <input name="dependency_ref" placeholder="留空则同主库来源 ref" />
                 </label>
                 <label>
                   版本来源

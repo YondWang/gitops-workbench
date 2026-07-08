@@ -110,6 +110,7 @@ DEFAULT_SCHEDULE: dict[str, Any] = {
     "daily_time": "16:00",
     "source_ref_strategy": "fixed_ref",
     "default_ref": "fix",
+    "dependency_ref": "",
     "version_source": "simos_version_info",
     "manual_version_number": "",
     "version_prefix_mode": "auto",
@@ -308,6 +309,7 @@ class GitOpsApp:
                 "enabled": False,
                 "name": str(payload.get("name") or "手动完整发版构建"),
                 "default_ref": str(payload.get("source_ref") or payload.get("default_ref") or "fix"),
+                "dependency_ref": str(payload.get("dependency_ref") or ""),
                 "source_ref_strategy": "fixed_ref",
                 "version_source": str(payload.get("version_source") or "simos_version_info"),
                 "manual_version_number": str(payload.get("manual_version_number") or payload.get("manual_version") or ""),
@@ -420,6 +422,7 @@ class GitOpsApp:
         tag_name = default_tag_name(ref, release_version, stamp)
         cloud_date = local_now.strftime("%Y-%m-%d")
         cloud_category = str(schedule.get("cloud_category") or DEFAULT_SCHEDULE["cloud_category"]).strip("/")
+        dependency_ref = self.resolve_dependency_ref(schedule, ref)
         plan = {
             "schedule_id": schedule["id"],
             "task_id": schedule["id"],
@@ -427,6 +430,7 @@ class GitOpsApp:
             "project": target.repo.project,
             "ref": ref,
             "source_ref": ref,
+            "dependency_ref": dependency_ref,
             "source_ref_slug": source_ref_slug,
             "version": release_version,
             "version_number": version_number,
@@ -461,6 +465,12 @@ class GitOpsApp:
             raise ValueError(f"自动任务来源 ref 不存在：{ref}")
         return ref
 
+    def resolve_dependency_ref(self, schedule: dict[str, Any], source_ref: str) -> str:
+        dependency_ref = str(schedule.get("dependency_ref") or "").strip()
+        if not dependency_ref:
+            return source_ref
+        return require_ref_name(dependency_ref, "子库来源 ref")
+
     def resolve_schedule_version(self, schedule: dict[str, Any], target: OperationTarget, ref: str) -> str:
         source = str(schedule.get("version_source") or "simos_version_info")
         if source == "manual":
@@ -488,6 +498,7 @@ class GitOpsApp:
         payload = {
             "scope": "all",
             "ref": plan["source_ref"],
+            "dependency_ref": plan.get("dependency_ref") or plan["source_ref"],
             "tag_name": plan["tag_name"],
             "message": plan["message"],
             "update_version": True,
@@ -540,6 +551,7 @@ class GitOpsApp:
             "execution_type": "full_release",
             "status": status,
             "source_ref": plan.get("source_ref") or plan.get("ref"),
+            "dependency_ref": plan.get("dependency_ref") or plan.get("source_ref") or plan.get("ref"),
             "source_ref_slug": plan.get("source_ref_slug", ""),
             "version_number": plan.get("version_number", ""),
             "version_prefix": plan.get("version_prefix", ""),
@@ -557,6 +569,7 @@ class GitOpsApp:
             "create_tag_payload": {
                 "scope": "all",
                 "ref": plan.get("source_ref") or plan.get("ref"),
+                "dependency_ref": plan.get("dependency_ref") or plan.get("source_ref") or plan.get("ref"),
                 "tag_name": plan.get("tag_name"),
                 "message": plan.get("message"),
                 "update_version": True,
@@ -777,6 +790,7 @@ class GitOpsApp:
         base_version = normalize_optional_version(str(payload.get("base_version", ""))) if update_version else ""
         base_version_is_final = truthy(payload.get("base_version_is_final", payload.get("version_number_is_final", False))) if update_version else False
         requested_version_prefix = normalize_version_prefix(str(payload.get("version_prefix") or resolve_version_prefix(ref))) if update_version else ""
+        dependency_ref = require_ref_name(str(payload.get("dependency_ref") or ref), "子库 Tag 来源")
         scope = str(payload.get("scope", "single")).strip() or "single"
         if update_version and scope != "all":
             raise ValueError("打 Tag 前更新版本号只能在全部启用仓库范围使用")
@@ -788,11 +802,12 @@ class GitOpsApp:
             branch_names = target.client.branch_names()
             tag_names = target.client.tag_names()
             refs = set(branch_names) | set(tag_names)
-            if ref not in refs:
-                raise ValueError(f"Tag 来源不存在：{ref}")
+            target_ref = ref if is_simos_repo(target.repo) else dependency_ref
+            if target_ref not in refs:
+                raise ValueError(f"Tag 来源不存在：{target_ref}")
             if tag_name in tag_names:
                 raise ValueError(f"Tag 已存在：{tag_name}")
-            context: dict[str, Any] = {"ref": ref, "tag_name": tag_name, "message": message, "update_version": update_version}
+            context: dict[str, Any] = {"ref": target_ref, "source_ref": ref, "dependency_ref": dependency_ref, "tag_name": tag_name, "message": message, "update_version": update_version}
             if update_version and is_simos_repo(target.repo):
                 if ref not in branch_names:
                     raise ValueError("更新版本号时 Tag 来源必须是分支")
@@ -1924,6 +1939,8 @@ def normalize_release_task(payload: dict[str, Any]) -> dict[str, Any]:
     task["source_ref_strategy"] = strategy
     task["ref_strategy"] = "latest_fix_rc" if strategy == "latest_fix_rc" else "editable"
     task["default_ref"] = str(task.get("default_ref") or "fix").strip()
+    dependency_ref = str(task.get("dependency_ref") or "").strip()
+    task["dependency_ref"] = require_ref_name(dependency_ref, "子库来源 ref") if dependency_ref else ""
     task["version_source"] = str(task.get("version_source") or "simos_version_info").strip()
     if task["version_source"] not in {"simos_version_info", "manual"}:
         raise ValueError("version_source 只能是 simos_version_info 或 manual")

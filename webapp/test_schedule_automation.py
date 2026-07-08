@@ -49,13 +49,16 @@ class FakeStore:
 
 
 class FakeClient:
-    def __init__(self) -> None:
+    def __init__(self, repo_id: str = "simos") -> None:
+        self.repo_id = repo_id
         self.calls: list[tuple[str, Any]] = []
-        self._branch_names = ["fix", "main"]
+        self._branch_names = ["fix", "fix_360", "main"] if repo_id == "simos" else ["fix", "main"]
         self._tag_names: list[str] = []
+        self._merge_requests: list[dict[str, Any]] = []
+        self.branch_commit = {"id": f"{repo_id}-new", "short_id": f"{repo_id}-new", "parent_ids": []}
 
     def project(self) -> dict[str, Any]:
-        return {"id": "simos"}
+        return {"id": self.repo_id}
 
     def branch_names(self) -> list[str]:
         self.calls.append(("branch_names",))
@@ -75,7 +78,7 @@ class FakeClient:
 
     def branch(self, name: str) -> dict[str, Any]:
         self.calls.append(("branch", name))
-        return {"name": name, "commit": {"id": "simos-new", "short_id": "simos-new", "parent_ids": []}}
+        return {"name": name, "commit": self.branch_commit}
 
     def create_branch(self, branch: str, ref: str) -> dict[str, Any]:
         self.calls.append(("create_branch", branch, ref))
@@ -87,15 +90,32 @@ class FakeClient:
 
     def merge_requests(self, source_branch: str, target_branch: str, state: str = "all") -> list[dict[str, Any]]:
         self.calls.append(("merge_requests", source_branch, target_branch, state))
-        return []
+        return [
+            item
+            for item in self._merge_requests
+            if item["source_branch"] == source_branch
+            and item["target_branch"] == target_branch
+            and (state == "all" or item.get("state") == state)
+        ]
 
     def opened_merge_requests(self, source_branch: str, target_branch: str) -> list[dict[str, Any]]:
         self.calls.append(("opened_merge_requests", source_branch, target_branch))
-        return []
+        return [
+            item
+            for item in self._merge_requests
+            if item["source_branch"] == source_branch
+            and item["target_branch"] == target_branch
+            and item.get("state") == "opened"
+        ]
 
     def create_merge_request(self, source_branch: str, target_branch: str, title: str) -> dict[str, Any]:
         self.calls.append(("create_merge_request", source_branch, target_branch, title))
-        return {"iid": 7, "source_branch": source_branch, "target_branch": target_branch, "title": title, "state": "opened"}
+        existing = self.opened_merge_requests(source_branch, target_branch)
+        if existing:
+            return existing[0]
+        item = {"iid": 7, "source_branch": source_branch, "target_branch": target_branch, "title": title, "state": "opened"}
+        self._merge_requests.append(item)
+        return item
 
     def create_tag(self, tag_name: str, ref: str, message: str = "") -> dict[str, Any]:
         self.calls.append(("create_tag", tag_name, ref, message))
@@ -230,6 +250,43 @@ class ScheduleAutomationTest(unittest.TestCase):
         self.assertTrue(any(call[0] == "create_merge_request" for call in self.client.calls))
         payload_message = continued["run"]["create_tag_payload"]["message"]
         self.assertIn("SIMOS_CLOUD_CATEGORY=车机/夜间构建", payload_message)
+
+
+    def test_dependency_ref_tags_non_simos_repositories_from_fix(self) -> None:
+        business_repo = RepositoryConfig(
+            id="business",
+            name="business",
+            base_url="https://gitlab.example",
+            project="OS/business",
+            token_env="BUSINESS_TOKEN",
+        )
+        simos_client = FakeClient("simos")
+        business_client = FakeClient("business")
+        self.app.store = FakeStore([self.repo, business_repo])  # type: ignore[assignment]
+        self.app.client_for = lambda repo: simos_client if repo.id == "simos" else business_client  # type: ignore[method-assign]
+
+        self.app.save_schedule(
+            {
+                "id": "daily-simos-resident-release",
+                "daily_time": "16:00",
+                "default_ref": "fix_360",
+                "dependency_ref": "fix",
+                "cloud_category": "车机/CI自动构建/360",
+            }
+        )
+        simos_client._tag_names.append("fix_360_V3.1.25.020_202607031600")
+        result = self.app.schedule_run_now("daily-simos-resident-release", now="2026-07-04T16:00:00+08:00")
+        continued = self.app.continue_release_run(result["run"]["id"])
+        self.assertEqual(continued["run"]["status"], "waiting_version_mr")
+        simos_client._merge_requests[0]["state"] = "merged"
+        simos_client.branch_commit = {"id": "version-commit", "short_id": "version", "parent_ids": ["simos-new"]}
+        tagged = self.app.continue_release_run(result["run"]["id"])
+
+        self.assertEqual(tagged["run"]["status"], "building")
+        tag_name = "fix_360_V3.1.25.021_202607041600"
+        message = tagged["run"]["create_tag_payload"]["message"]
+        self.assertIn(("create_tag", tag_name, "version-commit", message), simos_client.calls)
+        self.assertIn(("create_tag", tag_name, "fix", message), business_client.calls)
 
     def test_deleting_last_schedule_leaves_empty_list(self) -> None:
         deleted = self.app.delete_schedule("daily-simos-resident-release")

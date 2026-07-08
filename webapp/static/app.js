@@ -384,6 +384,7 @@ function fillScheduleForm(schedule = null) {
     daily_time: "16:00",
     source_ref_strategy: "fixed_ref",
     default_ref: "fix",
+    dependency_ref: "",
     version_source: "simos_version_info",
     manual_version_number: "",
     version_prefix_mode: "auto",
@@ -453,7 +454,8 @@ function renderSchedulePreviewFromForm() {
   const ref = body.default_ref || "fix";
   const prefix = previewVersionPrefix(ref, body.version_prefix_mode, body.manual_version_prefix);
   const versionNumber = body.manual_version_number || "版本号";
-  preview.textContent = `${sourceRefSlug(ref)}_${prefix}${versionNumber}_${new Date().toISOString().slice(0, 16).replace(/[-T:]/g, "").slice(0, 12)}`;
+  const dependency = body.dependency_ref || ref;
+  preview.textContent = `${sourceRefSlug(ref)}_${prefix}${versionNumber}_${new Date().toISOString().slice(0, 16).replace(/[-T:]/g, "").slice(0, 12)} · 子库:${dependency}`;
 }
 
 function renderBranches() {
