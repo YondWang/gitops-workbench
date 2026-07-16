@@ -435,7 +435,10 @@
               </form>
               <div class="panel-title">
                 <h2>最近运行</h2>
-                <button id="refreshSchedulesBtn" type="button">刷新</button>
+                <div class="title-actions">
+                  <button id="refreshSchedulesBtn" type="button">刷新</button>
+                  <button id="clearScheduleRunsBtn" class="danger small" type="button">清空全部</button>
+                </div>
               </div>
               <div class="table-wrap">
                 <table>
@@ -445,6 +448,7 @@
                       <th>Tag</th>
                       <th>来源</th>
                       <th>云盘目录</th>
+                      <th>操作</th>
                     </tr>
                   </thead>
                   <tbody id="scheduleRunsBody"></tbody>

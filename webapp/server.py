@@ -301,6 +301,22 @@ class GitOpsApp:
         save_release_runs(runs)
         return {"ok": True, "deleted": task_id, "tasks": load_release_tasks(), "runs": load_release_runs()}
 
+    def delete_release_run(self, run_id: str) -> dict[str, Any]:
+        run_id = str(run_id or "").strip()
+        if not run_id:
+            raise ValueError("发版运行 ID 不能为空")
+        runs = load_release_runs()
+        next_runs = [item for item in runs if item.get("id") != run_id]
+        if len(next_runs) == len(runs):
+            raise ValueError(f"发版运行不存在：{run_id}")
+        save_release_runs(next_runs)
+        return {"ok": True, "deleted": run_id, "runs": load_release_runs()}
+
+    def clear_release_runs(self) -> dict[str, Any]:
+        deleted_count = len(load_release_runs())
+        save_release_runs([])
+        return {"ok": True, "deleted_count": deleted_count, "runs": []}
+
     def schedule_runs(self, schedule_id: str) -> dict[str, Any]:
         schedule_id = require_schedule_id(schedule_id)
         runs = [item for item in load_release_runs() if item.get("task_id") == schedule_id or item.get("schedule_id") == schedule_id]
@@ -2437,6 +2453,13 @@ def make_handler(app: GitOpsApp):
 
         def do_DELETE(self) -> None:
             path = urlparse(self.path).path
+            if path == "/api/release-runs":
+                self.handle_api("admin", app.clear_release_runs)
+                return
+            release_run_id = match_release_run_path(path)
+            if release_run_id:
+                self.handle_api("admin", lambda run_id=release_run_id: app.delete_release_run(run_id))
+                return
             schedule_route = match_schedule_path(path)
             if schedule_route and not schedule_route[1]:
                 schedule_id = schedule_route[0]

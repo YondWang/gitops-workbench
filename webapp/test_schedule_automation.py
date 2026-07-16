@@ -247,6 +247,39 @@ class ScheduleAutomationTest(unittest.TestCase):
         self.assertTrue(deleted["ok"])
         self.assertEqual([item["id"] for item in self.app.schedules()["schedules"]], ["daily-simos-resident-release"])
 
+    def test_delete_release_run_removes_only_the_requested_record(self) -> None:
+        server.save_release_runs(
+            [
+                {"id": "run-keep", "tag_name": "keep"},
+                {"id": "run-delete", "tag_name": "delete"},
+            ]
+        )
+
+        result = self.app.delete_release_run("run-delete")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["deleted"], "run-delete")
+        self.assertEqual([item["id"] for item in result["runs"]], ["run-keep"])
+        self.assertEqual([item["id"] for item in server.load_release_runs()], ["run-keep"])
+
+    def test_delete_release_run_rejects_an_unknown_record(self) -> None:
+        server.save_release_runs([{"id": "run-keep"}])
+
+        with self.assertRaisesRegex(ValueError, "发版运行不存在：run-missing"):
+            self.app.delete_release_run("run-missing")
+
+        self.assertEqual([item["id"] for item in server.load_release_runs()], ["run-keep"])
+
+    def test_clear_release_runs_persists_an_empty_history(self) -> None:
+        server.save_release_runs([{"id": "run-one"}, {"id": "run-two"}])
+
+        result = self.app.clear_release_runs()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["deleted_count"], 2)
+        self.assertEqual(result["runs"], [])
+        self.assertEqual(server.load_release_runs(), [])
+
     def test_custom_cloud_category_is_written_to_tag_message(self) -> None:
         self.app.save_schedule(
             {
