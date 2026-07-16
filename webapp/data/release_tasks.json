@@ -1,0 +1,36 @@
+{
+  "tasks": [
+    {
+      "id": "daily-simos-resident-release",
+      "enabled": true,
+      "name": "SimOS 每日 resident 自动构建",
+      "timezone": "Asia/Shanghai",
+      "cron": "0 16 * * *",
+      "daily_time": "16:00",
+      "source_ref_strategy": "fixed_ref",
+      "default_ref": "fix",
+      "config_ref": "",
+      "config_matrix_enabled": true,
+      "config_matrix": [
+        {
+          "config_ref": "SIMBOT_R6_A",
+          "label": "360",
+          "enabled": true
+        },
+        {
+          "config_ref": "SIMBOT_R6_B",
+          "label": "360s",
+          "enabled": true
+        }
+      ],
+      "version_source": "simos_version_info",
+      "manual_version_number": "",
+      "version_prefix_mode": "auto",
+      "manual_version_prefix": "V",
+      "cloud_category": "车机/CI自动构建",
+      "execution_type": "full_release",
+      "ref_strategy": "editable",
+      "manual_version": ""
+    }
+  ]
+}

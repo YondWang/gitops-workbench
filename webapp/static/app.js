@@ -359,10 +359,11 @@ function renderScheduleRuns() {
               <code>${escapeHtml(run.cloud_dir || run.error || "-")}</code>
               ${run.status === "waiting_version_mr" ? `<div><button class="secondary small" type="button" data-continue-run="${escapeHtml(run.id)}">继续</button></div>` : ""}
             </td>
+            <td><button class="danger small" type="button" data-delete-run="${escapeHtml(run.id)}">删除</button></td>
           </tr>
         `,
       )
-      .join("") || `<tr><td colspan="4">暂无运行记录</td></tr>`;
+      .join("") || `<tr><td colspan="5">暂无运行记录</td></tr>`;
   const newest = state.scheduleRuns.find((run) => run.tag_name);
   if (newest?.tag_name && (!state.residentPackage || state.residentPackage.tag !== newest.tag_name)) {
     state.residentPackage = {
@@ -1011,6 +1012,22 @@ async function continueReleaseRun(runId) {
   }
 }
 
+async function deleteReleaseRun(runId) {
+  if (!confirm(`确认删除发版运行记录 ${runId}？此操作不会删除 Tag、流水线或构建产物。`)) return;
+  const result = await api(`/api/release-runs/${encodeURIComponent(runId)}`, { method: "DELETE" });
+  state.scheduleRuns = result.runs || [];
+  appendLog("删除发版运行记录", result);
+  renderSchedules();
+}
+
+async function clearReleaseRuns() {
+  if (!confirm("确认清空全部发版运行记录？此操作不会删除 Tag、流水线或构建产物。")) return;
+  const result = await api("/api/release-runs", { method: "DELETE" });
+  state.scheduleRuns = result.runs || [];
+  appendLog("清空发版运行记录", result);
+  renderSchedules();
+}
+
 function bindEvents() {
   $("#loginForm").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -1092,6 +1109,7 @@ function bindEvents() {
   $("#newScheduleBtn")?.addEventListener("click", () => fillScheduleForm(null));
   $("#scheduleDryRunBtn")?.addEventListener("click", () => dryRunSchedule().catch((error) => appendLog("自动任务试运行失败", error.message)));
   $("#refreshSchedulesBtn")?.addEventListener("click", () => refreshSchedules().catch((error) => appendLog("刷新自动任务失败", error.message)));
+  $("#clearScheduleRunsBtn")?.addEventListener("click", () => clearReleaseRuns().catch((error) => appendLog("清空发版运行记录失败", error.message)));
   $("#manualReleaseForm")?.addEventListener("submit", (event) => {
     event.preventDefault();
     runManualRelease(event.currentTarget).catch((error) => appendLog("手动完整发版失败", error.message));
@@ -1112,9 +1130,13 @@ function bindEvents() {
     }
   });
   $("#scheduleRunsBody")?.addEventListener("click", (event) => {
-    const runId = event.target.dataset.continueRun;
-    if (runId) {
-      continueReleaseRun(runId).catch((error) => appendLog("继续发版任务失败", error.message));
+    const continueRunId = event.target.dataset.continueRun;
+    const deleteRunId = event.target.dataset.deleteRun;
+    if (continueRunId) {
+      continueReleaseRun(continueRunId).catch((error) => appendLog("继续发版任务失败", error.message));
+    }
+    if (deleteRunId) {
+      deleteReleaseRun(deleteRunId).catch((error) => appendLog("删除发版运行记录失败", error.message));
     }
   });
 
