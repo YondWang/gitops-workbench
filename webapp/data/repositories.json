@@ -29,6 +29,16 @@
       "default_ref": "main",
       "token_env": "GITLAB_TOKEN",
       "ssl_verify": true
+    },
+    {
+      "id": "config",
+      "name": "config",
+      "base_url": "https://www.chancee-shanghai.cn:9900",
+      "project": "OS/config",
+      "enabled": false,
+      "default_ref": "main",
+      "token_env": "GITLAB_TOKEN",
+      "ssl_verify": true
     }
   ]
 }

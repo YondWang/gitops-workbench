@@ -310,13 +310,14 @@
                   </select>
                 </label>
                 <label>
-                  主库来源 ref
+                  代码来源 ref
                   <input name="default_ref" value="fix" required />
                 </label>
-                <label>
-                  子库来源 ref
-                  <input name="dependency_ref" placeholder="留空则同主库来源 ref" />
-                </label>
+                <fieldset class="inline-options" data-config-matrix>
+                  <legend>构建配置</legend>
+                  <label><input type="checkbox" name="config_matrix" value="SIMBOT_R6_A:360" checked /> SIMBOT_R6_A / 360</label>
+                  <label><input type="checkbox" name="config_matrix" value="SIMBOT_R6_B:360s" checked /> SIMBOT_R6_B / 360s</label>
+                </fieldset>
                 <label>
                   版本来源
                   <select name="version_source">
@@ -381,13 +382,14 @@
               </div>
               <form id="manualReleaseForm" class="compact-form">
                 <label>
-                  主库来源 ref
+                  代码来源 ref
                   <input name="source_ref" value="fix" required />
                 </label>
-                <label>
-                  子库来源 ref
-                  <input name="dependency_ref" placeholder="留空则同主库来源 ref" />
-                </label>
+                <fieldset class="inline-options" data-config-matrix>
+                  <legend>构建配置</legend>
+                  <label><input type="checkbox" name="config_matrix" value="SIMBOT_R6_A:360" checked /> SIMBOT_R6_A / 360</label>
+                  <label><input type="checkbox" name="config_matrix" value="SIMBOT_R6_B:360s" checked /> SIMBOT_R6_B / 360s</label>
+                </fieldset>
                 <label>
                   版本来源
                   <select name="version_source">

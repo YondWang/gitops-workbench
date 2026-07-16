@@ -59,6 +59,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "default_ref": "main",
             "token_env": "GITLAB_TOKEN",
             "ssl_verify": True,
+        },
+        {
+            "id": "config",
+            "name": "config",
+            "base_url": "https://www.chancee-shanghai.cn:9900",
+            "project": "OS/config",
+            "enabled": False,
+            "default_ref": "main",
+            "token_env": "GITLAB_TOKEN",
+            "ssl_verify": True,
         }
     ],
     "server": {
@@ -110,7 +120,12 @@ DEFAULT_SCHEDULE: dict[str, Any] = {
     "daily_time": "16:00",
     "source_ref_strategy": "fixed_ref",
     "default_ref": "fix",
-    "dependency_ref": "",
+    "config_ref": "",
+    "config_matrix_enabled": True,
+    "config_matrix": [
+        {"config_ref": "SIMBOT_R6_A", "label": "360", "enabled": True},
+        {"config_ref": "SIMBOT_R6_B", "label": "360s", "enabled": True},
+    ],
     "version_source": "simos_version_info",
     "manual_version_number": "",
     "version_prefix_mode": "auto",
@@ -309,7 +324,9 @@ class GitOpsApp:
                 "enabled": False,
                 "name": str(payload.get("name") or "手动完整发版构建"),
                 "default_ref": str(payload.get("source_ref") or payload.get("default_ref") or "fix"),
-                "dependency_ref": str(payload.get("dependency_ref") or ""),
+                "config_ref": str(payload.get("config_ref") or ""),
+                "config_matrix_enabled": payload.get("config_matrix_enabled", DEFAULT_SCHEDULE["config_matrix_enabled"]),
+                "config_matrix": payload.get("config_matrix", DEFAULT_SCHEDULE["config_matrix"]),
                 "source_ref_strategy": "fixed_ref",
                 "version_source": str(payload.get("version_source") or "simos_version_info"),
                 "manual_version_number": str(payload.get("manual_version_number") or payload.get("manual_version") or ""),
@@ -414,15 +431,24 @@ class GitOpsApp:
         ref = self.resolve_schedule_ref(schedule, target)
         version_prefix = resolve_version_prefix(ref, schedule)
         version_number = self.resolve_release_version_number(schedule, ref, version_prefix)
-        weekly_version = resolve_weekly_version_policy(target.client.tag_names(), version_number, local_now)
-        version_number = weekly_version["version_number"]
+        if str(schedule.get("version_source") or "simos_version_info") == "manual":
+            weekly_version = {
+                "version_number": version_number,
+                "requires_confirmation": False,
+                "reason": "manual_version",
+                "week": week_key(local_now),
+            }
+        else:
+            weekly_version = resolve_weekly_version_policy(target.client.tag_names(), version_number, local_now)
+            version_number = weekly_version["version_number"]
         release_version = apply_version_prefix(version_number, version_prefix)
         stamp = local_now.strftime("%Y%m%d%H%M")
         source_ref_slug = tag_source_name(ref)
         tag_name = default_tag_name(ref, release_version, stamp)
         cloud_date = local_now.strftime("%Y-%m-%d")
         cloud_category = str(schedule.get("cloud_category") or DEFAULT_SCHEDULE["cloud_category"]).strip("/")
-        dependency_ref = self.resolve_dependency_ref(schedule, ref)
+        config_matrix = resolve_config_matrix(schedule)
+        config_ref = config_matrix[0]["config_ref"] if config_matrix else self.resolve_config_ref(schedule)
         plan = {
             "schedule_id": schedule["id"],
             "task_id": schedule["id"],
@@ -430,18 +456,23 @@ class GitOpsApp:
             "project": target.repo.project,
             "ref": ref,
             "source_ref": ref,
-            "dependency_ref": dependency_ref,
+            "config_ref": config_ref,
             "source_ref_slug": source_ref_slug,
             "version": release_version,
             "version_number": version_number,
             "version_prefix": version_prefix,
             "release_version": release_version,
             "tag_name": tag_name,
-            "message": release_tag_message("resident release build", cloud_category),
+            "message": release_tag_message("resident release build", cloud_category, config_matrix, config_ref),
             "cloud_category": cloud_category,
+            "config_ref": config_ref,
+            "config_matrix_enabled": bool(schedule.get("config_matrix_enabled", True)),
+            "config_matrix": config_matrix,
+            "config_refs": [item["config_ref"] for item in config_matrix],
+            "config_matrix_value": config_matrix_value(config_matrix),
             "cloud_dir": f"/public/Versions/{cloud_date}_{release_version}/{cloud_category}",
             "planned_at": local_now.isoformat(),
-            "repositories": [repo.public_dict(self.token_loaded(repo)) for repo in self.store.enabled()],
+            "repositories": [repo.public_dict(self.token_loaded(repo)) for repo in self.release_repositories()],
             "weekly_version": weekly_version,
         }
         if weekly_version.get("requires_confirmation"):
@@ -465,11 +496,10 @@ class GitOpsApp:
             raise ValueError(f"自动任务来源 ref 不存在：{ref}")
         return ref
 
-    def resolve_dependency_ref(self, schedule: dict[str, Any], source_ref: str) -> str:
-        dependency_ref = str(schedule.get("dependency_ref") or "").strip()
-        if not dependency_ref:
-            return source_ref
-        return require_ref_name(dependency_ref, "子库来源 ref")
+    @staticmethod
+    def resolve_config_ref(schedule: dict[str, Any]) -> str:
+        config_ref = str(schedule.get("config_ref") or "").strip()
+        return require_ref_name(config_ref, "config 分支") if config_ref else ""
 
     def resolve_schedule_version(self, schedule: dict[str, Any], target: OperationTarget, ref: str) -> str:
         source = str(schedule.get("version_source") or "simos_version_info")
@@ -498,7 +528,6 @@ class GitOpsApp:
         payload = {
             "scope": "all",
             "ref": plan["source_ref"],
-            "dependency_ref": plan.get("dependency_ref") or plan["source_ref"],
             "tag_name": plan["tag_name"],
             "message": plan["message"],
             "update_version": True,
@@ -506,6 +535,18 @@ class GitOpsApp:
             "base_version_is_final": True,
             "version_prefix": plan["version_prefix"],
         }
+        if bool(plan.get("config_matrix_enabled", True)) and not plan.get("config_matrix"):
+            result = {
+                "ok": False,
+                "operation": "create_tag",
+                "phase": "precheck",
+                "message": "缺少 config 构建配置，请至少选择一个 OS/config 分支",
+                "tag_name": plan.get("tag_name", ""),
+                "results": [],
+            }
+            run = self.release_run_from_result(task, plan, result, trigger)
+            append_release_run(run)
+            return run
         if plan.get("requires_weekly_version_confirmation") and not plan.get("weekly_version_confirmed"):
             result = {
                 "ok": False,
@@ -551,7 +592,9 @@ class GitOpsApp:
             "execution_type": "full_release",
             "status": status,
             "source_ref": plan.get("source_ref") or plan.get("ref"),
-            "dependency_ref": plan.get("dependency_ref") or plan.get("source_ref") or plan.get("ref"),
+            "config_ref": plan.get("config_ref", ""),
+            "config_matrix": plan.get("config_matrix", []),
+            "config_matrix_value": plan.get("config_matrix_value", ""),
             "source_ref_slug": plan.get("source_ref_slug", ""),
             "version_number": plan.get("version_number", ""),
             "version_prefix": plan.get("version_prefix", ""),
@@ -569,7 +612,6 @@ class GitOpsApp:
             "create_tag_payload": {
                 "scope": "all",
                 "ref": plan.get("source_ref") or plan.get("ref"),
-                "dependency_ref": plan.get("dependency_ref") or plan.get("source_ref") or plan.get("ref"),
                 "tag_name": plan.get("tag_name"),
                 "message": plan.get("message"),
                 "update_version": True,
@@ -790,7 +832,6 @@ class GitOpsApp:
         base_version = normalize_optional_version(str(payload.get("base_version", ""))) if update_version else ""
         base_version_is_final = truthy(payload.get("base_version_is_final", payload.get("version_number_is_final", False))) if update_version else False
         requested_version_prefix = normalize_version_prefix(str(payload.get("version_prefix") or resolve_version_prefix(ref))) if update_version else ""
-        dependency_ref = require_ref_name(str(payload.get("dependency_ref") or ref), "子库 Tag 来源")
         scope = str(payload.get("scope", "single")).strip() or "single"
         if update_version and scope != "all":
             raise ValueError("打 Tag 前更新版本号只能在全部启用仓库范围使用")
@@ -802,12 +843,13 @@ class GitOpsApp:
             branch_names = target.client.branch_names()
             tag_names = target.client.tag_names()
             refs = set(branch_names) | set(tag_names)
-            target_ref = ref if is_simos_repo(target.repo) else dependency_ref
+            target_ref = ref
+            context: dict[str, Any] = {"source_ref": ref, "tag_name": tag_name, "message": message, "update_version": update_version}
             if target_ref not in refs:
                 raise ValueError(f"Tag 来源不存在：{target_ref}")
             if tag_name in tag_names:
                 raise ValueError(f"Tag 已存在：{tag_name}")
-            context: dict[str, Any] = {"ref": target_ref, "source_ref": ref, "dependency_ref": dependency_ref, "tag_name": tag_name, "message": message, "update_version": update_version}
+            context["ref"] = target_ref
             if update_version and is_simos_repo(target.repo):
                 if ref not in branch_names:
                     raise ValueError("更新版本号时 Tag 来源必须是分支")
@@ -1021,7 +1063,7 @@ class GitOpsApp:
         tag_name = version_plan["tag_name"]
         component_refs = {
             component: {
-                "ref": tag_name,
+                "ref": self.version_file_component_ref(target, contexts[target.repo.id], tag_name),
                 "commit_id": self.context_commit_id(target, contexts[target.repo.id]),
             }
             for target in targets
@@ -1070,10 +1112,32 @@ class GitOpsApp:
             summary["base_version"] = package_version
         return {**version_plan, "changed": True, "actions": actions, "summary": summary, "component_refs": component_refs}
 
+    def latest_tag_for_source_ref(self, target: OperationTarget, source_ref: str) -> dict[str, Any]:
+        source_slug = tag_source_name(source_ref)
+        pattern = re.compile(rf"^{re.escape(source_slug)}_[VvFfTt]?\d+(?:\.\d+)+_\d{{12}}$")
+        tag_reader = getattr(target.client, "tags", None)
+        if callable(tag_reader):
+            candidates = [item for item in tag_reader(f"{source_slug}_") if pattern.fullmatch(str(item.get("name") or ""))]
+        else:
+            candidates = [
+                {"name": name}
+                for name in target.client.tag_names()
+                if pattern.fullmatch(str(name))
+            ]
+        if not candidates:
+            raise ValueError(f"{target.repo.id} 没有找到来源 {source_ref} 对应的发版 Tag")
+        return sorted(candidates, key=lambda item: latest_release_tag_key(str(item.get("name") or "")))[-1]
+
+    @staticmethod
+    def version_file_component_ref(target: OperationTarget, context: dict[str, Any], tag_name: str) -> str:
+        return tag_name
+
     @staticmethod
     def context_commit_id(target: OperationTarget, context: dict[str, Any]) -> str:
         if "_version_plan" in context:
             return str(context["_version_plan"]["summary"]["source_commit"])
+        if context.get("ref_commit_id"):
+            return str(context["ref_commit_id"])
         branch = target.client.branch(context["ref"])
         commit = branch.get("commit") or {}
         commit_id = str(commit.get("id") or commit.get("short_id") or "")
@@ -1160,7 +1224,7 @@ class GitOpsApp:
                 path.write_text(action["content"], encoding="utf-8")
             for component, path in submodule_update_paths(component_refs).items():
                 commit_id = component_refs[component]["commit_id"]
-                self.run_git(["update-index", "--cacheinfo", "160000", commit_id, path], cwd=str(repo_dir), env=git_env)
+                self.run_git(["update-index", "--add", "--cacheinfo", "160000", commit_id, path], cwd=str(repo_dir), env=git_env)
             self.run_git(["config", "user.name", "GitOps Workbench"], cwd=str(repo_dir), env=git_env)
             self.run_git(["config", "user.email", "gitops-workbench@local"], cwd=str(repo_dir), env=git_env)
             self.run_git(["add", VERSION_INFO_PATH, SOFTWARE_YAML_PATH], cwd=str(repo_dir), env=git_env)
@@ -1396,10 +1460,13 @@ class GitOpsApp:
                 results.append({"repository": target.repo.public_dict(self.token_loaded(target.repo)), "ok": False, "error": str(exc)})
         return {"ok": overall_ok, "operation": operation, "phase": "execute", "precheck": precheck_results, "results": results}
 
+    def release_repositories(self) -> list[RepositoryConfig]:
+        return [repo for repo in self.store.enabled() if not is_config_repo(repo)]
+
     def targets(self, payload: dict[str, Any]) -> list[OperationTarget]:
         scope = str(payload.get("scope", "single")).strip() or "single"
         if scope == "all":
-            repos = self.store.enabled()
+            repos = self.release_repositories()
             if not repos:
                 raise ValueError("没有启用的仓库")
             return [self.target(repo.id) for repo in repos]
@@ -1639,10 +1706,33 @@ def resolve_version_prefix(ref: str, task: dict[str, Any] | None = None) -> str:
     return "V"
 
 
-def release_tag_message(message: str, cloud_category: str) -> str:
+def config_matrix_value(config_matrix: list[dict[str, Any]]) -> str:
+    return ",".join(f"{item['config_ref']}:{item['label']}" for item in config_matrix)
+
+
+def config_refs_value(config_matrix: list[dict[str, Any]]) -> str:
+    return ",".join(item["config_ref"] for item in config_matrix)
+
+
+def release_tag_message(
+    message: str,
+    cloud_category: str,
+    config_matrix: list[dict[str, Any]] | None = None,
+    config_ref: str = "",
+) -> str:
     base = str(message or "resident release build").strip() or "resident release build"
     category = str(cloud_category or DEFAULT_SCHEDULE["cloud_category"]).strip("/")
-    return f"{base}\n\nSIMOS_CLOUD_CATEGORY={category}"
+    lines = [base, "", f"SIMOS_CLOUD_CATEGORY={category}"]
+    matrix = config_matrix or []
+    if matrix:
+        lines.append(f"SIMOS_CONFIG_MATRIX={config_matrix_value(matrix)}")
+        lines.append(f"SIMOS_CONFIG_REFS={config_refs_value(matrix)}")
+        lines.append(f"SIMOS_CONFIG_REF={matrix[0]['config_ref']}")
+    else:
+        config_value = str(config_ref or "").strip()
+        if config_value:
+            lines.append(f"SIMOS_CONFIG_REF={config_value}")
+    return "\n".join(lines)
 
 
 def version_hint_from_ref(value: str) -> str:
@@ -1741,6 +1831,11 @@ def version_component(repo: RepositoryConfig) -> str:
 
 def is_simos_repo(repo: RepositoryConfig) -> bool:
     return version_component(repo) == "simos"
+
+
+def is_config_repo(repo: RepositoryConfig) -> bool:
+    project = repo.project.strip("/").lower()
+    return repo.id == "config" or project == "os/config"
 
 
 def clean_component(value: str) -> str:
@@ -1921,6 +2016,49 @@ def normalize_schedule(payload: dict[str, Any]) -> dict[str, Any]:
     return normalize_release_task(payload)
 
 
+def default_config_matrix() -> list[dict[str, Any]]:
+    return [dict(item) for item in DEFAULT_SCHEDULE["config_matrix"]]
+
+
+def normalize_config_matrix_items(items: Any) -> list[dict[str, Any]]:
+    if not isinstance(items, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in items:
+        if isinstance(item, str):
+            config_ref = item.strip()
+            label = "360" if config_ref == "SIMBOT_R6_A" else "360s" if config_ref == "SIMBOT_R6_B" else config_ref
+            enabled = True
+        elif isinstance(item, dict):
+            config_ref = str(item.get("config_ref") or item.get("ref") or item.get("id") or "").strip()
+            label = str(item.get("label") or item.get("target") or "").strip()
+            enabled = truthy(item.get("enabled", True))
+        else:
+            continue
+        if not config_ref:
+            continue
+        config_ref = require_ref_name(config_ref, "config 分支")
+        label = label or ("360" if config_ref == "SIMBOT_R6_A" else "360s" if config_ref == "SIMBOT_R6_B" else config_ref)
+        if not re.match(r"^[A-Za-z0-9._-]+$", label):
+            raise ValueError("config label 只能包含字母、数字、点、下划线和横线")
+        normalized.append({"config_ref": config_ref, "label": label, "enabled": enabled})
+    return normalized
+
+
+def resolve_config_matrix(task: dict[str, Any]) -> list[dict[str, str]]:
+    if not truthy(task.get("config_matrix_enabled", True)):
+        config_ref = str(task.get("config_ref") or "").strip()
+        return [{"config_ref": require_ref_name(config_ref, "config 分支"), "label": config_ref}] if config_ref else []
+    matrix = normalize_config_matrix_items(task.get("config_matrix"))
+    if not matrix:
+        legacy_ref = str(task.get("config_ref") or "").strip()
+        if legacy_ref:
+            matrix = normalize_config_matrix_items([legacy_ref])
+        else:
+            matrix = normalize_config_matrix_items(default_config_matrix())
+    return [{"config_ref": item["config_ref"], "label": item["label"]} for item in matrix if item.get("enabled", True)]
+
+
 def normalize_release_task(payload: dict[str, Any]) -> dict[str, Any]:
     task = {**DEFAULT_SCHEDULE, **payload}
     task["id"] = require_schedule_id(str(task.get("id") or DEFAULT_SCHEDULE["id"]))
@@ -1939,8 +2077,14 @@ def normalize_release_task(payload: dict[str, Any]) -> dict[str, Any]:
     task["source_ref_strategy"] = strategy
     task["ref_strategy"] = "latest_fix_rc" if strategy == "latest_fix_rc" else "editable"
     task["default_ref"] = str(task.get("default_ref") or "fix").strip()
-    dependency_ref = str(task.get("dependency_ref") or "").strip()
-    task["dependency_ref"] = require_ref_name(dependency_ref, "子库来源 ref") if dependency_ref else ""
+    config_ref = str(task.get("config_ref") or "").strip()
+    task["config_ref"] = require_ref_name(config_ref, "config 分支") if config_ref else ""
+    task["config_matrix_enabled"] = truthy(task.get("config_matrix_enabled", True))
+    if "config_matrix" not in payload and config_ref:
+        task["config_matrix"] = normalize_config_matrix_items([config_ref])
+    else:
+        task["config_matrix"] = normalize_config_matrix_items(task.get("config_matrix")) or default_config_matrix()
+    task.pop("dependency_ref", None)
     task["version_source"] = str(task.get("version_source") or "simos_version_info").strip()
     if task["version_source"] not in {"simos_version_info", "manual"}:
         raise ValueError("version_source 只能是 simos_version_info 或 manual")
@@ -2086,6 +2230,12 @@ def schedule_already_ran(schedule_id: str, due_key: str) -> bool:
 def render_schedule_tag_name(template: str, version: str, stamp: str) -> str:
     value = template.replace("{version}", version).replace("{yyyyMMddHHmm}", stamp)
     return require_ref_name(value, "自动任务 Tag 名称")
+
+
+def latest_release_tag_key(value: str) -> tuple[str, tuple[Any, ...]]:
+    match = re.search(r"_(\d{12})$", value)
+    stamp = match.group(1) if match else ""
+    return stamp, natural_ref_key(value)
 
 
 def natural_ref_key(value: str) -> tuple[Any, ...]:

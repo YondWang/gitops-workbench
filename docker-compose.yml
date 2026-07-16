@@ -13,8 +13,8 @@ services:
     environment:
       GITOPS_HOST: 0.0.0.0
       GITOPS_PORT: 9910
-      GITOPS_TLS_CERT: ${GITOPS_TLS_CERT:-/etc/gitlab/ssl/www.chancee-shanghai.cn-crt.pem}
-      GITOPS_TLS_KEY: ${GITOPS_TLS_KEY:-/etc/gitlab/ssl/www.chancee-shanghai.cn-key.pem}
+      GITOPS_TLS_CERT: ${GITOPS_TLS_CERT:-/etc/gitlab/ssl/chancee-shanghai.cn-crt.pem}
+      GITOPS_TLS_KEY: ${GITOPS_TLS_KEY:-/etc/gitlab/ssl/chancee-shanghai.cn-key.pem}
       SIMOS_CI_ARTIFACT_ROOT: ${SIMOS_CI_ARTIFACT_ROOT:-/data/simos-ci/artifacts}
     extra_hosts:
       - "www.chancee-shanghai.cn:${GITLAB_HOST_IP:-192.168.110.222}"

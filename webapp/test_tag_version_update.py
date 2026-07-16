@@ -797,6 +797,11 @@ version:3.1.22.0
         self.assertEqual(clone_target_state["parent_entries"], ["git-askpass.sh"])
         working_cwds = [cwd for args, cwd in calls if args[0] != "clone"]
         self.assertTrue(all(cwd and Path(cwd).name == "repo" for cwd in working_cwds))
+        update_index_calls = [args for args, _cwd in calls if args[:1] == ["update-index"]]
+        self.assertEqual(
+            update_index_calls,
+            [["update-index", "--add", "--cacheinfo", "160000", "business-new", "src/business"]],
+        )
 
 
 if __name__ == "__main__":
