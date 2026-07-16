@@ -1013,7 +1013,7 @@ async function continueReleaseRun(runId) {
 }
 
 async function deleteReleaseRun(runId) {
-  if (!confirm(`确认删除发版运行记录 ${runId}？此操作不会删除 Tag、流水线或构建产物。`)) return;
+  if (!confirm(`确认删除发版运行记录 ${runId}？此操作不会删除 Tag、流水线、合并请求（MR）或构建产物。`)) return;
   const result = await api(`/api/release-runs/${encodeURIComponent(runId)}`, { method: "DELETE" });
   state.scheduleRuns = result.runs || [];
   appendLog("删除发版运行记录", result);
@@ -1021,7 +1021,7 @@ async function deleteReleaseRun(runId) {
 }
 
 async function clearReleaseRuns() {
-  if (!confirm("确认清空全部发版运行记录？此操作不会删除 Tag、流水线或构建产物。")) return;
+  if (!confirm("确认清空全部发版运行记录？此操作不会删除 Tag、流水线、合并请求（MR）或构建产物。")) return;
   const result = await api("/api/release-runs", { method: "DELETE" });
   state.scheduleRuns = result.runs || [];
   appendLog("清空发版运行记录", result);

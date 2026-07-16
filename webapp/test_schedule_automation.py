@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -268,6 +270,34 @@ class ScheduleAutomationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "发版运行不存在：run-missing"):
             self.app.delete_release_run("run-missing")
 
+        self.assertEqual([item["id"] for item in server.load_release_runs()], ["run-keep"])
+
+    def test_delete_release_run_rejects_an_empty_id_without_changing_history(self) -> None:
+        server.save_release_runs([{"id": "run-keep"}])
+
+        with self.assertRaisesRegex(ValueError, "发版运行 ID 不能为空"):
+            self.app.delete_release_run("")
+
+        self.assertEqual([item["id"] for item in server.load_release_runs()], ["run-keep"])
+
+    def test_delete_release_runs_trailing_slash_returns_an_empty_id_error(self) -> None:
+        server.save_release_runs([{"id": "run-keep"}])
+        token = self.app.auth.login("admin", "admin123")["token"]
+        handler = object.__new__(server.make_handler(self.app))
+        handler.path = "/api/release-runs/"
+        handler.headers = {"Cookie": server.login_cookie(token)}
+        handler.wfile = io.BytesIO()
+        handler.extra_headers = {}
+        statuses: list[int] = []
+        handler.send_response = lambda status, *args: statuses.append(status)
+        handler.send_header = lambda *args: None
+        handler.end_headers = lambda: None
+
+        handler.do_DELETE()
+
+        response = json.loads(handler.wfile.getvalue())
+        self.assertEqual(statuses, [400])
+        self.assertEqual(response["error"], "发版运行 ID 不能为空")
         self.assertEqual([item["id"] for item in server.load_release_runs()], ["run-keep"])
 
     def test_clear_release_runs_persists_an_empty_history(self) -> None:
