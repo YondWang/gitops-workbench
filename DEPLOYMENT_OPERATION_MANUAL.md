@@ -33,8 +33,8 @@ Browser
 应用复用服务器上 GitLab 已有证书：
 
 ```text
-/etc/gitlab/ssl/www.chancee-shanghai.cn-crt.pem
-/etc/gitlab/ssl/www.chancee-shanghai.cn-key.pem
+/etc/gitlab/ssl/chancee-shanghai.cn-crt.pem
+/etc/gitlab/ssl/chancee-shanghai.cn-key.pem
 ```
 
 项目不会修改原始证书文件。`docker-compose.yml` 中将证书目录只读挂载到容器：
@@ -53,8 +53,8 @@ volumes:
 推荐配置：
 
 ```env
-GITOPS_TLS_CERT=/etc/gitlab/ssl/www.chancee-shanghai.cn-crt.pem
-GITOPS_TLS_KEY=/etc/gitlab/ssl/www.chancee-shanghai.cn-key.pem
+GITOPS_TLS_CERT=/etc/gitlab/ssl/chancee-shanghai.cn-crt.pem
+GITOPS_TLS_KEY=/etc/gitlab/ssl/chancee-shanghai.cn-key.pem
 ```
 
 ## 3. 生产环境变量
@@ -73,8 +73,8 @@ GITOPS_ADMIN_PASSWORD=replace-with-strong-admin-password
 GITOPS_USER_PASSWORD=replace-with-strong-user-password
 GITOPS_SESSION_SECRET=replace-with-long-random-secret
 GITLAB_HOST_IP=192.168.110.222
-GITOPS_TLS_CERT=/etc/gitlab/ssl/www.chancee-shanghai.cn-crt.pem
-GITOPS_TLS_KEY=/etc/gitlab/ssl/www.chancee-shanghai.cn-key.pem
+GITOPS_TLS_CERT=/etc/gitlab/ssl/chancee-shanghai.cn-crt.pem
+GITOPS_TLS_KEY=/etc/gitlab/ssl/chancee-shanghai.cn-key.pem
 PYTHON_BASE_IMAGE=docker.m.daocloud.io/python:3.12-slim
 ```
 
@@ -115,8 +115,8 @@ ssh admin1@192.168.110.222 "test -f /opt/gitops-workbench/.env && echo ENV_OK"
 确认证书存在：
 
 ```bash
-ssh admin1@192.168.110.222 "test -f /etc/gitlab/ssl/www.chancee-shanghai.cn-crt.pem && echo CERT_OK"
-ssh admin1@192.168.110.222 "test -f /etc/gitlab/ssl/www.chancee-shanghai.cn-key.pem && echo KEY_OK"
+ssh admin1@192.168.110.222 "test -f /etc/gitlab/ssl/chancee-shanghai.cn-crt.pem && echo CERT_OK"
+ssh admin1@192.168.110.222 "test -f /etc/gitlab/ssl/chancee-shanghai.cn-key.pem && echo KEY_OK"
 ```
 
 ## 5. 常规发布流程

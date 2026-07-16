@@ -9,7 +9,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 ssh "$SSH_TARGET" "test -d '$APP_DIR' && test -w '$APP_DIR'"
 ssh "$SSH_TARGET" "test -d '$DATA_DIR/data' && test -w '$DATA_DIR/data'"
-ssh "$SSH_TARGET" "test -f /etc/gitlab/ssl/www.chancee-shanghai.cn-crt.pem && test -f /etc/gitlab/ssl/www.chancee-shanghai.cn-key.pem"
+ssh "$SSH_TARGET" "test -f /etc/gitlab/ssl/chancee-shanghai.cn-crt.pem && test -f /etc/gitlab/ssl/chancee-shanghai.cn-key.pem"
 ssh "$SSH_TARGET" "test -f '$APP_DIR/.env'"
 ssh "$SSH_TARGET" "docker ps >/dev/null"
 

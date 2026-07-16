@@ -14,6 +14,7 @@ const state = {
   residentPackageTimer: null,
   schedules: [],
   scheduleRuns: [],
+  configBranches: [],
 };
 
 const RESIDENT_PACKAGE_TAG_RE = /^[A-Za-z0-9._-]+_[VvFfTt]?\d+(?:\.\d+)+_\d{12}$/;
@@ -42,8 +43,17 @@ function postJson(path, body) {
 function formValues(form) {
   const data = Object.fromEntries(new FormData(form).entries());
   form.querySelectorAll('input[type="checkbox"]').forEach((input) => {
+    if (input.name === "config_matrix") return;
     data[input.name] = input.checked;
   });
+  const matrixInputs = Array.from(form.querySelectorAll('input[name="config_matrix"]'));
+  if (matrixInputs.length) {
+    data.config_matrix_enabled = true;
+    data.config_matrix = matrixInputs.map((input) => {
+      const [config_ref, label] = String(input.value || "").split(":");
+      return { config_ref, label, enabled: input.checked };
+    });
+  }
   form.querySelectorAll('select[multiple]').forEach((select) => {
     data[select.name] = Array.from(select.selectedOptions).map((option) => option.value).filter(Boolean);
   });
@@ -64,6 +74,10 @@ function currentRepository() {
 
 function simosRepository() {
   return state.repositories.find((repo) => repo.id === "simos") || null;
+}
+
+function configRepository() {
+  return state.repositories.find((repo) => repo.id === "config" || String(repo.project || "").toLowerCase() === "os/config") || null;
 }
 
 function appendLog(title, payload) {
@@ -318,7 +332,7 @@ function renderScheduleList() {
               <div class="meta"><code>${escapeHtml(schedule.id)}</code> ${schedule.enabled ? "启用" : "停用"}</div>
             </td>
             <td><code>${escapeHtml(schedule.daily_time || timeFromCron(schedule.cron || "0 16 * * *"))}</code><div class="meta">${escapeHtml(schedule.timezone || "Asia/Shanghai")}</div></td>
-            <td><code>${escapeHtml(schedule.default_ref || "-")}</code><div class="meta">${escapeHtml(versionPrefixLabel(schedule))}</div></td>
+            <td><code>${escapeHtml(schedule.default_ref || "-")}</code><div class="meta">config: ${escapeHtml(configMatrixLabel(schedule))} · ${escapeHtml(versionPrefixLabel(schedule))}</div></td>
             <td>
               <button class="secondary small" type="button" data-edit-schedule="${escapeHtml(schedule.id)}">编辑</button>
               <button class="danger small" type="button" data-delete-schedule="${escapeHtml(schedule.id)}">删除</button>
@@ -340,7 +354,7 @@ function renderScheduleRuns() {
           <tr>
             <td><span class="${releaseRunStatusClass(run.status)}">${escapeHtml(releaseRunStatusText(run.status))}</span></td>
             <td><code>${escapeHtml(run.tag_name || "-")}</code><div class="meta">${escapeHtml(run.started_at || "")}</div></td>
-            <td><code>${escapeHtml(run.source_ref || run.ref || "-")}</code><div class="meta">${escapeHtml(run.release_version || run.version || "")}</div></td>
+            <td><code>${escapeHtml(run.source_ref || run.ref || "-")}</code><div class="meta">config: ${escapeHtml(configMatrixLabel(run))} · ${escapeHtml(run.release_version || run.version || "")}</div></td>
             <td>
               <code>${escapeHtml(run.cloud_dir || run.error || "-")}</code>
               ${run.status === "waiting_version_mr" ? `<div><button class="secondary small" type="button" data-continue-run="${escapeHtml(run.id)}">继续</button></div>` : ""}
@@ -384,7 +398,12 @@ function fillScheduleForm(schedule = null) {
     daily_time: "16:00",
     source_ref_strategy: "fixed_ref",
     default_ref: "fix",
-    dependency_ref: "",
+    config_ref: "",
+    config_matrix_enabled: true,
+    config_matrix: [
+      { config_ref: "SIMBOT_R6_A", label: "360", enabled: true },
+      { config_ref: "SIMBOT_R6_B", label: "360s", enabled: true },
+    ],
     version_source: "simos_version_info",
     manual_version_number: "",
     version_prefix_mode: "auto",
@@ -400,19 +419,51 @@ function fillScheduleForm(schedule = null) {
       field.value = value ?? "";
     }
   });
+  const enabledMatrix = new Set(
+    (next.config_matrix || [])
+      .filter((item) => item.enabled !== false)
+      .map((item) => `${item.config_ref}:${item.label}`),
+  );
+  form.querySelectorAll('input[name="config_matrix"]').forEach((input) => {
+    input.checked = enabledMatrix.size ? enabledMatrix.has(input.value) : input.checked;
+  });
   form.elements.daily_time.value = next.daily_time || timeFromCron(next.cron || "0 16 * * *");
+  renderConfigBranchOptions();
   renderSchedulePreviewFromForm();
 }
 
 function scheduleFormBody() {
   const body = formValues($("#scheduleForm"));
   body.daily_time = body.daily_time || timeFromCron(body.cron || "0 16 * * *");
+  delete body.dependency_ref;
   return body;
+}
+
+function renderConfigBranchOptions() {
+  const options = ['<option value="">请选择 config 分支</option>'].concat(
+    state.configBranches.map((branch) => `<option value="${escapeHtml(branch.name)}">${escapeHtml(branch.name)}</option>`),
+  );
+  document.querySelectorAll('select[data-config-ref-select]').forEach((select) => {
+    const previous = select.value;
+    select.innerHTML = options.join("");
+    if (previous && state.configBranches.some((branch) => branch.name === previous)) {
+      select.value = previous;
+    }
+  });
 }
 
 function versionPrefixLabel(schedule) {
   if (schedule.version_prefix_mode === "manual") return `手动 ${schedule.manual_version_prefix || "V"}`;
   return "自动 V/F";
+}
+
+function configMatrixLabel(value) {
+  const matrix = value.config_matrix || [];
+  if (Array.isArray(matrix) && matrix.length) {
+    const enabled = matrix.filter((item) => item.enabled !== false);
+    return enabled.map((item) => `${item.config_ref}/${item.label}`).join(", ") || "未选择";
+  }
+  return value.config_ref || "未选择";
 }
 
 function releaseRunStatusText(status) {
@@ -454,8 +505,8 @@ function renderSchedulePreviewFromForm() {
   const ref = body.default_ref || "fix";
   const prefix = previewVersionPrefix(ref, body.version_prefix_mode, body.manual_version_prefix);
   const versionNumber = body.manual_version_number || "版本号";
-  const dependency = body.dependency_ref || ref;
-  preview.textContent = `${sourceRefSlug(ref)}_${prefix}${versionNumber}_${new Date().toISOString().slice(0, 16).replace(/[-T:]/g, "").slice(0, 12)} · 子库:${dependency}`;
+  const configRef = configMatrixLabel(body);
+  preview.textContent = `${sourceRefSlug(ref)}_${prefix}${versionNumber}_${new Date().toISOString().slice(0, 16).replace(/[-T:]/g, "").slice(0, 12)} · config:${configRef}`;
 }
 
 function renderBranches() {
@@ -643,7 +694,8 @@ async function refreshAll() {
   const params = new URLSearchParams({ repository_id: state.currentRepositoryId });
   if (search) params.set("search", search);
   const simosRepo = simosRepository();
-  const [branches, tags, commonRefs, simosTags, schedules] = await Promise.all([
+  const configRepo = configRepository();
+  const [branches, tags, commonRefs, simosTags, schedules, configBranches] = await Promise.all([
     api(`/api/branches?${params}`),
     api(`/api/tags?${params}`),
     api("/api/common-refs").catch((error) => {
@@ -660,6 +712,12 @@ async function refreshAll() {
       appendLog("刷新自动任务失败", error.message);
       return null;
     }),
+    configRepo
+      ? api(`/api/branches?repository_id=${encodeURIComponent(configRepo.id)}`).catch((error) => {
+          appendLog("刷新 config 分支失败", error.message);
+          return null;
+        })
+      : Promise.resolve(null),
   ]);
   state.branches = branches.branches || [];
   state.tags = tags.tags || [];
@@ -667,6 +725,8 @@ async function refreshAll() {
   state.commonRefs = commonRefs;
   state.schedules = schedules?.tasks || schedules?.schedules || [];
   state.scheduleRuns = schedules?.runs || [];
+  state.configBranches = configBranches?.branches || [];
+  renderConfigBranchOptions();
   renderBranches();
   renderTags();
   renderSchedules();
@@ -920,6 +980,7 @@ async function deleteSchedule(scheduleId) {
 
 async function runManualRelease(form) {
   const body = formValues(form);
+  delete body.dependency_ref;
   const result = await postJson("/api/release-runs/manual", body);
   $("#schedulePreview").textContent = JSON.stringify(result.run || result, null, 2);
   appendLog("手动完整发版构建", result);
