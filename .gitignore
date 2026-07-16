@@ -7,3 +7,6 @@ gitlab-local/
 webapp/.env.local
 deploy/certs/
 webapp/data/version-settings.json
+
+# Local visual brainstorming sessions
+.superpowers/

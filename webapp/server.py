@@ -2456,6 +2456,9 @@ def make_handler(app: GitOpsApp):
             if path == "/api/release-runs":
                 self.handle_api("admin", app.clear_release_runs)
                 return
+            if path == "/api/release-runs/":
+                self.handle_api("admin", lambda: app.delete_release_run(""))
+                return
             release_run_id = match_release_run_path(path)
             if release_run_id:
                 self.handle_api("admin", lambda run_id=release_run_id: app.delete_release_run(run_id))

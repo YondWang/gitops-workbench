@@ -242,6 +242,15 @@ button {
   grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.6fr);
 }
 
+#schedules .grid.two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
+}
+
+#schedules .form-panel {
+  max-width: none;
+}
+
 .tag-grid {
   grid-template-columns: minmax(0, 1.15fr) minmax(360px, 0.85fr);
   align-items: start;
@@ -305,6 +314,13 @@ button {
   font-size: 16px;
 }
 
+.title-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .badge {
   min-width: 58px;
   text-align: center;
@@ -364,6 +380,58 @@ textarea {
   padding: 10px;
   resize: vertical;
   min-height: 96px;
+}
+
+.inline-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 13px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-soft);
+}
+
+.inline-options legend {
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.inline-options label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.inline-options input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  min-height: 18px;
+  flex: 0 0 18px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+.inline-options label:has(input:checked) {
+  border-color: var(--primary);
+  color: var(--primary-strong);
+  background: color-mix(in srgb, var(--primary) 10%, var(--surface));
+}
+
+.inline-options label:focus-within {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
 }
 
 .search {
@@ -515,6 +583,11 @@ td {
   word-break: break-word;
 }
 
+#scheduleRunsBody td:last-child {
+  width: 1%;
+  white-space: nowrap;
+}
+
 code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.95em;
@@ -571,7 +644,8 @@ code {
 
 @media (max-width: 980px) {
   .shell,
-  .grid.two {
+  .grid.two,
+  #schedules .grid.two {
     grid-template-columns: 1fr;
   }
 
