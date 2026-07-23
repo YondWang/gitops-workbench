@@ -523,9 +523,48 @@ textarea {
   margin-top: 10px;
 }
 
+.resident-jobs {
+  margin-top: 14px;
+}
+
+.resident-jobs-table {
+  max-height: 260px;
+}
+
+.resident-job-time {
+  min-width: 180px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .schedule-table {
   max-height: 260px;
   margin-bottom: 16px;
+}
+
+.schedule-preview-cell {
+  min-width: 230px;
+}
+
+.schedule-preview-cell code {
+  overflow-wrap: anywhere;
+}
+
+.schedule-preview-error {
+  display: block;
+  color: var(--danger);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.version-merge-meta {
+  display: grid;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.version-merge-meta .small {
+  justify-self: start;
 }
 
 .compact-form {

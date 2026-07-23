@@ -67,6 +67,14 @@ GITLAB_TOKEN=replace-with-a-gitlab-token
 
 Token 需要具备 `api` scope，并至少拥有目标项目 Maintainer 权限。新增仓库时可以复用 `GITLAB_TOKEN`，也可以在 `.env.local` 中添加新的 Token 变量，例如 `GITLAB_TOKEN_OTHER`，然后在页面的 `token_env` 填写该变量名。
 
+发版任务会为版本号更新创建 MR，并立即通过 GitLab API 请求合入；只有 GitLab 实际报告该 MR 已合入后，系统才会继续创建 Tag。请确保 SimOS 仓库所使用的 Token 同时具备 `api` scope 和该项目的 MR 合入权限。GitLab 的保护分支、审批和可合并性限制仍然有效；若 GitLab 拒绝合入，页面会显示原因并允许在自动重试次数耗尽后执行“一键重试自动合并”。
+
+```text
+GITOPS_RELEASE_RUN_POLL_SECONDS=10
+```
+
+该变量控制服务端检查未完成发版运行的秒数，默认值为 `10`；它负责在浏览器关闭或服务恢复后继续检查版本 MR 的实际合入状态。resident 包状态不修改 GitLab CI，而是读取 Tag Pipeline 和 Job 的真实状态；页面仅在发版任务页可见且构建活跃时每 5 秒刷新。
+
 仓库列表保存到：
 
 ```text

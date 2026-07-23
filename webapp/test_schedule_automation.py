@@ -4,10 +4,13 @@ import io
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock, patch
 
 import server
+from gitlab_client import GitLabClient, GitLabConfig
 from repository_store import RepositoryConfig
 
 
@@ -127,6 +130,17 @@ class FakeClient:
         self._merge_requests.append(item)
         return item
 
+    def merge_request(self, iid: int) -> dict[str, Any]:
+        self.calls.append(("merge_request", iid))
+        for item in self._merge_requests:
+            if item.get("iid") == iid:
+                return item
+        raise server.GitLabError("missing", status=404, payload={})
+
+    def accept_merge_request(self, iid: int) -> dict[str, Any]:
+        self.calls.append(("accept_merge_request", iid))
+        return self.merge_request(iid)
+
     def create_tag(self, tag_name: str, ref: str, message: str = "") -> dict[str, Any]:
         self.calls.append(("create_tag", tag_name, ref, message))
         self._tag_names.append(tag_name)
@@ -212,10 +226,294 @@ class ScheduleAutomationTest(unittest.TestCase):
         result = self.app.schedule_run_now("daily-simos-resident-release", now="2026-07-03T16:00:00+08:00")
         continued = self.app.continue_release_run(result["run"]["id"])
 
-        self.assertEqual(continued["run"]["status"], "waiting_version_mr")
+        self.assertEqual(continued["run"]["status"], "merging_version_mr")
         self.assertEqual(continued["run"]["tag_name"], "fix_V3.1.25.020_202607031600")
         self.assertTrue(any(call[0] == "create_merge_request" for call in self.client.calls))
+        self.assertIn(("accept_merge_request", 7), self.client.calls)
         self.assertFalse(any(call[0] == "create_tag" for call in self.client.calls))
+
+    def test_schedule_worker_tick_refreshes_builds_before_merges_and_due_schedules(self) -> None:
+        self.app.refresh_building_release_runs = Mock(return_value=[{"id": "release-build"}])  # type: ignore[method-assign]
+        self.app.resume_pending_release_runs = Mock(return_value=[{"id": "release-1"}])  # type: ignore[method-assign]
+        self.app.run_due_schedules = Mock(return_value=[{"id": "release-2"}])  # type: ignore[method-assign]
+        now = datetime.fromisoformat("2026-07-04T16:00:00+08:00")
+
+        result = server.schedule_worker_tick(self.app, now)
+
+        self.assertEqual(result, {"builds": [{"id": "release-build"}], "resumed": [{"id": "release-1"}], "due": [{"id": "release-2"}]})
+        self.app.refresh_building_release_runs.assert_called_once_with(now)
+        self.app.resume_pending_release_runs.assert_called_once_with(now)
+        self.app.run_due_schedules.assert_called_once_with(now)
+
+    def test_refresh_building_release_run_publishes_after_successful_pipeline(self) -> None:
+        run = {
+            "id": "release-build-success",
+            "execution_type": "full_release",
+            "status": "building",
+            "tag_name": "fix_V3.1.27.039_202607221616",
+            "started_at": "2026-07-22T16:16:00+08:00",
+            "updated_at": "2026-07-22T16:16:00+08:00",
+            "finished_at": "",
+        }
+        server.append_release_run(run)
+        self.app.resident_package = Mock(  # type: ignore[method-assign]
+            return_value={
+                "status": "success",
+                "pipeline": {"status": "success", "web_url": "https://gitlab.example/pipelines/42"},
+                "pipeline_url": "https://gitlab.example/pipelines/42",
+                "cloud_dir": "/public/Versions/2026-07-22_V3.1.27.039/CI",
+                "artifact_path": "/public/Versions/2026-07-22_V3.1.27.039/CI/resident.tar.gz",
+            }
+        )
+        completed_at = datetime.fromisoformat("2026-07-22T16:20:00+08:00")
+
+        updated = self.app.refresh_building_release_runs(completed_at)
+
+        self.assertEqual([item["id"] for item in updated], [run["id"]])
+        persisted = server.load_release_runs()[0]
+        self.assertEqual(persisted["status"], "published")
+        self.assertEqual(persisted["finished_at"], completed_at.isoformat())
+        self.assertEqual(persisted["package"]["status"], "success")
+        self.assertEqual(persisted["pipeline_url"], "https://gitlab.example/pipelines/42")
+        self.assertEqual(persisted["cloud_dir"], "/public/Versions/2026-07-22_V3.1.27.039/CI")
+
+    def test_refresh_building_release_run_stays_building_while_pipeline_is_active(self) -> None:
+        run = {
+            "id": "release-build-running",
+            "execution_type": "full_release",
+            "status": "building",
+            "tag_name": "fix_V3.1.27.039_202607221616",
+            "started_at": "2026-07-22T16:16:00+08:00",
+            "updated_at": "2026-07-22T16:16:00+08:00",
+            "finished_at": "",
+        }
+        server.append_release_run(run)
+        self.app.resident_package = Mock(  # type: ignore[method-assign]
+            return_value={
+                "status": "pending_or_missing",
+                "pipeline": {"status": "running", "web_url": "https://gitlab.example/pipelines/42"},
+                "pipeline_url": "https://gitlab.example/pipelines/42",
+                "progress": {"active": True},
+            }
+        )
+
+        updated = self.app.refresh_building_release_runs(datetime.fromisoformat("2026-07-22T16:20:00+08:00"))
+
+        self.assertEqual([item["id"] for item in updated], [run["id"]])
+        persisted = server.load_release_runs()[0]
+        self.assertEqual(persisted["status"], "building")
+        self.assertEqual(persisted["finished_at"], "")
+        self.assertEqual(persisted["package"]["pipeline"]["status"], "running")
+
+    def test_release_tasks_refreshes_a_completed_build_before_returning_runs(self) -> None:
+        run = {
+            "id": "release-build-listing",
+            "execution_type": "full_release",
+            "status": "building",
+            "tag_name": "fix_V3.1.27.039_202607221616",
+            "started_at": "2026-07-22T16:16:00+08:00",
+            "updated_at": "2026-07-22T16:16:00+08:00",
+            "finished_at": "",
+        }
+        server.append_release_run(run)
+        self.app.resident_package = Mock(return_value={"status": "success", "pipeline": {"status": "success"}})  # type: ignore[method-assign]
+
+        result = self.app.release_tasks()
+
+        self.assertEqual(result["runs"][0]["status"], "published")
+        self.assertTrue(result["runs"][0]["finished_at"])
+
+    def test_release_run_poll_seconds_uses_a_safe_environment_override(self) -> None:
+        with patch.dict("os.environ", {"GITOPS_RELEASE_RUN_POLL_SECONDS": "15"}):
+            self.assertEqual(server.release_run_poll_seconds(), 15)
+        with patch.dict("os.environ", {"GITOPS_RELEASE_RUN_POLL_SECONDS": "invalid"}):
+            self.assertEqual(server.release_run_poll_seconds(), 10)
+
+    def test_gitlab_client_queries_one_merge_request_by_iid(self) -> None:
+        client = GitLabClient(GitLabConfig("https://gitlab.example", "OS/simos", "token"))
+        client.request = Mock(return_value={"iid": 17, "state": "opened"})  # type: ignore[method-assign]
+
+        merge_request = client.merge_request(17)
+
+        self.assertEqual(merge_request["iid"], 17)
+        client.request.assert_called_once_with("GET", "/projects/OS%2Fsimos/merge_requests/17")
+
+    def test_gitlab_auto_merge_uses_required_squash_without_pipeline_wait(self) -> None:
+        client = GitLabClient(GitLabConfig("https://gitlab.example", "OS/simos", "token"))
+        client.request = Mock(return_value={"iid": 17, "state": "opened"})  # type: ignore[method-assign]
+
+        client.accept_merge_request(17)
+
+        client.request.assert_called_once_with(
+            "PUT",
+            "/projects/OS%2Fsimos/merge_requests/17/merge",
+            payload={
+                "should_remove_source_branch": False,
+                "squash": True,
+            },
+        )
+
+    def test_full_release_requests_version_merge_and_persists_retry_metadata(self) -> None:
+        self.app.save_schedule({"id": "daily-simos-resident-release", "config_ref": "SIMBOT_R6_B"})
+
+        result = self.app.schedule_run_now("daily-simos-resident-release", now="2026-07-04T16:00:00+08:00")
+
+        run = result["run"]
+        self.assertEqual(run["status"], "merging_version_mr")
+        self.assertEqual(run["version_merge"]["iid"], 7)
+        self.assertEqual(run["version_merge"]["state"], "opened")
+        self.assertEqual(run["version_merge"]["attempt_count"], 1)
+        self.assertTrue(run["version_merge"]["requested_at"])
+        self.assertTrue(run["version_merge"]["last_checked_at"])
+        self.assertTrue(run["version_merge"]["next_retry_at"])
+        self.assertEqual(run["version_merge"]["last_error"], "")
+        self.assertIn(("accept_merge_request", 7), self.client.calls)
+        self.assertFalse(any(call[0] == "create_tag" for call in self.client.calls))
+
+    def test_resume_pending_release_runs_tags_only_after_the_version_mr_is_merged(self) -> None:
+        self.app.save_schedule({"id": "daily-simos-resident-release", "config_ref": "SIMBOT_R6_B"})
+        created = self.app.schedule_run_now("daily-simos-resident-release", now="2026-07-04T16:00:00+08:00")["run"]
+        self.client._merge_requests[0]["state"] = "merged"
+        self.client.branch_commit = {"id": "version-commit", "short_id": "version", "parent_ids": ["simos-new"]}
+
+        resumed = self.app.resume_pending_release_runs(datetime.fromisoformat("2026-07-04T16:00:20+08:00"))
+
+        self.assertEqual(len(resumed), 1)
+        self.assertEqual(resumed[0]["id"], created["id"])
+        self.assertEqual(resumed[0]["status"], "building")
+        self.assertIn(("merge_request", 7), self.client.calls)
+        tag_calls = [call for call in self.client.calls if call[0] == "create_tag"]
+        self.assertEqual(len(tag_calls), 1)
+        self.app.resume_pending_release_runs(datetime.fromisoformat("2026-07-04T16:00:40+08:00"))
+        self.assertEqual(len([call for call in self.client.calls if call[0] == "create_tag"]), 1)
+
+    def test_resume_retries_until_max_attempts_then_manual_retry_resets_merge_state(self) -> None:
+        self.app.save_schedule({"id": "daily-simos-resident-release", "config_ref": "SIMBOT_R6_B"})
+        created = self.app.schedule_run_now("daily-simos-resident-release", now="2026-07-04T16:00:00+08:00")["run"]
+        self.client.accept_merge_request = Mock(side_effect=server.GitLabError("merge blocked"))  # type: ignore[method-assign]
+        base = datetime.fromisoformat(created["version_merge"]["next_retry_at"])
+
+        for offset in range(5):
+            self.app.resume_pending_release_runs(base + timedelta(seconds=offset * 10))
+
+        failed = next(run for run in server.load_release_runs() if run["id"] == created["id"])
+        self.assertEqual(failed["status"], "auto_merge_failed")
+        self.assertEqual(failed["version_merge"]["attempt_count"], 6)
+        self.assertFalse(any(call[0] == "create_tag" for call in self.client.calls))
+
+        retried = self.app.retry_version_merge(created["id"])["run"]
+
+        self.assertEqual(retried["status"], "waiting_version_mr_retry")
+        self.assertEqual(retried["version_merge"]["attempt_count"], 1)
+        self.assertFalse(any(call[0] == "create_tag" for call in self.client.calls))
+
+    def test_not_yet_mergeable_response_waits_without_consuming_merge_attempt(self) -> None:
+        self.app.save_schedule({"id": "daily-simos-resident-release", "config_ref": "SIMBOT_R6_B"})
+        self.client.accept_merge_request = Mock(side_effect=server.GitLabError("pipeline is still running", status=405))  # type: ignore[method-assign]
+
+        created = self.app.schedule_run_now("daily-simos-resident-release", now="2026-07-04T16:00:00+08:00")["run"]
+
+        self.assertEqual(created["status"], "waiting_version_mr_retry")
+        self.assertEqual(created["version_merge"]["attempt_count"], 0)
+        self.assertIn("pipeline", created["version_merge"]["last_error"])
+        self.assertTrue(created["version_merge"]["next_retry_at"])
+
+    def test_save_release_runs_replaces_a_sibling_temp_file_atomically(self) -> None:
+        with patch.object(server.os, "replace") as replace:
+            server.save_release_runs([{"id": "run-atomic"}])
+
+        replace.assert_called_once()
+        temporary_path, target_path = (Path(value) for value in replace.call_args.args)
+        self.assertEqual(target_path, server.RELEASE_RUNS_PATH)
+        self.assertEqual(temporary_path.parent, server.RELEASE_RUNS_PATH.parent)
+        self.assertNotEqual(temporary_path, target_path)
+
+    def test_closed_version_mr_ends_the_release_run_without_tagging(self) -> None:
+        self.app.save_schedule({"id": "daily-simos-resident-release", "config_ref": "SIMBOT_R6_B"})
+        created = self.app.schedule_run_now("daily-simos-resident-release", now="2026-07-04T16:00:00+08:00")["run"]
+        self.client._merge_requests[0]["state"] = "closed"
+
+        resumed = self.app.resume_pending_release_runs(datetime.fromisoformat("2026-07-04T16:00:20+08:00"))
+
+        self.assertEqual(resumed[0]["status"], "closed")
+        self.assertIn("关闭", resumed[0]["version_merge"]["last_error"])
+        self.assertFalse(any(call[0] == "create_tag" for call in self.client.calls))
+        with self.assertRaisesRegex(ValueError, "只有自动合并失败"):
+            self.app.retry_version_merge(created["id"])
+
+    def test_continue_release_run_rejects_building_run_without_duplicate_tag(self) -> None:
+        self.app.save_schedule({"id": "daily-simos-resident-release", "config_ref": "SIMBOT_R6_B"})
+        created = self.app.schedule_run_now("daily-simos-resident-release", now="2026-07-04T16:00:00+08:00")["run"]
+        self.client._merge_requests[0]["state"] = "merged"
+        self.client.branch_commit = {"id": "version-commit", "short_id": "version", "parent_ids": ["simos-new"]}
+        self.app.resume_pending_release_runs(datetime.fromisoformat("2026-07-04T16:00:20+08:00"))
+        tag_count = len([call for call in self.client.calls if call[0] == "create_tag"])
+
+        with self.assertRaisesRegex(ValueError, "不可继续"):
+            self.app.continue_release_run(created["id"])
+
+        self.assertEqual(len([call for call in self.client.calls if call[0] == "create_tag"]), tag_count)
+
+    def test_release_task_previews_return_a_plan_or_error_for_every_task(self) -> None:
+        self.app.save_schedule(
+            {
+                "id": "invalid-preview-task",
+                "daily_time": "18:30",
+                "default_ref": "missing-ref",
+                "config_ref": "SIMBOT_R6_B",
+            }
+        )
+
+        previews = self.app.release_task_previews("2026-07-04T16:00:00+08:00")
+
+        self.assertTrue(previews["ok"])
+        by_id = {item["task_id"]: item for item in previews["previews"]}
+        self.assertTrue(by_id["daily-simos-resident-release"]["ok"])
+        self.assertIn("plan", by_id["daily-simos-resident-release"])
+        self.assertEqual(by_id["daily-simos-resident-release"]["version"], by_id["daily-simos-resident-release"]["plan"]["version"])
+        self.assertEqual(by_id["daily-simos-resident-release"]["tag_name"], by_id["daily-simos-resident-release"]["plan"]["tag_name"])
+        self.assertEqual(by_id["daily-simos-resident-release"]["source_ref"], by_id["daily-simos-resident-release"]["plan"]["source_ref"])
+        self.assertEqual(by_id["daily-simos-resident-release"]["config_matrix"], by_id["daily-simos-resident-release"]["plan"]["config_matrix"])
+        self.assertEqual(by_id["daily-simos-resident-release"]["calculated_at"], by_id["daily-simos-resident-release"]["plan"]["planned_at"])
+        self.assertFalse(by_id["invalid-preview-task"]["ok"])
+        self.assertIn("来源 ref 不存在", by_id["invalid-preview-task"]["error"])
+
+    def test_retry_version_merge_post_route_uses_create_tag_permission(self) -> None:
+        token = self.app.auth.login("admin", "admin123")["token"]
+        self.app.retry_version_merge = Mock(return_value={"ok": True, "run": {"id": "run-1"}})  # type: ignore[method-assign]
+        handler = object.__new__(server.make_handler(self.app))
+        handler.path = "/api/release-runs/run-1/retry-version-merge"
+        handler.headers = {"Cookie": server.login_cookie(token), "Content-Length": "2"}
+        handler.rfile = io.BytesIO(b"{}")
+        handler.wfile = io.BytesIO()
+        handler.extra_headers = {}
+        statuses: list[int] = []
+        handler.send_response = lambda status, *args: statuses.append(status)
+        handler.send_header = lambda *args: None
+        handler.end_headers = lambda: None
+
+        handler.do_POST()
+
+        self.assertEqual(statuses, [200])
+        self.app.retry_version_merge.assert_called_once_with("run-1")
+
+    def test_release_task_previews_get_route(self) -> None:
+        token = self.app.auth.login("admin", "admin123")["token"]
+        self.app.release_task_previews = Mock(return_value={"ok": True, "previews": []})  # type: ignore[method-assign]
+        handler = object.__new__(server.make_handler(self.app))
+        handler.path = "/api/release-task-previews"
+        handler.headers = {"Cookie": server.login_cookie(token)}
+        handler.wfile = io.BytesIO()
+        handler.extra_headers = {}
+        statuses: list[int] = []
+        handler.send_response = lambda status, *args: statuses.append(status)
+        handler.send_header = lambda *args: None
+        handler.end_headers = lambda: None
+
+        handler.do_GET()
+
+        self.assertEqual(statuses, [200])
+        self.app.release_task_previews.assert_called_once_with()
 
     def test_same_week_existing_third_only_bumps_fourth(self) -> None:
         self.client._tag_names.append("fix_V3.1.25.020_202607031600")
@@ -355,7 +653,7 @@ class ScheduleAutomationTest(unittest.TestCase):
         simos_client._tag_names.append("fix_V3.1.25.020_202607031600")
         result = self.app.schedule_run_now("daily-simos-resident-release", now="2026-07-04T16:00:00+08:00")
         continued = self.app.continue_release_run(result["run"]["id"])
-        self.assertEqual(continued["run"]["status"], "waiting_version_mr")
+        self.assertEqual(continued["run"]["status"], "merging_version_mr")
         simos_client._merge_requests[0]["state"] = "merged"
         simos_client.branch_commit = {"id": "version-commit", "short_id": "version", "parent_ids": ["simos-new"]}
         tagged = self.app.continue_release_run(result["run"]["id"])
@@ -417,7 +715,7 @@ class ScheduleAutomationTest(unittest.TestCase):
         result = self.app.schedule_run_now("daily-simos-resident-release", now="2026-07-08T16:29:00+08:00")
         continued = self.app.continue_release_run(result["run"]["id"])
 
-        self.assertEqual(continued["run"]["status"], "waiting_version_mr")
+        self.assertEqual(continued["run"]["status"], "merging_version_mr")
         commit_calls = [call for call in simos_client.calls if call[0] == "create_commit"]
         self.assertEqual(len(commit_calls), 1)
         actions = commit_calls[0][3]
@@ -465,7 +763,7 @@ class ScheduleAutomationTest(unittest.TestCase):
 
         result = self.app.schedule_run_now("daily-simos-resident-release", now="2026-07-08T16:45:00+08:00")
         continued = self.app.continue_release_run(result["run"]["id"])
-        self.assertEqual(continued["run"]["status"], "waiting_version_mr")
+        self.assertEqual(continued["run"]["status"], "merging_version_mr")
         simos_client._merge_requests[0]["state"] = "merged"
         simos_client.branch_commit = {"id": "version-commit", "short_id": "version", "parent_ids": ["simos-new"]}
         tagged = self.app.continue_release_run(result["run"]["id"])

@@ -242,6 +242,9 @@ class GitLabClient:
             },
         )
 
+    def merge_request(self, iid: int | str) -> dict[str, Any]:
+        return self.request("GET", self.project_api_path(f"/merge_requests/{iid}"))
+
     def create_merge_request(self, source_branch: str, target_branch: str, title: str) -> dict[str, Any]:
         existing = self.opened_merge_requests(source_branch, target_branch)
         if existing:
@@ -265,7 +268,7 @@ class GitLabClient:
             self.project_api_path(f"/merge_requests/{iid}/merge"),
             payload={
                 "should_remove_source_branch": False,
-                "squash": False,
+                "squash": True,
             },
         )
 

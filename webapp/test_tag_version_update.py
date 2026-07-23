@@ -203,6 +203,10 @@ date: "2026-06-01 10:00:00"
         self._merge_requests.append(item)
         return item
 
+    def accept_merge_request(self, iid: int) -> dict[str, Any]:
+        self.record(("accept_merge_request", iid))
+        return next(item for item in self._merge_requests if item.get("iid") == iid)
+
 
 class TagVersionUpdateTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -504,6 +508,24 @@ version:1.0.0
         self.assertIn('business: "release-20260615100000"', software_action["content"])
         self.assertNotIn("pkg.info", result["version_update"]["files"])
         self.assertEqual(result["merge_request"]["state"], "opened")
+
+    def test_direct_all_scope_tag_waits_for_version_mr_without_auto_merge_metadata(self) -> None:
+        result = self.app.create_tag(
+            {
+                "scope": "all",
+                "ref": "release",
+                "tag_name": "release-20260615100000",
+                "message": "candidate build",
+                "update_version": True,
+            }
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["phase"], "waiting_version_mr")
+        self.assertFalse(result.get("auto_merge_version_mr", False))
+        self.assertNotIn("version_merge", result)
+        self.assertNotIn("run", result)
+        self.assertNotIn("accept_merge_request", [call[0] for call in self.simos_client.calls])
 
     def test_all_repository_tag_uses_manual_base_version_and_saves_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

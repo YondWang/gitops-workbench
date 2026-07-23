@@ -12,8 +12,10 @@ const state = {
   pendingVersionTimer: null,
   residentPackage: null,
   residentPackageTimer: null,
+  residentPackageRefreshedAt: null,
   schedules: [],
   scheduleRuns: [],
+  schedulePreviews: {},
   configBranches: [],
 };
 
@@ -87,6 +89,31 @@ function appendLog(title, payload) {
   $("#logOutput").textContent = state.log.join("\n\n");
 }
 
+function setText(selector, value) {
+  const element = $(selector);
+  if (element) element.textContent = value;
+}
+
+function isSchedulesViewActive() {
+  return Boolean(state.session && $("#schedules")?.classList.contains("active-view"));
+}
+
+function formatClientTimestamp(value) {
+  if (!value) return "-";
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+}
+
+function safeUrl(value) {
+  if (!value) return "";
+  try {
+    const url = new URL(String(value), window.location.origin);
+    return ["http:", "https:"].includes(url.protocol) ? url.href : "";
+  } catch {
+    return "";
+  }
+}
+
 function isResidentPackageTag(tag) {
   return RESIDENT_PACKAGE_TAG_RE.test(String(tag || ""));
 }
@@ -105,6 +132,10 @@ function residentStatusText(status) {
   if (value === "failed" || value === "error") return "失败";
   if (value === "checking") return "查询中";
   if (value === "pending_or_missing") return "构建中/未找到";
+  if (value === "pending" || value === "created" || value === "queued") return "等待中";
+  if (value === "running" || value === "building") return "运行中";
+  if (value === "canceled" || value === "cancelled") return "已取消";
+  if (value === "skipped") return "已跳过";
   return value || "未知";
 }
 
@@ -139,6 +170,54 @@ function packageShaSummary(packageInfo) {
     .join("  ");
 }
 
+function residentProgressSummary(progress) {
+  if (!progress || typeof progress !== "object") return "暂无进度";
+  const total = Number(progress.total || 0);
+  const completed = Number(progress.completed || 0);
+  const running = Number(progress.running || 0);
+  const pending = Number(progress.pending || 0);
+  const failed = Number(progress.failed || 0);
+  return `已完成 ${completed}/${total} · 运行 ${running} · 等待 ${pending} · 失败 ${failed}`;
+}
+
+function residentJobTime(job) {
+  const started = job?.started_at || "-";
+  const finished = job?.finished_at || "";
+  const duration = job?.duration_seconds;
+  const durationText = Number.isFinite(Number(duration)) ? ` · ${Number(duration)} 秒` : "";
+  return `${started}${finished ? ` → ${finished}` : ""}${durationText}`;
+}
+
+function renderResidentJobs(jobs) {
+  const body = $("#residentPackageJobsBody");
+  if (!body) return;
+  const items = Array.isArray(jobs) ? jobs : [];
+  body.innerHTML =
+    items
+      .map(
+        (job) => {
+          const jobUrl = safeUrl(job?.web_url);
+          return `
+          <tr>
+            <td><strong>${escapeHtml(job?.name || job?.id || "-")}</strong>${job?.artifacts_available ? '<div class="meta">有构建产物</div>' : ""}</td>
+            <td>${escapeHtml(job?.stage || "-")}</td>
+            <td><span class="${residentStatusClass(job?.status)}">${escapeHtml(residentStatusText(job?.status))}</span></td>
+            <td class="resident-job-time">${escapeHtml(residentJobTime(job))}</td>
+            <td>${jobUrl ? `<a href="${escapeHtml(jobUrl)}" target="_blank" rel="noreferrer">打开</a>` : "-"}</td>
+          </tr>
+        `;
+        },
+      )
+      .join("") || `<tr><td colspan="5">暂无 Job 信息</td></tr>`;
+}
+
+function residentPackageIsInProgress(packageInfo) {
+  const active = packageInfo?.progress?.active;
+  if (active === true || active === 1 || active === "true" || active === "1") return true;
+  const status = String(packageInfo?.status || packageInfo?.pipeline?.status || "").toLowerCase();
+  return ["checking", "pending_or_missing", "pending", "created", "queued", "running", "building", "tagging", "merging_version_mr", "waiting_version_mr", "waiting_version_mr_retry"].includes(status);
+}
+
 function renderResidentPackage() {
   const panel = $("#residentPackagePanel");
   if (!panel) return;
@@ -146,27 +225,36 @@ function renderResidentPackage() {
   panel.classList.toggle("hidden", !packageInfo);
   if (!packageInfo) return;
 
-  const status = packageInfo.status || "checking";
+  const pipeline = packageInfo.pipeline || {};
+  const status = packageInfo.status || pipeline.status || "checking";
   const badge = $("#residentPackageStatus");
-  badge.textContent = residentStatusText(status);
-  badge.className = residentStatusClass(status);
-  $("#residentPackageTag").textContent = packageInfo.tag || "-";
-  $("#residentPackagePath").textContent = packageInfo.cloud_dir || packageInfo.artifact_path || `/data/simos-ci/artifacts/${packageInfo.tag || "<tag>"}/resident.tar.gz`;
-  $("#residentPackageSha").textContent = packageShaSummary(packageInfo) || "-";
-  $("#residentPackageBuiltAt").textContent = packageInfo.published_at || packageInfo.built_at || packageInfo.finished_at || "-";
-  $("#residentPackageMeta").textContent = packageInfo.message || packageInfo.error || "Tag Pipeline 会在 GitLab Runner 上自动构建 resident.tar.gz";
+  if (badge) {
+    badge.textContent = residentStatusText(status);
+    badge.className = residentStatusClass(status);
+  }
+  setText("#residentPackageTag", packageInfo.tag || "-");
+  setText("#residentPackagePath", packageInfo.cloud_dir || packageInfo.artifact_path || `/data/simos-ci/artifacts/${packageInfo.tag || "<tag>"}/resident.tar.gz`);
+  setText("#residentPackageSha", packageShaSummary(packageInfo) || "-");
+  setText("#residentPackageBuiltAt", packageInfo.published_at || packageInfo.built_at || packageInfo.finished_at || "-");
+  setText("#residentPackagePipelineSummary", `${pipeline.id || pipeline.iid ? `#${pipeline.id || pipeline.iid} · ` : ""}${residentStatusText(pipeline.status || packageInfo.pipeline_status || status)}`);
+  setText("#residentPackageProgress", residentProgressSummary(packageInfo.progress));
+  setText("#residentPackageRefreshedAt", formatClientTimestamp(state.residentPackageRefreshedAt));
+  setText("#residentPackageMeta", packageInfo.message || packageInfo.error || "Tag Pipeline 会在 GitLab Runner 上自动构建 resident.tar.gz");
 
-  const pipelineUrl = residentPipelineUrl(packageInfo);
+  const pipelineUrl = safeUrl(residentPipelineUrl(packageInfo));
   const link = $("#residentPackagePipelineLink");
-  link.classList.toggle("hidden", !pipelineUrl);
-  link.href = pipelineUrl || "#";
+  if (link) {
+    link.classList.toggle("hidden", !pipelineUrl);
+    link.href = pipelineUrl || "#";
+  }
 
-  const artifactUrl = residentArtifactUrl(packageInfo);
+  const artifactUrl = safeUrl(residentArtifactUrl(packageInfo));
   const artifactLink = $("#residentPackageArtifactLink");
   artifactLink?.classList.toggle("hidden", !artifactUrl);
   if (artifactLink) {
     artifactLink.href = artifactUrl || "#";
   }
+  renderResidentJobs(packageInfo.jobs);
 }
 
 function clearResidentPackagePoll() {
@@ -178,40 +266,63 @@ function clearResidentPackagePoll() {
 
 function scheduleResidentPackagePoll(tag) {
   clearResidentPackagePoll();
-  state.residentPackageTimer = setTimeout(() => fetchResidentPackage(tag), 15000);
+  if (!isSchedulesViewActive() || state.residentPackage?.tag !== tag || !residentPackageIsInProgress(state.residentPackage)) return;
+  state.residentPackageTimer = setTimeout(() => fetchResidentPackage(tag), 5000);
 }
 
 async function fetchResidentPackage(tag) {
-  if (!isResidentPackageTag(tag)) return;
-  const previousStatus = state.residentPackage?.status || "";
+  if (!isResidentPackageTag(tag) || !isSchedulesViewActive()) {
+    clearResidentPackagePoll();
+    return;
+  }
+  const previousPackage = state.residentPackage;
+  const previousStatus = previousPackage?.status || "";
+  const wasTracking = previousPackage?.tag === tag && residentPackageIsInProgress(previousPackage);
   try {
     const data = await api(`/api/resident-packages?tag=${encodeURIComponent(tag)}`);
-    if (state.residentPackage?.tag && state.residentPackage.tag !== tag) return;
+    if (!isSchedulesViewActive() || (state.residentPackage?.tag && state.residentPackage.tag !== tag)) {
+      clearResidentPackagePoll();
+      return;
+    }
     state.residentPackage = data;
+    state.residentPackageRefreshedAt = new Date();
     renderResidentPackage();
-    if (data.status === "pending_or_missing") {
+    if (residentPackageIsInProgress(data)) {
       scheduleResidentPackagePoll(tag);
       return;
     }
     clearResidentPackagePoll();
     if (previousStatus !== data.status) {
       appendLog("resident 包状态", data);
+      await refreshSchedules();
     }
   } catch (error) {
+    if (!isSchedulesViewActive() || (state.residentPackage?.tag && state.residentPackage.tag !== tag)) {
+      clearResidentPackagePoll();
+      return;
+    }
     state.residentPackage = {
+      ...(previousPackage?.tag === tag ? previousPackage : {}),
       tag,
-      status: "error",
-      artifact_path: `/data/simos-ci/artifacts/${tag}/resident.tar.gz`,
+      status: previousPackage?.status || "checking",
+      artifact_path: previousPackage?.artifact_path || `/data/simos-ci/artifacts/${tag}/resident.tar.gz`,
+      message: "resident 包状态暂时查询失败，将自动重试",
       error: error.message,
     };
+    state.residentPackageRefreshedAt = new Date();
     renderResidentPackage();
-    scheduleResidentPackagePoll(tag);
+    if (wasTracking) {
+      scheduleResidentPackagePoll(tag);
+    } else {
+      clearResidentPackagePoll();
+    }
   }
 }
 
 function watchResidentPackage(tag) {
   if (!isResidentPackageTag(tag)) return;
   clearResidentPackagePoll();
+  state.residentPackageRefreshedAt = null;
   state.residentPackage = {
     tag,
     status: "checking",
@@ -223,7 +334,7 @@ function watchResidentPackage(tag) {
     tag,
     artifact_path: state.residentPackage.artifact_path,
   });
-  fetchResidentPackage(tag);
+  if (isSchedulesViewActive()) fetchResidentPackage(tag);
 }
 
 function showLoginMessage(text, isError = false) {
@@ -235,13 +346,23 @@ function showLoginMessage(text, isError = false) {
 function switchView(viewId) {
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === viewId));
   document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active-view", view.id === viewId));
+  if (viewId !== "schedules") {
+    clearResidentPackagePoll();
+    return;
+  }
+  if (state.session) {
+    refreshSchedules().catch((error) => appendLog("刷新自动任务失败", error.message));
+  }
 }
 
 function renderSession() {
   const loggedIn = Boolean(state.session);
   $("#loginView").classList.toggle("hidden", loggedIn);
   $("#appView").classList.toggle("hidden", !loggedIn);
-  if (!loggedIn) return;
+  if (!loggedIn) {
+    clearResidentPackagePoll();
+    return;
+  }
 
   $("#currentUser").textContent = state.session.username;
   $("#currentRole").textContent = state.session.role;
@@ -321,11 +442,14 @@ function renderSchedules() {
 function renderScheduleList() {
   const body = $("#scheduleListBody");
   if (!body) return;
-  $("#scheduleCount").textContent = String(state.schedules.length);
+  setText("#scheduleCount", String(state.schedules.length));
   body.innerHTML =
     state.schedules
       .map(
-        (schedule) => `
+        (schedule) => {
+          const preview = state.schedulePreviews[schedule.id];
+          const previewHtml = renderSchedulePreview(preview);
+          return `
           <tr>
             <td>
               <strong>${escapeHtml(schedule.name || schedule.id)}</strong>
@@ -333,14 +457,30 @@ function renderScheduleList() {
             </td>
             <td><code>${escapeHtml(schedule.daily_time || timeFromCron(schedule.cron || "0 16 * * *"))}</code><div class="meta">${escapeHtml(schedule.timezone || "Asia/Shanghai")}</div></td>
             <td><code>${escapeHtml(schedule.default_ref || "-")}</code><div class="meta">config: ${escapeHtml(configMatrixLabel(schedule))} · ${escapeHtml(versionPrefixLabel(schedule))}</div></td>
+            <td class="schedule-preview-cell">${previewHtml}</td>
             <td>
               <button class="secondary small" type="button" data-edit-schedule="${escapeHtml(schedule.id)}">编辑</button>
               <button class="danger small" type="button" data-delete-schedule="${escapeHtml(schedule.id)}">删除</button>
             </td>
           </tr>
-        `,
+        `;
+        },
       )
-      .join("") || `<tr><td colspan="4">暂无自动任务</td></tr>`;
+      .join("") || `<tr><td colspan="5">暂无自动任务</td></tr>`;
+}
+
+function renderSchedulePreview(preview) {
+  if (!preview) return `<span class="meta">暂无预览</span>`;
+  if (preview.error || preview.ok === false) {
+    return `<span class="schedule-preview-error">预览失败：${escapeHtml(preview.error || "未返回可用预览")}</span>`;
+  }
+  return `
+    <strong><code>${escapeHtml(preview.tag_name || preview.version || "-")}</code></strong>
+    ${preview.version && preview.tag_name ? `<div class="meta">版本：${escapeHtml(preview.version)}</div>` : ""}
+    <div class="meta">来源：${escapeHtml(preview.source_ref || "-")}</div>
+    <div class="meta">config：${escapeHtml(configMatrixLabel(preview))}</div>
+    <div class="meta">计算于：${escapeHtml(preview.calculated_at || "-")}</div>
+  `;
 }
 
 function renderScheduleRuns() {
@@ -357,7 +497,7 @@ function renderScheduleRuns() {
             <td><code>${escapeHtml(run.source_ref || run.ref || "-")}</code><div class="meta">config: ${escapeHtml(configMatrixLabel(run))} · ${escapeHtml(run.release_version || run.version || "")}</div></td>
             <td>
               <code>${escapeHtml(run.cloud_dir || run.error || "-")}</code>
-              ${run.status === "waiting_version_mr" ? `<div><button class="secondary small" type="button" data-continue-run="${escapeHtml(run.id)}">继续</button></div>` : ""}
+              ${renderVersionMerge(run)}
             </td>
             <td><button class="danger small" type="button" data-delete-run="${escapeHtml(run.id)}">删除</button></td>
           </tr>
@@ -366,14 +506,38 @@ function renderScheduleRuns() {
       .join("") || `<tr><td colspan="5">暂无运行记录</td></tr>`;
   const newest = state.scheduleRuns.find((run) => run.tag_name);
   if (newest?.tag_name && (!state.residentPackage || state.residentPackage.tag !== newest.tag_name)) {
+    clearResidentPackagePoll();
     state.residentPackage = {
       tag: newest.tag_name,
       status: newest.status === "published" ? "ready" : "checking",
       artifact_path: newest.cloud_dir || `/data/simos-ci/artifacts/${newest.tag_name}/resident.tar.gz`,
-      message: newest.status === "waiting_version_mr" ? "等待版本号 MR 合并" : "正在等待 resident 包状态",
+      message: ["merging_version_mr", "waiting_version_mr_retry", "auto_merge_failed", "waiting_version_mr"].includes(newest.status) ? "等待版本号 MR 自动处理" : "正在等待 resident 包状态",
     };
+    state.residentPackageRefreshedAt = null;
     renderResidentPackage();
   }
+}
+
+function renderVersionMerge(run) {
+  const versionMerge = run?.version_merge;
+  const mergeStatus = String(run?.status || "");
+  const hasMergeState = versionMerge || ["merging_version_mr", "waiting_version_mr_retry", "auto_merge_failed", "waiting_version_mr"].includes(mergeStatus);
+  if (!hasMergeState) return "";
+  if (!versionMerge) return `<div class="meta">版本号 MR 信息暂不可用</div>`;
+  const mergeLabel = versionMerge.iid ? `MR !${versionMerge.iid}` : "版本号 MR";
+  const mergeUrl = safeUrl(versionMerge.web_url);
+  const mergeIsPending = ["merging_version_mr", "waiting_version_mr_retry", "auto_merge_failed", "waiting_version_mr"].includes(mergeStatus);
+  const mergeCompleted = String(versionMerge.state || "").toLowerCase() === "merged" && !mergeIsPending;
+  const statusText = mergeCompleted ? "版本号 MR 已自动合入" : releaseRunStatusText(mergeStatus);
+  const attemptText = mergeIsPending && Number.isFinite(Number(versionMerge.attempt_count)) ? ` · 已尝试 ${Number(versionMerge.attempt_count)} 次` : "";
+  return `
+    <div class="version-merge-meta">
+      ${mergeUrl ? `<a href="${escapeHtml(mergeUrl)}" target="_blank" rel="noreferrer">${escapeHtml(mergeLabel)}</a>` : `<span>${escapeHtml(mergeLabel)}</span>`}
+      <span class="meta">${escapeHtml(statusText)}${escapeHtml(attemptText)}</span>
+      ${versionMerge.last_error ? `<div class="schedule-preview-error">${escapeHtml(versionMerge.last_error)}</div>` : ""}
+      ${mergeStatus === "auto_merge_failed" ? `<button class="secondary small" type="button" data-retry-version-merge="${escapeHtml(run.id)}">重试自动合并</button>` : ""}
+    </div>
+  `;
 }
 
 function timeFromCron(cron) {
@@ -473,6 +637,9 @@ function releaseRunStatusText(status) {
     planned: "已计划",
     precheck_failed: "预检失败",
     waiting_version_mr: "等待 MR",
+    merging_version_mr: "正在自动合并版本号 MR",
+    waiting_version_mr_retry: "等待版本号 MR 重试",
+    auto_merge_failed: "版本号 MR 自动合并失败",
     tagging: "打 Tag",
     building: "构建中",
     published: "已发布",
@@ -483,8 +650,8 @@ function releaseRunStatusText(status) {
 
 function releaseRunStatusClass(status) {
   const value = String(status || "");
-  if (["published", "building"].includes(value)) return "badge ok";
-  if (["failed", "precheck_failed", "canceled"].includes(value)) return "badge error";
+  if (["published"].includes(value)) return "badge ok";
+  if (["failed", "precheck_failed", "canceled", "auto_merge_failed"].includes(value)) return "badge error";
   return "badge muted";
 }
 
@@ -696,7 +863,7 @@ async function refreshAll() {
   if (search) params.set("search", search);
   const simosRepo = simosRepository();
   const configRepo = configRepository();
-  const [branches, tags, commonRefs, simosTags, schedules, configBranches] = await Promise.all([
+  const [branches, tags, commonRefs, simosTags, schedules, configBranches, previews] = await Promise.all([
     api(`/api/branches?${params}`),
     api(`/api/tags?${params}`),
     api("/api/common-refs").catch((error) => {
@@ -719,6 +886,10 @@ async function refreshAll() {
           return null;
         })
       : Promise.resolve(null),
+    api("/api/release-task-previews").catch((error) => {
+      appendLog("刷新下次发布预览失败", error.message);
+      return null;
+    }),
   ]);
   state.branches = branches.branches || [];
   state.tags = tags.tags || [];
@@ -726,6 +897,7 @@ async function refreshAll() {
   state.commonRefs = commonRefs;
   state.schedules = schedules?.tasks || schedules?.schedules || [];
   state.scheduleRuns = schedules?.runs || [];
+  applySchedulePreviews(previews);
   state.configBranches = configBranches?.branches || [];
   renderConfigBranchOptions();
   renderBranches();
@@ -944,15 +1116,39 @@ async function saveSchedule(form) {
   appendLog("保存自动任务", result);
   state.schedules = result.tasks || result.schedules || state.schedules;
   state.scheduleRuns = result.runs || state.scheduleRuns;
+  await refreshSchedulePreviews();
   renderSchedules();
   return result;
 }
 
 async function refreshSchedules() {
-  const data = await api("/api/release-tasks");
+  const [data, previews] = await Promise.all([
+    api("/api/release-tasks"),
+    api("/api/release-task-previews").catch((error) => {
+      appendLog("刷新下次发布预览失败", error.message);
+      return null;
+    }),
+  ]);
   state.schedules = data.tasks || data.schedules || [];
   state.scheduleRuns = data.runs || [];
+  applySchedulePreviews(previews);
   renderSchedules();
+  if (isSchedulesViewActive() && state.residentPackage?.tag) {
+    await fetchResidentPackage(state.residentPackage.tag);
+  }
+}
+
+function applySchedulePreviews(data) {
+  const previews = Array.isArray(data?.previews) ? data.previews : [];
+  state.schedulePreviews = Object.fromEntries(previews.filter((preview) => preview?.task_id).map((preview) => [preview.task_id, preview]));
+}
+
+async function refreshSchedulePreviews() {
+  try {
+    applySchedulePreviews(await api("/api/release-task-previews"));
+  } catch (error) {
+    appendLog("刷新下次发布预览失败", error.message);
+  }
 }
 
 async function dryRunSchedule() {
@@ -1002,14 +1198,12 @@ async function rerunExistingTag(form) {
   }
 }
 
-async function continueReleaseRun(runId) {
-  const result = await postJson(`/api/release-runs/${encodeURIComponent(runId)}/continue`, {});
-  $("#schedulePreview").textContent = JSON.stringify(result.run || result, null, 2);
-  appendLog("继续发版任务", result);
+async function retryVersionMerge(runId) {
+  const result = await postJson(`/api/release-runs/${encodeURIComponent(runId)}/retry-version-merge`, {});
+  setText("#schedulePreview", JSON.stringify(result.run || result, null, 2));
+  appendLog("重试版本号 MR 自动合并", result);
   await refreshSchedules();
-  if (result?.run?.tag_name) {
-    watchResidentPackage(result.run.tag_name);
-  }
+  if (result?.run?.tag_name) watchResidentPackage(result.run.tag_name);
 }
 
 async function deleteReleaseRun(runId) {
@@ -1130,10 +1324,11 @@ function bindEvents() {
     }
   });
   $("#scheduleRunsBody")?.addEventListener("click", (event) => {
-    const continueRunId = event.target.dataset.continueRun;
-    const deleteRunId = event.target.dataset.deleteRun;
-    if (continueRunId) {
-      continueReleaseRun(continueRunId).catch((error) => appendLog("继续发版任务失败", error.message));
+    const target = event.target instanceof Element ? event.target.closest("[data-retry-version-merge], [data-delete-run]") : null;
+    const retryRunId = target?.dataset.retryVersionMerge;
+    const deleteRunId = target?.dataset.deleteRun;
+    if (retryRunId) {
+      retryVersionMerge(retryRunId).catch((error) => appendLog("重试版本号 MR 自动合并失败", error.message));
     }
     if (deleteRunId) {
       deleteReleaseRun(deleteRunId).catch((error) => appendLog("删除发版运行记录失败", error.message));

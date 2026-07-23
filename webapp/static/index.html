@@ -371,6 +371,7 @@
                       <th>任务</th>
                       <th>时间</th>
                       <th>来源</th>
+                      <th>下次发布</th>
                       <th>操作</th>
                     </tr>
                   </thead>
@@ -477,11 +478,40 @@
                     <div class="eyebrow">构建时间</div>
                     <span id="residentPackageBuiltAt">-</span>
                   </div>
+                  <div>
+                    <div class="eyebrow">Pipeline</div>
+                    <span id="residentPackagePipelineSummary">-</span>
+                  </div>
+                  <div>
+                    <div class="eyebrow">构建进度</div>
+                    <span id="residentPackageProgress">-</span>
+                  </div>
+                  <div>
+                    <div class="eyebrow">最近刷新</div>
+                    <span id="residentPackageRefreshedAt">-</span>
+                  </div>
                 </div>
                 <div class="meta" id="residentPackageMeta"></div>
                 <div class="button-row">
                   <a id="residentPackagePipelineLink" class="secondary button-link hidden" href="#" target="_blank" rel="noreferrer">打开 Pipeline</a>
                   <a id="residentPackageArtifactLink" class="secondary button-link hidden" href="#" target="_blank" rel="noreferrer">打开 Artifact</a>
+                </div>
+                <div class="resident-jobs">
+                  <div class="eyebrow">Pipeline Jobs</div>
+                  <div class="table-wrap resident-jobs-table">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Job</th>
+                          <th>阶段</th>
+                          <th>状态</th>
+                          <th>时间</th>
+                          <th>链接</th>
+                        </tr>
+                      </thead>
+                      <tbody id="residentPackageJobsBody"></tbody>
+                    </table>
+                  </div>
                 </div>
               </div>
             </article>
