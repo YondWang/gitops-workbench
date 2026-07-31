@@ -221,6 +221,25 @@ class ScheduleAutomationTest(unittest.TestCase):
         runs = self.app.schedule_runs("daily-simos-resident-release")
         self.assertEqual(runs["runs"][0]["tag_name"], "fix_V3.1.25.020_202607031600")
 
+    def test_full_release_plan_and_run_preserve_component_resolution_snapshot(self) -> None:
+        result = self.app.schedule_run_now("daily-simos-resident-release", now="2026-07-04T16:00:00+08:00")
+
+        resolutions = result["plan"]["component_resolutions"]
+        self.assertEqual(len(resolutions), 1)
+        self.assertEqual(resolutions[0]["repository_id"], "simos")
+        self.assertEqual(resolutions[0]["requested_ref"], "fix")
+        self.assertEqual(resolutions[0]["resolved_ref"], "fix")
+        self.assertEqual(result["run"]["component_resolutions"], resolutions)
+        self.assertEqual(result["run"]["create_tag_payload"]["component_resolutions"], resolutions)
+
+    def test_manual_release_page_explains_feature_fallback_and_has_resolution_panel(self) -> None:
+        index = (server.STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+        app_js = (server.STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("feature/*", index)
+        self.assertIn('id="componentResolutionPanel"', index)
+        self.assertIn("renderComponentResolutions", app_js)
+
     def test_continue_after_weekly_confirmation_creates_version_mr(self) -> None:
         self.app.save_schedule({"id": "daily-simos-resident-release", "config_ref": "SIMBOT_R6_B"})
         result = self.app.schedule_run_now("daily-simos-resident-release", now="2026-07-03T16:00:00+08:00")
@@ -665,7 +684,9 @@ class ScheduleAutomationTest(unittest.TestCase):
         self.assertIn("SIMOS_CONFIG_REFS=SIMBOT_R6_B", message)
         self.assertIn("SIMOS_CONFIG_REF=SIMBOT_R6_B", message)
         self.assertIn(("create_tag", tag_name, "version-commit", message), simos_client.calls)
-        self.assertIn(("create_tag", tag_name, "fix", message), business_client.calls)
+        business_resolution = next(item for item in tagged["run"]["component_resolutions"] if item["repository_id"] == "business")
+        self.assertEqual(business_resolution["resolved_ref"], "fix")
+        self.assertIn(("create_tag", tag_name, business_resolution["commit_id"], message), business_client.calls)
 
     def test_manual_version_number_is_not_incremented_by_weekly_policy(self) -> None:
         self.app.save_schedule(
@@ -769,7 +790,8 @@ class ScheduleAutomationTest(unittest.TestCase):
         tagged = self.app.continue_release_run(result["run"]["id"])
         tag_name = "fix_V3.1.25.045_202607081645"
         message = tagged["run"]["create_tag_payload"]["message"]
-        self.assertIn(("create_tag", tag_name, "fix", message), business_client.calls)
+        business_resolution = next(item for item in tagged["run"]["component_resolutions"] if item["repository_id"] == "business")
+        self.assertIn(("create_tag", tag_name, business_resolution["commit_id"], message), business_client.calls)
         self.assertFalse(any(call[0] == "create_tag" for call in config_client.calls))
 
     def test_deleting_last_schedule_leaves_empty_list(self) -> None:

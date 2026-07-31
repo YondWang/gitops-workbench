@@ -15,6 +15,7 @@ const state = {
   residentPackageRefreshedAt: null,
   schedules: [],
   scheduleRuns: [],
+  selectedScheduleRunId: null,
   schedulePreviews: {},
   configBranches: [],
 };
@@ -469,6 +470,31 @@ function renderScheduleList() {
       .join("") || `<tr><td colspan="5">暂无自动任务</td></tr>`;
 }
 
+function renderComponentResolutions(resolutions) {
+  const panel = $("#componentResolutionPanel");
+  const content = $("#componentResolutionContent");
+  const rows = Array.isArray(resolutions) ? resolutions : [];
+  panel?.classList.toggle("hidden", rows.length === 0);
+  if (!content || rows.length === 0) return;
+
+  content.innerHTML = `
+    <table>
+      <thead><tr><th>仓库</th><th>请求来源</th><th>实际来源</th><th>模式</th><th>Commit</th></tr></thead>
+      <tbody>${rows
+        .map(
+          (item) => `
+            <tr>
+              <td>${escapeHtml(item.repository_name || item.repository_id || "-")}</td>
+              <td><code>${escapeHtml(item.requested_ref || "-")}</code></td>
+              <td><code>${escapeHtml(item.resolved_ref || "-")}</code></td>
+              <td>${escapeHtml(item.resolution === "fallback_release" ? "回退 release" : "请求分支")}</td>
+              <td><code>${escapeHtml(String(item.commit_id || "").slice(0, 12) || "-")}</code></td>
+            </tr>`,
+        )
+        .join("")}</tbody>
+    </table>`;
+}
+
 function renderSchedulePreview(preview) {
   if (!preview) return `<span class="meta">暂无预览</span>`;
   if (preview.error || preview.ok === false) {
@@ -486,12 +512,13 @@ function renderSchedulePreview(preview) {
 function renderScheduleRuns() {
   const body = $("#scheduleRunsBody");
   if (!body) return;
+  const selectedRun = selectedResidentRun();
   body.innerHTML =
     state.scheduleRuns
       .slice(0, 20)
       .map(
         (run) => `
-          <tr>
+          <tr class="${run.id === selectedRun?.id ? "selected-schedule-run" : ""}"${run.tag_name ? ` data-select-resident-run="${escapeHtml(run.id)}" role="button" tabindex="0" aria-selected="${run.id === selectedRun?.id}"` : ""}>
             <td><span class="${releaseRunStatusClass(run.status)}">${escapeHtml(releaseRunStatusText(run.status))}</span></td>
             <td><code>${escapeHtml(run.tag_name || "-")}</code><div class="meta">${escapeHtml(run.started_at || "")}</div></td>
             <td><code>${escapeHtml(run.source_ref || run.ref || "-")}</code><div class="meta">config: ${escapeHtml(configMatrixLabel(run))} · ${escapeHtml(run.release_version || run.version || "")}</div></td>
@@ -504,18 +531,40 @@ function renderScheduleRuns() {
         `,
       )
       .join("") || `<tr><td colspan="5">暂无运行记录</td></tr>`;
-  const newest = state.scheduleRuns.find((run) => run.tag_name);
-  if (newest?.tag_name && (!state.residentPackage || state.residentPackage.tag !== newest.tag_name)) {
+  renderComponentResolutions(selectedRun?.component_resolutions);
+  if (!selectedRun?.tag_name) {
+    clearResidentPackagePoll();
+    state.residentPackage = null;
+    state.residentPackageRefreshedAt = null;
+    renderResidentPackage();
+    return;
+  }
+  if (!state.residentPackage || state.residentPackage.tag !== selectedRun.tag_name) {
     clearResidentPackagePoll();
     state.residentPackage = {
-      tag: newest.tag_name,
-      status: newest.status === "published" ? "ready" : "checking",
-      artifact_path: newest.cloud_dir || `/data/simos-ci/artifacts/${newest.tag_name}/resident.tar.gz`,
-      message: ["merging_version_mr", "waiting_version_mr_retry", "auto_merge_failed", "waiting_version_mr"].includes(newest.status) ? "等待版本号 MR 自动处理" : "正在等待 resident 包状态",
+      tag: selectedRun.tag_name,
+      status: selectedRun.status === "published" ? "ready" : "checking",
+      artifact_path: selectedRun.cloud_dir || `/data/simos-ci/artifacts/${selectedRun.tag_name}/resident.tar.gz`,
+      message: ["merging_version_mr", "waiting_version_mr_retry", "auto_merge_failed", "waiting_version_mr"].includes(selectedRun.status) ? "等待版本号 MR 自动处理" : "正在等待 resident 包状态",
     };
     state.residentPackageRefreshedAt = null;
     renderResidentPackage();
   }
+}
+
+function selectedResidentRun() {
+  const selected = state.scheduleRuns.find((run) => run.id === state.selectedScheduleRunId && run.tag_name);
+  const run = selected || state.scheduleRuns.find((item) => item.tag_name) || null;
+  state.selectedScheduleRunId = run?.id || null;
+  return run;
+}
+
+function selectResidentRun(runId) {
+  const run = state.scheduleRuns.find((item) => item.id === runId && item.tag_name);
+  if (!run) return;
+  state.selectedScheduleRunId = run.id;
+  renderScheduleRuns();
+  watchResidentPackage(run.tag_name);
 }
 
 function renderVersionMerge(run) {
@@ -1133,8 +1182,9 @@ async function refreshSchedules() {
   state.scheduleRuns = data.runs || [];
   applySchedulePreviews(previews);
   renderSchedules();
-  if (isSchedulesViewActive() && state.residentPackage?.tag) {
-    await fetchResidentPackage(state.residentPackage.tag);
+  const selectedRun = selectedResidentRun();
+  if (isSchedulesViewActive() && selectedRun?.tag_name) {
+    await fetchResidentPackage(selectedRun.tag_name);
   }
 }
 
@@ -1156,6 +1206,7 @@ async function dryRunSchedule() {
   await saveSchedule($("#scheduleForm"));
   const result = await postJson(`/api/release-tasks/${encodeURIComponent(schedule.id)}/dry-run`, {});
   $("#schedulePreview").textContent = JSON.stringify(result.plan || result, null, 2);
+  renderComponentResolutions(result.plan?.component_resolutions);
   if (result?.plan?.tag_name) {
     $("#scheduleTagPreview").textContent = result.plan.tag_name;
   }
@@ -1180,6 +1231,7 @@ async function runManualRelease(form) {
   delete body.dependency_ref;
   const result = await postJson("/api/release-runs/manual", body);
   $("#schedulePreview").textContent = JSON.stringify(result.run || result, null, 2);
+  renderComponentResolutions(result.plan?.component_resolutions || result.run?.component_resolutions);
   appendLog("手动完整发版构建", result);
   await refreshSchedules();
   if (result?.run?.tag_name) {
@@ -1329,10 +1381,21 @@ function bindEvents() {
     const deleteRunId = target?.dataset.deleteRun;
     if (retryRunId) {
       retryVersionMerge(retryRunId).catch((error) => appendLog("重试版本号 MR 自动合并失败", error.message));
+      return;
     }
     if (deleteRunId) {
       deleteReleaseRun(deleteRunId).catch((error) => appendLog("删除发版运行记录失败", error.message));
+      return;
     }
+    const selected = event.target instanceof Element ? event.target.closest("[data-select-resident-run]") : null;
+    if (selected?.dataset.selectResidentRun) selectResidentRun(selected.dataset.selectResidentRun);
+  });
+  $("#scheduleRunsBody")?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    const selected = event.target instanceof Element ? event.target.closest("[data-select-resident-run]") : null;
+    if (!selected?.dataset.selectResidentRun) return;
+    event.preventDefault();
+    selectResidentRun(selected.dataset.selectResidentRun);
   });
 
   $("#repositoryForm").addEventListener("submit", (event) => {

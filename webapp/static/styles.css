@@ -215,6 +215,32 @@ button {
   text-decoration: none;
 }
 
+.field-hint {
+  margin: -4px 0 12px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.component-resolution {
+  margin-top: 12px;
+  overflow-x: auto;
+}
+
+.component-resolution table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.component-resolution th,
+.component-resolution td {
+  padding: 7px 8px;
+  border-top: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
 .small {
   min-height: 30px;
   padding: 0 8px;
@@ -540,6 +566,20 @@ textarea {
 .schedule-table {
   max-height: 260px;
   margin-bottom: 16px;
+}
+
+#scheduleRunsBody tr[data-select-resident-run] {
+  cursor: pointer;
+}
+
+#scheduleRunsBody tr[data-select-resident-run]:hover td,
+#scheduleRunsBody tr.selected-schedule-run td {
+  background: #e6fffb;
+}
+
+#scheduleRunsBody tr[data-select-resident-run]:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
 }
 
 .schedule-preview-cell {

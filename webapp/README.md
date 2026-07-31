@@ -39,6 +39,14 @@ bugfix/<版本号>
 - `bugfix/<版本号>` 稳定节点在自身分支打 Tag 进行提测或发版。
 - Bugfix 发版后，修复内容必须通过 GitLab MR 同步回 `release`。
 
+## 完整发版来源解析
+
+完整发版以 SimOS 的来源分支为主线。`fix` 与 `release` 要求所有业务仓库都具有同名分支；`feature/*` 则逐仓库优先使用同名 Feature 分支，缺失时使用该仓库 `release` 的最新 commit。
+
+WebApp 会在发版计划生成时记录每个仓库实际使用的来源分支和 commit。版本 MR、重试与最终 Tag 都复用这份快照，因此等待版本 MR 合并期间其他分支推进不会改变本次包的组件组合。SimOS Tag 会固化这些子模块 commit，现有 CI 继续按该 Tag 构建，无需修改 CI 文件。
+
+版本号按精确 SimOS 来源分支独立维护：`fix`、`release`、`feature/ABC` 与 `feature/XYZ` 的版本文件和版本兜底值互不共享。
+
 ## 迁移说明
 
 当前项目如果仍存在 `fix` 和 `dev`：

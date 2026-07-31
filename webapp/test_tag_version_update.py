@@ -747,6 +747,118 @@ version:1.0.0
         self.assertEqual([item["name"] for item in result["branches"]], ["bugfix/V1.0.0", "release"])
         self.assertEqual([item["name"] for item in result["tags"]], ["v1"])
 
+    def test_feature_release_resolves_each_component_or_falls_back_to_release(self) -> None:
+        self.simos_client._branch_names = ["release", "feature/ABC"]
+        self.business_client._branch_names = ["release", "feature/ABC"]
+        self.workbench_client._branch_names = ["release"]
+
+        resolutions = self.app.resolve_full_release_components("feature/ABC")
+
+        by_repository = {item["repository_id"]: item for item in resolutions}
+        self.assertEqual(by_repository["simos"]["resolved_ref"], "feature/ABC")
+        self.assertEqual(by_repository["simos"]["resolution"], "simos_source")
+        self.assertEqual(by_repository["business"]["resolved_ref"], "feature/ABC")
+        self.assertEqual(by_repository["business"]["resolution"], "requested_ref")
+        self.assertEqual(by_repository["gitops-workbench"]["resolved_ref"], "release")
+        self.assertEqual(by_repository["gitops-workbench"]["resolution"], "fallback_release")
+        self.assertEqual(by_repository["gitops-workbench"]["commit_id"], "gitops-workbench-new")
+
+    def test_feature_release_fails_when_missing_component_has_no_release(self) -> None:
+        self.simos_client._branch_names = ["release", "feature/ABC"]
+        self.business_client._branch_names = ["release", "feature/ABC"]
+        self.workbench_client._branch_names = []
+
+        with self.assertRaisesRegex(ValueError, "release 分支不存在"):
+            self.app.resolve_full_release_components("feature/ABC")
+
+    def test_fix_release_does_not_fall_back_when_a_component_branch_is_missing(self) -> None:
+        self.simos_client._branch_names = ["fix"]
+        self.business_client._branch_names = ["fix"]
+        self.workbench_client._branch_names = ["release"]
+
+        with self.assertRaisesRegex(ValueError, "不存在来源分支：fix"):
+            self.app.resolve_full_release_components("fix")
+
+    def test_feature_release_version_plan_uses_the_snapshotted_fallback_commit(self) -> None:
+        self.simos_client._branch_names = ["release", "feature/ABC"]
+        self.business_client._branch_names = ["release", "feature/ABC"]
+        self.workbench_client._branch_names = ["release"]
+        resolutions = self.app.resolve_full_release_components("feature/ABC")
+        fallback = next(item for item in resolutions if item["repository_id"] == "gitops-workbench")
+        fallback["commit_id"] = "release-commit-captured-before-mr"
+
+        result = self.app.create_tag(
+            {
+                "scope": "all",
+                "ref": "feature/ABC",
+                "tag_name": "feature-ABC_F1.0.2_202607281000",
+                "message": "feature build",
+                "update_version": True,
+                "component_resolutions": resolutions,
+            }
+        )
+
+        self.assertEqual(result["phase"], "waiting_version_mr")
+        precheck = {item["repository"]["id"]: item["context"] for item in result["precheck"]}
+        self.assertEqual(precheck["gitops-workbench"]["ref"], "release")
+        self.assertEqual(precheck["gitops-workbench"]["ref_commit_id"], "release-commit-captured-before-mr")
+
+    def test_feature_release_plan_uses_fallback_snapshot_when_calculating_version(self) -> None:
+        localization_repo = RepositoryConfig(
+            id="localization",
+            name="localization",
+            base_url="https://gitlab.example",
+            project="group/localization",
+            token_env="GITLAB_TOKEN",
+        )
+        localization_client = FakeClient("localization", version_info=None, call_log=self.call_log)
+        self.app.store.repos = [self.business_repo, localization_repo, self.simos_repo]
+        self.clients["localization"] = localization_client
+        self.simos_client._branch_names = ["release", "feature/release_multifloor"]
+        self.business_client._branch_names = ["release", "feature/release_multifloor"]
+        localization_client._branch_names = ["release"]
+
+        original_branch = localization_client.branch
+
+        def branch_with_only_release(name: str) -> dict[str, Any]:
+            if name != "release":
+                raise server.GitLabError("Branch Not Found", status=404, payload={})
+            return original_branch(name)
+
+        with mock.patch.object(localization_client, "branch", side_effect=branch_with_only_release):
+            plan = self.app.resolve_release_plan(
+                {**server.DEFAULT_SCHEDULE, "id": "feature-release", "default_ref": "feature/release_multifloor"},
+                now="2026-07-04T16:00:00+08:00",
+            )
+
+        fallback = next(item for item in plan["component_resolutions"] if item["repository_id"] == "localization")
+        self.assertEqual(fallback["resolved_ref"], "release")
+
+    def test_version_fallbacks_are_isolated_by_exact_source_branch(self) -> None:
+        server.save_version_settings({"base_versions": {"fix": "3.1.24.020"}})
+        server.save_version_settings({"base_versions": {"release": "3.2.0.0", "feature/ABC": "3.2.0.1"}})
+
+        settings = server.load_version_settings()
+
+        self.assertEqual(settings["base_versions"]["fix"], "3.1.24.020")
+        self.assertEqual(settings["base_versions"]["release"], "3.2.0.0")
+        self.assertEqual(settings["base_versions"]["feature/ABC"], "3.2.0.1")
+
+    def test_default_tag_version_uses_only_the_requested_branch_fallback(self) -> None:
+        self.simos_client.version_info = None
+        server.save_version_settings(
+            {"base_versions": {"fix": "3.1.24.020", "feature/ABC": "3.2.0.1"}}
+        )
+
+        self.assertEqual(
+            self.app.default_tag_version_for_request({"scope": "all"}, "feature/ABC", False, ""),
+            "3.2.0.1",
+        )
+        self.assertEqual(
+            self.app.default_tag_version_for_request({"scope": "all"}, "fix", False, ""),
+            "3.1.24.020",
+        )
+
     def test_render_pkg_info_preserves_existing_branch_lines(self) -> None:
         previous_pkg_info = """simos_branch:fix
 business_branch:fix

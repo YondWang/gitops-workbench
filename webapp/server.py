@@ -362,6 +362,7 @@ class GitOpsApp:
                         "version": plan.get("version", ""),
                         "tag_name": plan.get("tag_name", ""),
                         "source_ref": plan.get("source_ref", ""),
+                        "component_resolutions": plan.get("component_resolutions", []),
                         "config_matrix": plan.get("config_matrix", []),
                         "calculated_at": plan.get("planned_at", ""),
                         "plan": plan,
@@ -588,14 +589,64 @@ class GitOpsApp:
     def resolve_schedule_plan(self, schedule: dict[str, Any], now: str | None = None) -> dict[str, Any]:
         return self.resolve_release_plan(schedule, now)
 
+    @staticmethod
+    def is_feature_release_ref(ref: str) -> bool:
+        return ref.startswith("feature/") and len(ref) > len("feature/")
+
+    def resolve_full_release_components(self, requested_ref: str) -> list[dict[str, str]]:
+        requested_ref = require_ref_name(requested_ref, "完整发版来源分支")
+        repositories = self.release_repositories()
+        if not repositories:
+            raise ValueError("没有启用的业务仓库")
+
+        resolutions: list[dict[str, str]] = []
+        for repository in repositories:
+            target = self.target(repository.id)
+            target.client.project()
+            branches = set(target.client.branch_names())
+
+            if is_simos_repo(repository):
+                if requested_ref not in branches:
+                    raise ValueError(f"{repository.id} 不存在来源分支：{requested_ref}")
+                resolved_ref = requested_ref
+                resolution = "simos_source"
+            elif self.is_feature_release_ref(requested_ref) and requested_ref not in branches:
+                if "release" not in branches:
+                    raise ValueError(f"{repository.id} 不存在 Feature 分支 {requested_ref}，且 release 分支不存在")
+                resolved_ref = "release"
+                resolution = "fallback_release"
+            else:
+                if requested_ref not in branches:
+                    raise ValueError(f"{repository.id} 不存在来源分支：{requested_ref}")
+                resolved_ref = requested_ref
+                resolution = "requested_ref"
+
+            commit = target.client.branch(resolved_ref).get("commit") or {}
+            commit_id = str(commit.get("id") or commit.get("short_id") or "")
+            if not commit_id:
+                raise ValueError(f"{repository.id} 未读取到 {resolved_ref} 的 commit")
+            resolutions.append(
+                {
+                    "repository_id": repository.id,
+                    "repository_name": repository.name,
+                    "component": version_component(repository),
+                    "requested_ref": requested_ref,
+                    "resolved_ref": resolved_ref,
+                    "resolution": resolution,
+                    "commit_id": commit_id,
+                }
+            )
+        return resolutions
+
     def resolve_release_plan(self, schedule: dict[str, Any], now: str | None = None) -> dict[str, Any]:
         target = self.optional_simos_target()
         if target is None:
             raise ValueError("发版任务需要启用 simos 仓库")
         local_now = coerce_schedule_now(schedule, parse_schedule_now(now) if now else None)
         ref = self.resolve_schedule_ref(schedule, target)
+        component_resolutions = self.resolve_full_release_components(ref)
         version_prefix = resolve_version_prefix(ref, schedule)
-        version_number = self.resolve_release_version_number(schedule, ref, version_prefix)
+        version_number = self.resolve_release_version_number(schedule, ref, version_prefix, component_resolutions)
         if str(schedule.get("version_source") or "simos_version_info") == "manual":
             weekly_version = {
                 "version_number": version_number,
@@ -621,6 +672,7 @@ class GitOpsApp:
             "project": target.repo.project,
             "ref": ref,
             "source_ref": ref,
+            "component_resolutions": component_resolutions,
             "config_ref": config_ref,
             "source_ref_slug": source_ref_slug,
             "version": release_version,
@@ -675,11 +727,21 @@ class GitOpsApp:
             return version
         return normalize_version_number(self.version_from_version_info(target, ref))
 
-    def resolve_release_version_number(self, schedule: dict[str, Any], ref: str, version_prefix: str) -> str:
+    def resolve_release_version_number(
+        self,
+        schedule: dict[str, Any],
+        ref: str,
+        version_prefix: str,
+        component_resolutions: list[dict[str, str]] | None = None,
+    ) -> str:
         if str(schedule.get("version_source") or "simos_version_info") == "manual":
             return self.resolve_schedule_version(schedule, self.optional_simos_target() or self.target("simos"), ref)
         version = self.default_tag_version_for_request(
-            {"scope": "all", "version_prefix": version_prefix},
+            {
+                "scope": "all",
+                "version_prefix": version_prefix,
+                "component_resolutions": component_resolutions or [],
+            },
             ref,
             True,
             "",
@@ -701,6 +763,7 @@ class GitOpsApp:
             "base_version_is_final": True,
             "version_prefix": plan["version_prefix"],
             "auto_merge_version_mr": True,
+            "component_resolutions": list(plan.get("component_resolutions") or []),
         }
         if bool(plan.get("config_matrix_enabled", True)) and not plan.get("config_matrix"):
             result = {
@@ -764,6 +827,7 @@ class GitOpsApp:
             "execution_type": "full_release",
             "status": status,
             "source_ref": plan.get("source_ref") or plan.get("ref"),
+            "component_resolutions": list(plan.get("component_resolutions") or []),
             "config_ref": plan.get("config_ref", ""),
             "config_matrix": plan.get("config_matrix", []),
             "config_matrix_value": plan.get("config_matrix_value", ""),
@@ -791,6 +855,7 @@ class GitOpsApp:
                 "base_version_is_final": True,
                 "version_prefix": plan.get("version_prefix"),
                 "auto_merge_version_mr": True,
+                "component_resolutions": list(plan.get("component_resolutions") or []),
             },
         }
         version_update = result.get("version_update") or {}
@@ -1232,15 +1297,26 @@ class GitOpsApp:
         raw_tag_name = str(payload.get("tag_name", "")).strip()
         tag_name = require_ref_name(raw_tag_name or self.default_tag_name_for_request(payload, ref, update_version, base_version), "Tag 名称")
         message = str(payload.get("message", "")).strip() or f"Tag {tag_name} from {ref}"
+        resolutions = component_resolution_by_repository(payload.get("component_resolutions"))
 
         def precheck(target: OperationTarget) -> dict[str, Any]:
             branch_names = target.client.branch_names()
             tag_names = target.client.tag_names()
             refs = set(branch_names) | set(tag_names)
-            target_ref = ref
             context: dict[str, Any] = {"source_ref": ref, "tag_name": tag_name, "message": message, "update_version": update_version}
-            if target_ref not in refs:
-                raise ValueError(f"Tag 来源不存在：{target_ref}")
+            resolution = resolutions.get(target.repo.id)
+            if resolution:
+                if resolution["requested_ref"] != ref:
+                    raise ValueError(f"{target.repo.id} 的组件来源与请求分支不一致")
+                target_ref = resolution["resolved_ref"]
+                if is_simos_repo(target.repo) and ref not in branch_names:
+                    raise ValueError("更新版本号时 Tag 来源必须是分支")
+                context["ref_commit_id"] = resolution["commit_id"]
+                context["component_resolution"] = resolution
+            else:
+                target_ref = ref
+                if target_ref not in refs:
+                    raise ValueError(f"Tag 来源不存在：{target_ref}")
             if tag_name in tag_names:
                 raise ValueError(f"Tag 已存在：{tag_name}")
             context["ref"] = target_ref
@@ -1259,7 +1335,10 @@ class GitOpsApp:
                 "message": context["message"],
                 "update_version": context["update_version"],
             }
-            result["tag"] = target.client.create_tag(context["tag_name"], context["ref"], context["message"])
+            tag_ref = context.get("ref_commit_id") or context["ref"]
+            result["tag"] = target.client.create_tag(context["tag_name"], tag_ref, context["message"])
+            if context.get("component_resolution"):
+                result["component_resolution"] = context["component_resolution"]
             return result
 
         if update_version:
@@ -1373,7 +1452,7 @@ class GitOpsApp:
         overall_ok = True
         for target in targets:
             context = contexts[target.repo.id]
-            tag_ref = version_update.get("tag_ref") if is_simos_repo(target.repo) else context["ref"]
+            tag_ref = version_update.get("tag_ref") if is_simos_repo(target.repo) else context.get("ref_commit_id") or context["ref"]
             try:
                 result = {
                     "ref": context["ref"],
@@ -1382,6 +1461,8 @@ class GitOpsApp:
                     "update_version": context["update_version"],
                     "tag": target.client.create_tag(context["tag_name"], tag_ref or context["ref"], context["message"]),
                 }
+                if context.get("component_resolution"):
+                    result["component_resolution"] = context["component_resolution"]
                 if is_simos_repo(target.repo):
                     self.save_version_update_default(version_update)
                     result["version_update"] = version_update
@@ -1423,6 +1504,7 @@ class GitOpsApp:
         new_version = apply_version_prefix(base_version, prefix) if base_version and base_version_is_final else apply_version_prefix(bump_version(previous_version), prefix)
         summary = {
             "updated": not version_already_current,
+            "ref": ref,
             "component": component,
             "previous_version": previous_version,
             "version": new_version,
@@ -1529,10 +1611,10 @@ class GitOpsApp:
 
     @staticmethod
     def context_commit_id(target: OperationTarget, context: dict[str, Any]) -> str:
-        if "_version_plan" in context:
-            return str(context["_version_plan"]["summary"]["source_commit"])
         if context.get("ref_commit_id"):
             return str(context["ref_commit_id"])
+        if "_version_plan" in context:
+            return str(context["_version_plan"]["summary"]["source_commit"])
         branch = target.client.branch(context["ref"])
         commit = branch.get("commit") or {}
         commit_id = str(commit.get("id") or commit.get("short_id") or "")
@@ -1669,7 +1751,11 @@ class GitOpsApp:
     def save_version_update_default(self, version_update: dict[str, Any]) -> None:
         base_version = normalize_optional_version(str(version_update.get("base_version", "")))
         if base_version:
-            save_version_settings({"base_version": base_version})
+            ref = str(version_update.get("ref") or "").strip()
+            settings: dict[str, Any] = {"base_version": base_version}
+            if ref:
+                settings["base_versions"] = {ref: base_version}
+            save_version_settings(settings)
 
     def commit_version_update(self, target: OperationTarget, version_plan: dict[str, Any]) -> dict[str, Any]:
         summary = dict(version_plan["summary"])
@@ -1747,6 +1833,7 @@ class GitOpsApp:
     def default_tag_version_for_request(self, payload: dict[str, Any], ref: str, update_version: bool, base_version: str) -> str:
         targets = self.targets(payload)
         simos_target = next((target for target in targets if is_simos_repo(target.repo)), None) or self.optional_simos_target()
+        resolutions = component_resolution_by_repository(payload.get("component_resolutions"))
         requested_prefix = normalize_version_prefix(str(payload.get("version_prefix") or resolve_version_prefix(ref))) if update_version else ""
         if update_version:
             if simos_target is None:
@@ -1755,6 +1842,9 @@ class GitOpsApp:
             contexts: dict[str, dict[str, Any]] = {}
             for target in targets:
                 context: dict[str, Any] = {"ref": ref}
+                resolution = resolutions.get(target.repo.id)
+                if resolution and resolution["requested_ref"] == ref:
+                    context["ref_commit_id"] = resolution["commit_id"]
                 if target.repo.id == simos_target.repo.id:
                     context["_version_plan"] = version_plan
                 contexts[target.repo.id] = context
@@ -1773,7 +1863,10 @@ class GitOpsApp:
             if version:
                 return version
 
-        saved_version = load_version_settings().get("base_version", "")
+        settings = load_version_settings()
+        saved_version = str(settings.get("base_versions", {}).get(ref, ""))
+        if not saved_version and not update_version:
+            saved_version = str(settings.get("base_version", ""))
         if saved_version:
             return saved_version
 
@@ -1940,6 +2033,29 @@ def parse_tag_names(value: Any) -> list[str]:
     if not tags:
         raise ValueError("请至少输入一个 Tag")
     return tags
+
+
+def component_resolution_by_repository(value: Any) -> dict[str, dict[str, str]]:
+    if not isinstance(value, list):
+        return {}
+
+    required_fields = ("repository_id", "requested_ref", "resolved_ref", "commit_id")
+    result: dict[str, dict[str, str]] = {}
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        normalized = {key: str(item.get(key) or "").strip() for key in required_fields}
+        if not all(normalized.values()):
+            continue
+        normalized.update(
+            {
+                "repository_name": str(item.get("repository_name") or "").strip(),
+                "component": str(item.get("component") or "").strip(),
+                "resolution": str(item.get("resolution") or "").strip(),
+            }
+        )
+        result[normalized["repository_id"]] = normalized
+    return result
 
 
 def require_resident_tag(value: str) -> str:
@@ -2137,18 +2253,38 @@ def version_hint_from_ref(value: str) -> str:
     return normalize_optional_version(match.group(0))
 
 
-def load_version_settings() -> dict[str, str]:
+def load_version_settings() -> dict[str, Any]:
     try:
         data = json.loads(VERSION_SETTINGS_PATH.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
         data = {}
-    base_version = normalize_optional_version(str(data.get("base_version", "")))
-    return {"base_version": base_version}
+    if not isinstance(data, dict):
+        data = {}
+    raw_base_versions = data.get("base_versions")
+    base_versions = {
+        str(ref): version
+        for ref, value in (raw_base_versions.items() if isinstance(raw_base_versions, dict) else [])
+        if (version := normalize_optional_version(str(value)))
+    }
+    return {
+        "base_version": normalize_optional_version(str(data.get("base_version", ""))),
+        "base_versions": base_versions,
+    }
 
 
-def save_version_settings(settings: dict[str, str]) -> None:
+def save_version_settings(settings: dict[str, Any]) -> None:
     current = load_version_settings()
-    current.update({key: value for key, value in settings.items() if value})
+    base_version = normalize_optional_version(str(settings.get("base_version", "")))
+    if base_version:
+        current["base_version"] = base_version
+    supplied_base_versions = settings.get("base_versions")
+    if isinstance(supplied_base_versions, dict):
+        current_base_versions = dict(current.get("base_versions") or {})
+        for ref, value in supplied_base_versions.items():
+            version = normalize_optional_version(str(value))
+            if version:
+                current_base_versions[str(ref)] = version
+        current["base_versions"] = current_base_versions
     VERSION_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(current, ensure_ascii=False, indent=2)
     VERSION_SETTINGS_PATH.write_text(payload + chr(10), encoding="utf-8")

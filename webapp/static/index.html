@@ -386,6 +386,10 @@
                   代码来源 ref
                   <input name="source_ref" value="fix" required />
                 </label>
+                <p class="field-hint">
+                  <code>feature/*</code> 会逐仓库优先使用同名 Feature；缺失时使用该仓库 <code>release</code>。
+                  <code>fix</code> 与 <code>release</code> 必须在所有业务仓库存在。
+                </p>
                 <fieldset class="inline-options" data-config-matrix>
                   <legend>构建配置</legend>
                   <label><input type="checkbox" name="config_matrix" value="SIMBOT_R6_A:360" checked /> SIMBOT_R6_A / 360</label>
@@ -456,6 +460,10 @@
                 </table>
               </div>
               <pre id="schedulePreview" class="terminal compact">暂无试运行结果。</pre>
+              <div id="componentResolutionPanel" class="component-resolution hidden" aria-live="polite">
+                <div class="eyebrow">本次组件实际来源</div>
+                <div id="componentResolutionContent"></div>
+              </div>
               <div id="residentPackagePanel" class="resident-package hidden" aria-live="polite">
                 <div class="panel-title compact-title">
                   <h2>resident 包状态</h2>
