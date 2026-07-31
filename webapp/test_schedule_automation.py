@@ -190,6 +190,7 @@ class ScheduleAutomationTest(unittest.TestCase):
         self.assertEqual(schedule["cron"], "0 16 * * *")
         self.assertEqual(schedule["timezone"], "Asia/Shanghai")
         self.assertEqual(schedule["cloud_category"], "车机/CI自动构建")
+        self.assertEqual(schedule["feature_fallback_ref"], "release")
         self.assertEqual(
             [(item["config_ref"], item["label"], item["enabled"]) for item in schedule["config_matrix"]],
             [("SIMBOT_R6_A", "360", True), ("SIMBOT_R6_B", "360s", True)],
@@ -237,8 +238,39 @@ class ScheduleAutomationTest(unittest.TestCase):
         app_js = (server.STATIC_ROOT / "app.js").read_text(encoding="utf-8")
 
         self.assertIn("feature/*", index)
+        self.assertEqual(index.count('name="feature_fallback_ref"'), 2)
         self.assertIn('id="componentResolutionPanel"', index)
         self.assertIn("renderComponentResolutions", app_js)
+        self.assertIn('item.resolution === "fallback_ref"', app_js)
+
+    def test_schedule_persists_feature_fallback_ref(self) -> None:
+        saved = self.app.save_schedule(
+            {
+                "id": "daily-simos-resident-release",
+                "feature_fallback_ref": "bugfix/V1.2.3",
+            }
+        )
+
+        self.assertEqual(saved["task"]["feature_fallback_ref"], "bugfix/V1.2.3")
+        self.assertEqual(self.app.get_release_task("daily-simos-resident-release")["feature_fallback_ref"], "bugfix/V1.2.3")
+
+    def test_feature_fallback_ref_defaults_to_release_and_requires_a_valid_ref(self) -> None:
+        self.assertEqual(server.normalize_release_task({"id": "fallback-default"})["feature_fallback_ref"], "release")
+
+        with self.assertRaisesRegex(ValueError, "Feature 缺失时回退分支"):
+            server.normalize_release_task({"id": "fallback-invalid", "feature_fallback_ref": "invalid ref"})
+
+    def test_manual_release_retains_feature_fallback_ref_in_task_and_plan(self) -> None:
+        result = self.app.manual_release_run(
+            {
+                "source_ref": "fix",
+                "feature_fallback_ref": "bugfix/V1.2.3",
+                "now": "2026-07-04T16:00:00+08:00",
+            }
+        )
+
+        self.assertEqual(result["task"]["feature_fallback_ref"], "bugfix/V1.2.3")
+        self.assertEqual(result["plan"]["feature_fallback_ref"], "bugfix/V1.2.3")
 
     def test_continue_after_weekly_confirmation_creates_version_mr(self) -> None:
         self.app.save_schedule({"id": "daily-simos-resident-release", "config_ref": "SIMBOT_R6_B"})

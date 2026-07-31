@@ -487,7 +487,11 @@ function renderComponentResolutions(resolutions) {
               <td>${escapeHtml(item.repository_name || item.repository_id || "-")}</td>
               <td><code>${escapeHtml(item.requested_ref || "-")}</code></td>
               <td><code>${escapeHtml(item.resolved_ref || "-")}</code></td>
-              <td>${escapeHtml(item.resolution === "fallback_release" ? "回退 release" : "请求分支")}</td>
+              <td>${escapeHtml(
+                item.resolution === "fallback_release" || item.resolution === "fallback_ref"
+                  ? `回退 ${item.resolved_ref || "-"}`
+                  : "请求分支",
+              )}</td>
               <td><code>${escapeHtml(String(item.commit_id || "").slice(0, 12) || "-")}</code></td>
             </tr>`,
         )
@@ -612,6 +616,7 @@ function fillScheduleForm(schedule = null) {
     daily_time: "16:00",
     source_ref_strategy: "fixed_ref",
     default_ref: "fix",
+    feature_fallback_ref: "release",
     config_ref: "",
     config_matrix_enabled: true,
     config_matrix: [
