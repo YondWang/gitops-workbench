@@ -763,6 +763,25 @@ version:1.0.0
         self.assertEqual(by_repository["gitops-workbench"]["resolution"], "fallback_release")
         self.assertEqual(by_repository["gitops-workbench"]["commit_id"], "gitops-workbench-new")
 
+    def test_feature_release_resolves_missing_component_to_selected_fallback_ref(self) -> None:
+        self.simos_client._branch_names = ["release", "feature/ABC"]
+        self.business_client._branch_names = ["release", "feature/ABC"]
+        self.workbench_client._branch_names = ["release", "bugfix/V1.2.3"]
+
+        resolutions = self.app.resolve_full_release_components("feature/ABC", "bugfix/V1.2.3")
+
+        by_repository = {item["repository_id"]: item for item in resolutions}
+        self.assertEqual(by_repository["gitops-workbench"]["resolved_ref"], "bugfix/V1.2.3")
+        self.assertEqual(by_repository["gitops-workbench"]["resolution"], "fallback_ref")
+
+    def test_feature_release_fails_when_selected_fallback_ref_is_missing(self) -> None:
+        self.simos_client._branch_names = ["release", "feature/ABC"]
+        self.business_client._branch_names = ["release", "feature/ABC"]
+        self.workbench_client._branch_names = ["release"]
+
+        with self.assertRaisesRegex(ValueError, "gitops-workbench.*回退分支不存在：bugfix/V1.2.3"):
+            self.app.resolve_full_release_components("feature/ABC", "bugfix/V1.2.3")
+
     def test_feature_release_fails_when_missing_component_has_no_release(self) -> None:
         self.simos_client._branch_names = ["release", "feature/ABC"]
         self.business_client._branch_names = ["release", "feature/ABC"]

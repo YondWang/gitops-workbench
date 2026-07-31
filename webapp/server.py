@@ -140,6 +140,7 @@ DEFAULT_SCHEDULE: dict[str, Any] = {
     "daily_time": "16:00",
     "source_ref_strategy": "fixed_ref",
     "default_ref": "fix",
+    "feature_fallback_ref": "release",
     "config_ref": "",
     "config_matrix_enabled": True,
     "config_matrix": [
@@ -386,6 +387,7 @@ class GitOpsApp:
                 "enabled": False,
                 "name": str(payload.get("name") or "手动完整发版构建"),
                 "default_ref": str(payload.get("source_ref") or payload.get("default_ref") or "fix"),
+                "feature_fallback_ref": str(payload.get("feature_fallback_ref") or "release"),
                 "config_ref": str(payload.get("config_ref") or ""),
                 "config_matrix_enabled": payload.get("config_matrix_enabled", DEFAULT_SCHEDULE["config_matrix_enabled"]),
                 "config_matrix": payload.get("config_matrix", DEFAULT_SCHEDULE["config_matrix"]),
@@ -593,8 +595,9 @@ class GitOpsApp:
     def is_feature_release_ref(ref: str) -> bool:
         return ref.startswith("feature/") and len(ref) > len("feature/")
 
-    def resolve_full_release_components(self, requested_ref: str) -> list[dict[str, str]]:
+    def resolve_full_release_components(self, requested_ref: str, feature_fallback_ref: str = "release") -> list[dict[str, str]]:
         requested_ref = require_ref_name(requested_ref, "完整发版来源分支")
+        fallback_ref = require_ref_name(feature_fallback_ref, "Feature 缺失时回退分支")
         repositories = self.release_repositories()
         if not repositories:
             raise ValueError("没有启用的业务仓库")
@@ -611,10 +614,12 @@ class GitOpsApp:
                 resolved_ref = requested_ref
                 resolution = "simos_source"
             elif self.is_feature_release_ref(requested_ref) and requested_ref not in branches:
-                if "release" not in branches:
-                    raise ValueError(f"{repository.id} 不存在 Feature 分支 {requested_ref}，且 release 分支不存在")
-                resolved_ref = "release"
-                resolution = "fallback_release"
+                if fallback_ref not in branches:
+                    if fallback_ref == "release":
+                        raise ValueError(f"{repository.id} 不存在 Feature 分支 {requested_ref}，且 release 分支不存在")
+                    raise ValueError(f"{repository.id} 不存在 Feature 分支 {requested_ref}，且回退分支不存在：{fallback_ref}")
+                resolved_ref = fallback_ref
+                resolution = "fallback_release" if fallback_ref == "release" else "fallback_ref"
             else:
                 if requested_ref not in branches:
                     raise ValueError(f"{repository.id} 不存在来源分支：{requested_ref}")
@@ -644,7 +649,8 @@ class GitOpsApp:
             raise ValueError("发版任务需要启用 simos 仓库")
         local_now = coerce_schedule_now(schedule, parse_schedule_now(now) if now else None)
         ref = self.resolve_schedule_ref(schedule, target)
-        component_resolutions = self.resolve_full_release_components(ref)
+        feature_fallback_ref = str(schedule.get("feature_fallback_ref") or "release")
+        component_resolutions = self.resolve_full_release_components(ref, feature_fallback_ref)
         version_prefix = resolve_version_prefix(ref, schedule)
         version_number = self.resolve_release_version_number(schedule, ref, version_prefix, component_resolutions)
         if str(schedule.get("version_source") or "simos_version_info") == "manual":
@@ -672,6 +678,7 @@ class GitOpsApp:
             "project": target.repo.project,
             "ref": ref,
             "source_ref": ref,
+            "feature_fallback_ref": feature_fallback_ref,
             "component_resolutions": component_resolutions,
             "config_ref": config_ref,
             "source_ref_slug": source_ref_slug,
@@ -827,6 +834,7 @@ class GitOpsApp:
             "execution_type": "full_release",
             "status": status,
             "source_ref": plan.get("source_ref") or plan.get("ref"),
+            "feature_fallback_ref": plan.get("feature_fallback_ref", "release"),
             "component_resolutions": list(plan.get("component_resolutions") or []),
             "config_ref": plan.get("config_ref", ""),
             "config_matrix": plan.get("config_matrix", []),
@@ -2608,6 +2616,8 @@ def normalize_release_task(payload: dict[str, Any]) -> dict[str, Any]:
     task["source_ref_strategy"] = strategy
     task["ref_strategy"] = "latest_fix_rc" if strategy == "latest_fix_rc" else "editable"
     task["default_ref"] = str(task.get("default_ref") or "fix").strip()
+    fallback_ref = str(task.get("feature_fallback_ref") or "release").strip()
+    task["feature_fallback_ref"] = require_ref_name(fallback_ref, "Feature 缺失时回退分支")
     config_ref = str(task.get("config_ref") or "").strip()
     task["config_ref"] = require_ref_name(config_ref, "config 分支") if config_ref else ""
     task["config_matrix_enabled"] = truthy(task.get("config_matrix_enabled", True))
