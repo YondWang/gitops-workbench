@@ -215,6 +215,32 @@ button {
   text-decoration: none;
 }
 
+.field-hint {
+  margin: -4px 0 12px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.component-resolution {
+  margin-top: 12px;
+  overflow-x: auto;
+}
+
+.component-resolution table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.component-resolution th,
+.component-resolution td {
+  padding: 7px 8px;
+  border-top: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
 .small {
   min-height: 30px;
   padding: 0 8px;
@@ -523,9 +549,62 @@ textarea {
   margin-top: 10px;
 }
 
+.resident-jobs {
+  margin-top: 14px;
+}
+
+.resident-jobs-table {
+  max-height: 260px;
+}
+
+.resident-job-time {
+  min-width: 180px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .schedule-table {
   max-height: 260px;
   margin-bottom: 16px;
+}
+
+#scheduleRunsBody tr[data-select-resident-run] {
+  cursor: pointer;
+}
+
+#scheduleRunsBody tr[data-select-resident-run]:hover td,
+#scheduleRunsBody tr.selected-schedule-run td {
+  background: #e6fffb;
+}
+
+#scheduleRunsBody tr[data-select-resident-run]:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
+.schedule-preview-cell {
+  min-width: 230px;
+}
+
+.schedule-preview-cell code {
+  overflow-wrap: anywhere;
+}
+
+.schedule-preview-error {
+  display: block;
+  color: var(--danger);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.version-merge-meta {
+  display: grid;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.version-merge-meta .small {
+  justify-self: start;
 }
 
 .compact-form {

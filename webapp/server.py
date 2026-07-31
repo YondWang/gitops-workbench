@@ -14,6 +14,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from functools import wraps
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
@@ -110,6 +111,25 @@ VERSION_COMPONENT_REVISIONS = {
     "perception": 16,
     "pnc": 32,
 }
+VERSION_MERGE_RETRY_SECONDS = 10
+VERSION_MERGE_MAX_ATTEMPTS = 6
+RELEASE_RUNS_LOCK = threading.RLock()
+
+
+def release_runs_locked(method: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(method)
+    def locked(*args: Any, **kwargs: Any) -> Any:
+        with RELEASE_RUNS_LOCK:
+            return method(*args, **kwargs)
+
+    return locked
+
+
+def release_run_poll_seconds() -> int:
+    try:
+        return max(1, int(os.environ.get("GITOPS_RELEASE_RUN_POLL_SECONDS", "10")))
+    except ValueError:
+        return 10
 
 DEFAULT_SCHEDULE: dict[str, Any] = {
     "id": "daily-simos-resident-release",
@@ -274,6 +294,7 @@ class GitOpsApp:
         return {"ok": True, "schedules": data["tasks"], "runs": data["runs"], "tasks": data["tasks"]}
 
     def release_tasks(self) -> dict[str, Any]:
+        self.refresh_building_release_runs()
         return {"ok": True, "tasks": load_release_tasks(), "runs": load_release_runs()}
 
     def save_schedule(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -301,6 +322,7 @@ class GitOpsApp:
         save_release_runs(runs)
         return {"ok": True, "deleted": task_id, "tasks": load_release_tasks(), "runs": load_release_runs()}
 
+    @release_runs_locked
     def delete_release_run(self, run_id: str) -> dict[str, Any]:
         run_id = str(run_id or "").strip()
         if not run_id:
@@ -312,6 +334,7 @@ class GitOpsApp:
         save_release_runs(next_runs)
         return {"ok": True, "deleted": run_id, "runs": load_release_runs()}
 
+    @release_runs_locked
     def clear_release_runs(self) -> dict[str, Any]:
         deleted_count = len(load_release_runs())
         save_release_runs([])
@@ -325,6 +348,29 @@ class GitOpsApp:
     def schedule_dry_run(self, schedule_id: str, now: str | None = None) -> dict[str, Any]:
         task = self.get_release_task(schedule_id)
         return {"ok": True, "schedule": task, "task": task, "plan": self.resolve_release_plan(task, now)}
+
+    def release_task_previews(self, now: str | None = None) -> dict[str, Any]:
+        previews: list[dict[str, Any]] = []
+        for task in load_release_tasks():
+            try:
+                plan = self.resolve_release_plan(task, now)
+                previews.append(
+                    {
+                        "task_id": task["id"],
+                        "task": task,
+                        "ok": True,
+                        "version": plan.get("version", ""),
+                        "tag_name": plan.get("tag_name", ""),
+                        "source_ref": plan.get("source_ref", ""),
+                        "component_resolutions": plan.get("component_resolutions", []),
+                        "config_matrix": plan.get("config_matrix", []),
+                        "calculated_at": plan.get("planned_at", ""),
+                        "plan": plan,
+                    }
+                )
+            except Exception as exc:
+                previews.append({"task_id": task["id"], "task": task, "ok": False, "error": str(exc)})
+        return {"ok": True, "previews": previews}
 
     def schedule_run_now(self, schedule_id: str, now: str | None = None) -> dict[str, Any]:
         task = self.get_release_task(schedule_id)
@@ -379,6 +425,7 @@ class GitOpsApp:
         append_release_run(run)
         return {"ok": True, "run": run}
 
+    @release_runs_locked
     def continue_release_run(self, run_id: str) -> dict[str, Any]:
         runs = load_release_runs()
         run = next((item for item in runs if item.get("id") == run_id), None)
@@ -386,13 +433,116 @@ class GitOpsApp:
             raise ValueError(f"发版运行不存在：{run_id}")
         if run.get("execution_type") != "full_release":
             raise ValueError("只有完整发版运行可以继续")
+        if run.get("status") not in {
+            "waiting_weekly_version_confirmation",
+            "waiting_version_mr",
+            "merging_version_mr",
+            "waiting_version_mr_retry",
+        }:
+            raise ValueError("该发版运行当前状态不可继续")
+        if isinstance(run.get("version_merge"), dict):
+            updated = self.resume_version_merge(run, self.release_run_now(run), retry_due_only=False)
+            self.save_replaced_release_run(updated)
+            return {"ok": True, "run": updated, "result": updated.get("result", {})}
         payload = dict(run.get("create_tag_payload") or {})
         if not payload:
             raise ValueError("运行记录缺少继续发版所需参数")
         result = self.create_tag(payload)
         updated = self.release_run_from_result(run.get("task") or {}, run.get("plan") or {}, result, str(run.get("trigger") or "manual"), run_id=run_id)
+        if isinstance(updated.get("version_merge"), dict):
+            self.save_replaced_release_run(updated)
+            updated = self.request_version_merge(updated, self.release_run_now(updated))
         save_release_runs([updated if item.get("id") == run_id else item for item in runs])
         return {"ok": True, "run": updated, "result": result}
+
+    @release_runs_locked
+    def resume_pending_release_runs(self, now: datetime | None = None) -> list[dict[str, Any]]:
+        updated_runs: list[dict[str, Any]] = []
+        for run in load_release_runs():
+            if run.get("execution_type") != "full_release" or not isinstance(run.get("version_merge"), dict):
+                continue
+            if run.get("status") not in {"merging_version_mr", "waiting_version_mr_retry"}:
+                continue
+            updated = self.resume_version_merge(run, self.release_run_now(run, now), retry_due_only=True)
+            self.save_replaced_release_run(updated)
+            updated_runs.append(updated)
+        return updated_runs
+
+    @release_runs_locked
+    def refresh_building_release_runs(self, now: datetime | None = None) -> list[dict[str, Any]]:
+        refreshed_runs: list[dict[str, Any]] = []
+        runs = load_release_runs()
+        for run in runs:
+            if run.get("execution_type") != "full_release" or run.get("status") != "building":
+                continue
+            tag_name = str(run.get("tag_name") or "").strip()
+            if not tag_name:
+                continue
+
+            current = self.release_run_now(run, now)
+            try:
+                package = self.resident_package(tag_name)
+            except Exception as exc:
+                package = {"ok": False, "status": "pending_or_missing", "tag": tag_name, "message": f"查询 resident 构建状态失败：{exc}"}
+
+            pipeline = package.get("pipeline") if isinstance(package.get("pipeline"), dict) else {}
+            pipeline_status = str(pipeline.get("status") or "").lower()
+            package_status = str(package.get("status") or "").lower()
+            updated = {
+                **run,
+                "package": package,
+                "updated_at": current.isoformat(),
+                "pipeline_url": str(package.get("pipeline_url") or package.get("job_url") or run.get("pipeline_url") or ""),
+                "cloud_dir": str(package.get("cloud_dir") or run.get("cloud_dir") or ""),
+            }
+
+            if package_status in {"ready", "success"} and pipeline_status in {"", "success"}:
+                updated.update({"status": "published", "finished_at": current.isoformat(), "error": ""})
+            elif pipeline_status in {"failed", "canceled", "cancelled", "skipped", "manual"} or (
+                package_status == "failed" and pipeline_status == "success"
+            ):
+                status = "canceled" if pipeline_status in {"canceled", "cancelled"} else "failed"
+                updated.update(
+                    {
+                        "status": status,
+                        "finished_at": current.isoformat(),
+                        "error": str(package.get("message") or f"Tag Pipeline 状态：{pipeline_status or package_status}"),
+                    }
+                )
+
+            refreshed_runs.append(updated)
+
+        if refreshed_runs:
+            refreshed_by_id = {str(item.get("id")): item for item in refreshed_runs}
+            save_release_runs([refreshed_by_id.get(str(item.get("id")), item) for item in runs])
+        return refreshed_runs
+
+    @release_runs_locked
+    def retry_version_merge(self, run_id: str) -> dict[str, Any]:
+        runs = load_release_runs()
+        run = next((item for item in runs if item.get("id") == run_id), None)
+        if run is None:
+            raise ValueError(f"发版运行不存在：{run_id}")
+        if run.get("status") != "auto_merge_failed":
+            raise ValueError("只有自动合并失败的完整发版运行可以重试")
+        version_merge = dict(run.get("version_merge") or {})
+        if not version_merge.get("iid"):
+            raise ValueError("运行记录缺少版本号 MR 编号")
+        current = self.release_run_now(run)
+        version_merge.update(
+            {
+                "attempt_count": 0,
+                "requested_at": "",
+                "last_checked_at": current.isoformat(),
+                "next_retry_at": "",
+                "last_error": "",
+            }
+        )
+        retrying = {**run, "status": "merging_version_mr", "finished_at": "", "updated_at": current.isoformat(), "version_merge": version_merge}
+        self.save_replaced_release_run(retrying)
+        updated = self.request_version_merge(retrying, current)
+        self.save_replaced_release_run(updated)
+        return {"ok": True, "run": updated}
 
     def run_due_schedules(self, now: datetime | None = None) -> list[dict[str, Any]]:
         runs: list[dict[str, Any]] = []
@@ -439,14 +589,64 @@ class GitOpsApp:
     def resolve_schedule_plan(self, schedule: dict[str, Any], now: str | None = None) -> dict[str, Any]:
         return self.resolve_release_plan(schedule, now)
 
+    @staticmethod
+    def is_feature_release_ref(ref: str) -> bool:
+        return ref.startswith("feature/") and len(ref) > len("feature/")
+
+    def resolve_full_release_components(self, requested_ref: str) -> list[dict[str, str]]:
+        requested_ref = require_ref_name(requested_ref, "完整发版来源分支")
+        repositories = self.release_repositories()
+        if not repositories:
+            raise ValueError("没有启用的业务仓库")
+
+        resolutions: list[dict[str, str]] = []
+        for repository in repositories:
+            target = self.target(repository.id)
+            target.client.project()
+            branches = set(target.client.branch_names())
+
+            if is_simos_repo(repository):
+                if requested_ref not in branches:
+                    raise ValueError(f"{repository.id} 不存在来源分支：{requested_ref}")
+                resolved_ref = requested_ref
+                resolution = "simos_source"
+            elif self.is_feature_release_ref(requested_ref) and requested_ref not in branches:
+                if "release" not in branches:
+                    raise ValueError(f"{repository.id} 不存在 Feature 分支 {requested_ref}，且 release 分支不存在")
+                resolved_ref = "release"
+                resolution = "fallback_release"
+            else:
+                if requested_ref not in branches:
+                    raise ValueError(f"{repository.id} 不存在来源分支：{requested_ref}")
+                resolved_ref = requested_ref
+                resolution = "requested_ref"
+
+            commit = target.client.branch(resolved_ref).get("commit") or {}
+            commit_id = str(commit.get("id") or commit.get("short_id") or "")
+            if not commit_id:
+                raise ValueError(f"{repository.id} 未读取到 {resolved_ref} 的 commit")
+            resolutions.append(
+                {
+                    "repository_id": repository.id,
+                    "repository_name": repository.name,
+                    "component": version_component(repository),
+                    "requested_ref": requested_ref,
+                    "resolved_ref": resolved_ref,
+                    "resolution": resolution,
+                    "commit_id": commit_id,
+                }
+            )
+        return resolutions
+
     def resolve_release_plan(self, schedule: dict[str, Any], now: str | None = None) -> dict[str, Any]:
         target = self.optional_simos_target()
         if target is None:
             raise ValueError("发版任务需要启用 simos 仓库")
         local_now = coerce_schedule_now(schedule, parse_schedule_now(now) if now else None)
         ref = self.resolve_schedule_ref(schedule, target)
+        component_resolutions = self.resolve_full_release_components(ref)
         version_prefix = resolve_version_prefix(ref, schedule)
-        version_number = self.resolve_release_version_number(schedule, ref, version_prefix)
+        version_number = self.resolve_release_version_number(schedule, ref, version_prefix, component_resolutions)
         if str(schedule.get("version_source") or "simos_version_info") == "manual":
             weekly_version = {
                 "version_number": version_number,
@@ -472,6 +672,7 @@ class GitOpsApp:
             "project": target.repo.project,
             "ref": ref,
             "source_ref": ref,
+            "component_resolutions": component_resolutions,
             "config_ref": config_ref,
             "source_ref_slug": source_ref_slug,
             "version": release_version,
@@ -526,11 +727,21 @@ class GitOpsApp:
             return version
         return normalize_version_number(self.version_from_version_info(target, ref))
 
-    def resolve_release_version_number(self, schedule: dict[str, Any], ref: str, version_prefix: str) -> str:
+    def resolve_release_version_number(
+        self,
+        schedule: dict[str, Any],
+        ref: str,
+        version_prefix: str,
+        component_resolutions: list[dict[str, str]] | None = None,
+    ) -> str:
         if str(schedule.get("version_source") or "simos_version_info") == "manual":
             return self.resolve_schedule_version(schedule, self.optional_simos_target() or self.target("simos"), ref)
         version = self.default_tag_version_for_request(
-            {"scope": "all", "version_prefix": version_prefix},
+            {
+                "scope": "all",
+                "version_prefix": version_prefix,
+                "component_resolutions": component_resolutions or [],
+            },
             ref,
             True,
             "",
@@ -540,6 +751,7 @@ class GitOpsApp:
     def create_schedule_tag(self, schedule: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
         return self.start_full_release_run(schedule, plan, trigger="manual")
 
+    @release_runs_locked
     def start_full_release_run(self, task: dict[str, Any], plan: dict[str, Any], trigger: str) -> dict[str, Any]:
         payload = {
             "scope": "all",
@@ -550,6 +762,8 @@ class GitOpsApp:
             "base_version": plan["version_number"],
             "base_version_is_final": True,
             "version_prefix": plan["version_prefix"],
+            "auto_merge_version_mr": True,
+            "component_resolutions": list(plan.get("component_resolutions") or []),
         }
         if bool(plan.get("config_matrix_enabled", True)) and not plan.get("config_matrix"):
             result = {
@@ -577,6 +791,11 @@ class GitOpsApp:
             return run
         result = self.create_tag(payload)
         run = self.release_run_from_result(task, plan, result, trigger)
+        if isinstance(run.get("version_merge"), dict):
+            append_release_run(run)
+            run = self.request_version_merge(run, self.release_run_now(run))
+            self.save_replaced_release_run(run)
+            return run
         append_release_run(run)
         return run
 
@@ -608,6 +827,7 @@ class GitOpsApp:
             "execution_type": "full_release",
             "status": status,
             "source_ref": plan.get("source_ref") or plan.get("ref"),
+            "component_resolutions": list(plan.get("component_resolutions") or []),
             "config_ref": plan.get("config_ref", ""),
             "config_matrix": plan.get("config_matrix", []),
             "config_matrix_value": plan.get("config_matrix_value", ""),
@@ -634,6 +854,8 @@ class GitOpsApp:
                 "base_version": plan.get("version_number"),
                 "base_version_is_final": True,
                 "version_prefix": plan.get("version_prefix"),
+                "auto_merge_version_mr": True,
+                "component_resolutions": list(plan.get("component_resolutions") or []),
             },
         }
         version_update = result.get("version_update") or {}
@@ -642,9 +864,145 @@ class GitOpsApp:
         merge_request = result.get("merge_request") or version_update.get("merge_request") if isinstance(version_update, dict) else None
         if merge_request:
             run["merge_request"] = merge_request
+        if phase == "waiting_version_mr" and truthy(result.get("auto_merge_version_mr", False)) and isinstance(merge_request, dict):
+            run["version_merge"] = self.version_merge_metadata(merge_request, now)
         if not result.get("ok") and result.get("message"):
             run["error"] = result.get("message")
         return run
+
+    @staticmethod
+    def version_merge_metadata(merge_request: dict[str, Any], now: str) -> dict[str, Any]:
+        return {
+            "iid": merge_request.get("iid"),
+            "web_url": str(merge_request.get("web_url") or ""),
+            "state": str(merge_request.get("state") or ""),
+            "attempt_count": 0,
+            "requested_at": "",
+            "last_checked_at": now,
+            "next_retry_at": "",
+            "last_error": "",
+        }
+
+    def release_run_now(self, run: dict[str, Any], now: datetime | None = None) -> datetime:
+        timezone = ZoneInfo(str((run.get("task") or {}).get("timezone") or "Asia/Shanghai"))
+        if now is None:
+            return datetime.now(timezone)
+        if now.tzinfo is None:
+            return now.replace(tzinfo=timezone)
+        return now.astimezone(timezone)
+
+    def save_replaced_release_run(self, updated: dict[str, Any]) -> None:
+        save_release_runs([updated if item.get("id") == updated.get("id") else item for item in load_release_runs()])
+
+    @staticmethod
+    def version_merge_retry_due(version_merge: dict[str, Any], now: datetime) -> bool:
+        retry_at = str(version_merge.get("next_retry_at") or "")
+        if not retry_at:
+            return True
+        try:
+            return now >= datetime.fromisoformat(retry_at)
+        except ValueError:
+            return True
+
+    def update_version_merge_from_mr(self, run: dict[str, Any], merge_request: dict[str, Any], now: datetime) -> dict[str, Any]:
+        version_merge = dict(run["version_merge"])
+        version_merge.update(
+            {
+                "web_url": str(merge_request.get("web_url") or version_merge.get("web_url") or ""),
+                "state": str(merge_request.get("state") or ""),
+                "last_checked_at": now.isoformat(),
+            }
+        )
+        return {**run, "updated_at": now.isoformat(), "version_merge": version_merge}
+
+    def request_version_merge(self, run: dict[str, Any], now: datetime) -> dict[str, Any]:
+        version_merge = dict(run.get("version_merge") or {})
+        iid = version_merge.get("iid")
+        if not iid:
+            return {**run, "status": "auto_merge_failed", "finished_at": now.isoformat(), "updated_at": now.isoformat(), "error": "运行记录缺少版本号 MR 编号"}
+        attempts = int(version_merge.get("attempt_count") or 0)
+        version_merge.update({"requested_at": now.isoformat(), "last_checked_at": now.isoformat(), "last_error": ""})
+        try:
+            merge_request = self.optional_simos_target().client.accept_merge_request(int(iid))  # type: ignore[union-attr]
+            if isinstance(merge_request, dict):
+                version_merge["web_url"] = str(merge_request.get("web_url") or version_merge.get("web_url") or "")
+                version_merge["state"] = str(merge_request.get("state") or version_merge.get("state") or "")
+            version_merge["attempt_count"] = attempts + 1
+            version_merge["next_retry_at"] = (now + timedelta(seconds=VERSION_MERGE_RETRY_SECONDS)).isoformat()
+            return {**run, "status": "merging_version_mr", "updated_at": now.isoformat(), "version_merge": version_merge}
+        except GitLabError as exc:
+            if self.version_merge_waiting_error(exc):
+                version_merge["last_error"] = str(exc)
+                version_merge["next_retry_at"] = (now + timedelta(seconds=VERSION_MERGE_RETRY_SECONDS)).isoformat()
+                return {**run, "status": "waiting_version_mr_retry", "updated_at": now.isoformat(), "error": str(exc), "version_merge": version_merge}
+            attempts += 1
+            version_merge["attempt_count"] = attempts
+            version_merge["last_error"] = str(exc)
+            version_merge["next_retry_at"] = "" if attempts >= VERSION_MERGE_MAX_ATTEMPTS else (now + timedelta(seconds=VERSION_MERGE_RETRY_SECONDS)).isoformat()
+            status = "auto_merge_failed" if attempts >= VERSION_MERGE_MAX_ATTEMPTS else "waiting_version_mr_retry"
+            return {
+                **run,
+                "status": status,
+                "updated_at": now.isoformat(),
+                "finished_at": now.isoformat() if status == "auto_merge_failed" else "",
+                "error": str(exc),
+                "version_merge": version_merge,
+            }
+        except Exception as exc:
+            attempts += 1
+            version_merge["attempt_count"] = attempts
+            version_merge["last_error"] = str(exc)
+            version_merge["next_retry_at"] = "" if attempts >= VERSION_MERGE_MAX_ATTEMPTS else (now + timedelta(seconds=VERSION_MERGE_RETRY_SECONDS)).isoformat()
+            status = "auto_merge_failed" if attempts >= VERSION_MERGE_MAX_ATTEMPTS else "waiting_version_mr_retry"
+            return {
+                **run,
+                "status": status,
+                "updated_at": now.isoformat(),
+                "finished_at": now.isoformat() if status == "auto_merge_failed" else "",
+                "error": str(exc),
+                "version_merge": version_merge,
+            }
+
+    @staticmethod
+    def version_merge_waiting_error(error: GitLabError) -> bool:
+        if error.status == 405:
+            return True
+        payload = error.payload if error.payload is not None else str(error)
+        text = str(payload).lower()
+        return any(phrase in text for phrase in ("not mergeable", "cannot be merged", "pipeline is still", "pipeline must succeed"))
+
+    def resume_version_merge(self, run: dict[str, Any], now: datetime, retry_due_only: bool) -> dict[str, Any]:
+        version_merge = dict(run.get("version_merge") or {})
+        iid = version_merge.get("iid")
+        if not iid:
+            return {**run, "status": "auto_merge_failed", "updated_at": now.isoformat(), "finished_at": now.isoformat(), "error": "运行记录缺少版本号 MR 编号"}
+        target = self.optional_simos_target()
+        if target is None:
+            return {**run, "status": "failed", "updated_at": now.isoformat(), "finished_at": now.isoformat(), "error": "发版任务需要启用 simos 仓库"}
+        try:
+            merge_request = target.client.merge_request(int(iid))
+        except Exception as exc:
+            version_merge.update({"last_checked_at": now.isoformat(), "last_error": str(exc)})
+            return {**run, "status": "waiting_version_mr_retry", "updated_at": now.isoformat(), "error": str(exc), "version_merge": version_merge}
+        updated = self.update_version_merge_from_mr(run, merge_request, now)
+        state = str(merge_request.get("state") or "").lower()
+        if state == "merged":
+            payload = dict(updated.get("create_tag_payload") or {})
+            if not payload:
+                return {**updated, "status": "failed", "finished_at": now.isoformat(), "error": "运行记录缺少继续发版所需参数"}
+            result = self.create_tag(payload)
+            completed = self.release_run_from_result(updated.get("task") or {}, updated.get("plan") or {}, result, str(updated.get("trigger") or "manual"), run_id=str(updated["id"]))
+            completed["version_merge"] = dict(updated["version_merge"])
+            if updated.get("due_key"):
+                completed["due_key"] = updated["due_key"]
+            return completed
+        if state in {"closed", "canceled", "cancelled"}:
+            version_merge = dict(updated["version_merge"])
+            version_merge["last_error"] = "版本号更新 MR 已关闭或取消"
+            return {**updated, "status": "closed", "finished_at": now.isoformat(), "error": version_merge["last_error"], "version_merge": version_merge}
+        if retry_due_only and not self.version_merge_retry_due(dict(updated["version_merge"]), now):
+            return updated
+        return self.request_version_merge(updated, now)
 
     def gitlab_resident_package(self, tag: str) -> dict[str, Any] | None:
         target = self.optional_simos_target()
@@ -663,6 +1021,7 @@ class GitOpsApp:
             return None
 
         pipeline_status = str(pipeline.get("status", ""))
+        pipeline_state = pipeline_status.lower()
         pipeline_url = str(pipeline.get("web_url", ""))
         pipeline_id = pipeline.get("id")
         if not pipeline_id:
@@ -671,6 +1030,24 @@ class GitOpsApp:
             jobs = target.client.pipeline_jobs(pipeline_id)
         except GitLabError as exc:
             return self.resident_gitlab_error(tag, str(exc), pipeline_url=pipeline_url)
+        pipeline_context = {
+            "pipeline": pipeline,
+            "jobs": [self.resident_job_summary(job) for job in jobs],
+            "progress": self.resident_job_progress(jobs),
+        }
+        resident_job = self.select_resident_job(jobs)
+        resident_job_status = str((resident_job or {}).get("status") or "").lower()
+        if resident_job_status in {"manual", "skipped"}:
+            status = "manual_action_required" if resident_job_status == "manual" else "skipped"
+            message = "resident Job 等待人工执行" if resident_job_status == "manual" else "resident Job 已跳过"
+            return {
+                **self.resident_gitlab_status(tag, status, pipeline_url, message=message),
+                **pipeline_context,
+                "job": resident_job,
+                "job_url": str((resident_job or {}).get("web_url") or ""),
+                "terminal": True,
+                "operator_action_required": resident_job_status == "manual",
+            }
 
         job = self.select_resident_artifact_job(jobs)
         if job is not None:
@@ -681,6 +1058,7 @@ class GitOpsApp:
                 "ok": True,
                 "tag": tag,
                 "pipeline": pipeline,
+                **pipeline_context,
                 "pipeline_url": pipeline_url,
                 "job": job,
                 "job_url": job_url,
@@ -691,25 +1069,38 @@ class GitOpsApp:
                 "built_at": job.get("finished_at") or pipeline.get("updated_at") or pipeline.get("created_at") or "",
             }
             package.update(self.load_gitlab_build_info(target.client, job_id))
-            if job_status == "success":
+            if job_status == "success" and pipeline_state == "success":
                 package.setdefault("status", "success")
                 package.setdefault("message", "resident 包已上传到 GitLab job artifacts")
                 return package
-            if job_status in {"failed", "canceled"}:
+            if pipeline_state not in {"success", "failed", "canceled", "cancelled", "manual", "skipped"}:
+                package["status"] = "pending_or_missing"
+                package["message"] = "resident 产物 Job 已完成，等待 Tag Pipeline 全部完成"
+                return package
+            if job_status in {"failed", "canceled", "cancelled"}:
                 package["status"] = "failed"
                 package.setdefault("message", f"resident 产物 Job 状态：{job_status}")
                 return package
 
+        if pipeline_status in {"manual", "skipped"}:
+            status = "manual_action_required" if pipeline_status == "manual" else "skipped"
+            message = "Tag Pipeline 等待人工执行" if pipeline_status == "manual" else "Tag Pipeline 已跳过"
+            return {
+                **self.resident_gitlab_status(tag, status, pipeline_url, message=message),
+                **pipeline_context,
+                "terminal": True,
+                "operator_action_required": pipeline_status == "manual",
+            }
         if pipeline_status == "success":
             return self.resident_gitlab_status(
                 tag,
                 "failed",
                 pipeline_url,
                 message=f"Tag Pipeline 已成功，但未找到 GitLab artifact：{RESIDENT_ARTIFACT_FILE}。请在目标仓库对应 job 的 artifacts.paths 中上传该文件",
-            )
+            ) | pipeline_context
         if pipeline_status in {"failed", "canceled"}:
-            return self.resident_gitlab_status(tag, "failed", pipeline_url, message=f"Tag Pipeline 状态：{pipeline_status}")
-        return self.resident_gitlab_status(tag, "pending_or_missing", pipeline_url, message="正在等待云端 Runner 生成并上传 resident artifact")
+            return self.resident_gitlab_status(tag, "failed", pipeline_url, message=f"Tag Pipeline 状态：{pipeline_status}") | pipeline_context
+        return self.resident_gitlab_status(tag, "pending_or_missing", pipeline_url, message="正在等待云端 Runner 生成并上传 resident artifact") | pipeline_context
 
     @staticmethod
     def select_tag_pipeline(pipelines: list[dict[str, Any]], tag: str) -> dict[str, Any] | None:
@@ -744,6 +1135,58 @@ class GitOpsApp:
         if not candidates:
             return None
         return max(candidates, key=lambda item: (item[0], item[1]))[2]
+
+    @staticmethod
+    def select_resident_job(jobs: list[dict[str, Any]]) -> dict[str, Any] | None:
+        candidates: list[tuple[int, int, dict[str, Any]]] = []
+        for job in jobs:
+            name = str(job.get("name", "")).strip().lower()
+            score = 0
+            if name in RESIDENT_ARTIFACT_JOB_NAMES:
+                score += 100
+            elif any(pref in name for pref in RESIDENT_ARTIFACT_JOB_NAMES):
+                score += 60
+            if score:
+                candidates.append((score, int(job.get("id") or 0), job))
+        return max(candidates, key=lambda item: (item[0], item[1]))[2] if candidates else None
+
+    @staticmethod
+    def resident_job_summary(job: dict[str, Any]) -> dict[str, Any]:
+        artifacts_file = job.get("artifacts_file") or {}
+        artifacts = job.get("artifacts") or []
+        raw_duration = job.get("duration")
+        try:
+            duration_seconds = float(raw_duration) if raw_duration not in (None, "") else None
+        except (TypeError, ValueError):
+            duration_seconds = None
+        return {
+            "id": job.get("id"),
+            "name": str(job.get("name") or ""),
+            "stage": str(job.get("stage") or ""),
+            "status": str(job.get("status") or ""),
+            "web_url": str(job.get("web_url") or ""),
+            "started_at": job.get("started_at") or "",
+            "finished_at": job.get("finished_at") or "",
+            "duration": job.get("duration"),
+            "duration_seconds": duration_seconds,
+            "artifacts_available": bool(artifacts_file.get("filename") or artifacts),
+        }
+
+    @staticmethod
+    def resident_job_progress(jobs: list[dict[str, Any]]) -> dict[str, Any]:
+        statuses = [str(job.get("status") or "").lower() for job in jobs]
+        completed = sum(status in {"success", "skipped", "manual"} for status in statuses)
+        running = sum(status == "running" for status in statuses)
+        pending = sum(status in {"created", "pending", "waiting", "scheduled"} for status in statuses)
+        failed = sum(status in {"failed", "canceled", "cancelled"} for status in statuses)
+        return {
+            "total": len(jobs),
+            "completed": completed,
+            "running": running,
+            "pending": pending,
+            "failed": failed,
+            "active": bool(running or pending),
+        }
 
     @staticmethod
     def load_gitlab_build_info(client: GitLabClient, job_id: Any) -> dict[str, Any]:
@@ -854,15 +1297,26 @@ class GitOpsApp:
         raw_tag_name = str(payload.get("tag_name", "")).strip()
         tag_name = require_ref_name(raw_tag_name or self.default_tag_name_for_request(payload, ref, update_version, base_version), "Tag 名称")
         message = str(payload.get("message", "")).strip() or f"Tag {tag_name} from {ref}"
+        resolutions = component_resolution_by_repository(payload.get("component_resolutions"))
 
         def precheck(target: OperationTarget) -> dict[str, Any]:
             branch_names = target.client.branch_names()
             tag_names = target.client.tag_names()
             refs = set(branch_names) | set(tag_names)
-            target_ref = ref
             context: dict[str, Any] = {"source_ref": ref, "tag_name": tag_name, "message": message, "update_version": update_version}
-            if target_ref not in refs:
-                raise ValueError(f"Tag 来源不存在：{target_ref}")
+            resolution = resolutions.get(target.repo.id)
+            if resolution:
+                if resolution["requested_ref"] != ref:
+                    raise ValueError(f"{target.repo.id} 的组件来源与请求分支不一致")
+                target_ref = resolution["resolved_ref"]
+                if is_simos_repo(target.repo) and ref not in branch_names:
+                    raise ValueError("更新版本号时 Tag 来源必须是分支")
+                context["ref_commit_id"] = resolution["commit_id"]
+                context["component_resolution"] = resolution
+            else:
+                target_ref = ref
+                if target_ref not in refs:
+                    raise ValueError(f"Tag 来源不存在：{target_ref}")
             if tag_name in tag_names:
                 raise ValueError(f"Tag 已存在：{tag_name}")
             context["ref"] = target_ref
@@ -881,7 +1335,10 @@ class GitOpsApp:
                 "message": context["message"],
                 "update_version": context["update_version"],
             }
-            result["tag"] = target.client.create_tag(context["tag_name"], context["ref"], context["message"])
+            tag_ref = context.get("ref_commit_id") or context["ref"]
+            result["tag"] = target.client.create_tag(context["tag_name"], tag_ref, context["message"])
+            if context.get("component_resolution"):
+                result["component_resolution"] = context["component_resolution"]
             return result
 
         if update_version:
@@ -977,6 +1434,7 @@ class GitOpsApp:
                 "precheck": precheck_results,
                 "version_update": version_update,
                 "merge_request": version_update.get("merge_request"),
+                "auto_merge_version_mr": truthy(payload.get("auto_merge_version_mr", False)),
                 "results": [],
             }
         results: list[dict[str, Any]] = []
@@ -994,7 +1452,7 @@ class GitOpsApp:
         overall_ok = True
         for target in targets:
             context = contexts[target.repo.id]
-            tag_ref = version_update.get("tag_ref") if is_simos_repo(target.repo) else context["ref"]
+            tag_ref = version_update.get("tag_ref") if is_simos_repo(target.repo) else context.get("ref_commit_id") or context["ref"]
             try:
                 result = {
                     "ref": context["ref"],
@@ -1003,6 +1461,8 @@ class GitOpsApp:
                     "update_version": context["update_version"],
                     "tag": target.client.create_tag(context["tag_name"], tag_ref or context["ref"], context["message"]),
                 }
+                if context.get("component_resolution"):
+                    result["component_resolution"] = context["component_resolution"]
                 if is_simos_repo(target.repo):
                     self.save_version_update_default(version_update)
                     result["version_update"] = version_update
@@ -1044,6 +1504,7 @@ class GitOpsApp:
         new_version = apply_version_prefix(base_version, prefix) if base_version and base_version_is_final else apply_version_prefix(bump_version(previous_version), prefix)
         summary = {
             "updated": not version_already_current,
+            "ref": ref,
             "component": component,
             "previous_version": previous_version,
             "version": new_version,
@@ -1150,10 +1611,10 @@ class GitOpsApp:
 
     @staticmethod
     def context_commit_id(target: OperationTarget, context: dict[str, Any]) -> str:
-        if "_version_plan" in context:
-            return str(context["_version_plan"]["summary"]["source_commit"])
         if context.get("ref_commit_id"):
             return str(context["ref_commit_id"])
+        if "_version_plan" in context:
+            return str(context["_version_plan"]["summary"]["source_commit"])
         branch = target.client.branch(context["ref"])
         commit = branch.get("commit") or {}
         commit_id = str(commit.get("id") or commit.get("short_id") or "")
@@ -1290,7 +1751,11 @@ class GitOpsApp:
     def save_version_update_default(self, version_update: dict[str, Any]) -> None:
         base_version = normalize_optional_version(str(version_update.get("base_version", "")))
         if base_version:
-            save_version_settings({"base_version": base_version})
+            ref = str(version_update.get("ref") or "").strip()
+            settings: dict[str, Any] = {"base_version": base_version}
+            if ref:
+                settings["base_versions"] = {ref: base_version}
+            save_version_settings(settings)
 
     def commit_version_update(self, target: OperationTarget, version_plan: dict[str, Any]) -> dict[str, Any]:
         summary = dict(version_plan["summary"])
@@ -1368,6 +1833,7 @@ class GitOpsApp:
     def default_tag_version_for_request(self, payload: dict[str, Any], ref: str, update_version: bool, base_version: str) -> str:
         targets = self.targets(payload)
         simos_target = next((target for target in targets if is_simos_repo(target.repo)), None) or self.optional_simos_target()
+        resolutions = component_resolution_by_repository(payload.get("component_resolutions"))
         requested_prefix = normalize_version_prefix(str(payload.get("version_prefix") or resolve_version_prefix(ref))) if update_version else ""
         if update_version:
             if simos_target is None:
@@ -1376,6 +1842,9 @@ class GitOpsApp:
             contexts: dict[str, dict[str, Any]] = {}
             for target in targets:
                 context: dict[str, Any] = {"ref": ref}
+                resolution = resolutions.get(target.repo.id)
+                if resolution and resolution["requested_ref"] == ref:
+                    context["ref_commit_id"] = resolution["commit_id"]
                 if target.repo.id == simos_target.repo.id:
                     context["_version_plan"] = version_plan
                 contexts[target.repo.id] = context
@@ -1394,7 +1863,10 @@ class GitOpsApp:
             if version:
                 return version
 
-        saved_version = load_version_settings().get("base_version", "")
+        settings = load_version_settings()
+        saved_version = str(settings.get("base_versions", {}).get(ref, ""))
+        if not saved_version and not update_version:
+            saved_version = str(settings.get("base_version", ""))
         if saved_version:
             return saved_version
 
@@ -1561,6 +2033,29 @@ def parse_tag_names(value: Any) -> list[str]:
     if not tags:
         raise ValueError("请至少输入一个 Tag")
     return tags
+
+
+def component_resolution_by_repository(value: Any) -> dict[str, dict[str, str]]:
+    if not isinstance(value, list):
+        return {}
+
+    required_fields = ("repository_id", "requested_ref", "resolved_ref", "commit_id")
+    result: dict[str, dict[str, str]] = {}
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        normalized = {key: str(item.get(key) or "").strip() for key in required_fields}
+        if not all(normalized.values()):
+            continue
+        normalized.update(
+            {
+                "repository_name": str(item.get("repository_name") or "").strip(),
+                "component": str(item.get("component") or "").strip(),
+                "resolution": str(item.get("resolution") or "").strip(),
+            }
+        )
+        result[normalized["repository_id"]] = normalized
+    return result
 
 
 def require_resident_tag(value: str) -> str:
@@ -1758,18 +2253,38 @@ def version_hint_from_ref(value: str) -> str:
     return normalize_optional_version(match.group(0))
 
 
-def load_version_settings() -> dict[str, str]:
+def load_version_settings() -> dict[str, Any]:
     try:
         data = json.loads(VERSION_SETTINGS_PATH.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
         data = {}
-    base_version = normalize_optional_version(str(data.get("base_version", "")))
-    return {"base_version": base_version}
+    if not isinstance(data, dict):
+        data = {}
+    raw_base_versions = data.get("base_versions")
+    base_versions = {
+        str(ref): version
+        for ref, value in (raw_base_versions.items() if isinstance(raw_base_versions, dict) else [])
+        if (version := normalize_optional_version(str(value)))
+    }
+    return {
+        "base_version": normalize_optional_version(str(data.get("base_version", ""))),
+        "base_versions": base_versions,
+    }
 
 
-def save_version_settings(settings: dict[str, str]) -> None:
+def save_version_settings(settings: dict[str, Any]) -> None:
     current = load_version_settings()
-    current.update({key: value for key, value in settings.items() if value})
+    base_version = normalize_optional_version(str(settings.get("base_version", "")))
+    if base_version:
+        current["base_version"] = base_version
+    supplied_base_versions = settings.get("base_versions")
+    if isinstance(supplied_base_versions, dict):
+        current_base_versions = dict(current.get("base_versions") or {})
+        for ref, value in supplied_base_versions.items():
+            version = normalize_optional_version(str(value))
+            if version:
+                current_base_versions[str(ref)] = version
+        current["base_versions"] = current_base_versions
     VERSION_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(current, ensure_ascii=False, indent=2)
     VERSION_SETTINGS_PATH.write_text(payload + chr(10), encoding="utf-8")
@@ -2192,27 +2707,40 @@ def append_schedule_run(run: dict[str, Any]) -> None:
 
 
 def load_release_runs() -> list[dict[str, Any]]:
-    if RELEASE_RUNS_PATH.exists():
-        raw = json.loads(RELEASE_RUNS_PATH.read_text(encoding="utf-8"))
-        items = raw.get("runs", raw if isinstance(raw, list) else [])
-        return [item for item in items if isinstance(item, dict)]
-    if SCHEDULE_RUNS_PATH.exists():
-        raw = json.loads(SCHEDULE_RUNS_PATH.read_text(encoding="utf-8"))
-        items = raw.get("runs", raw if isinstance(raw, list) else [])
-        runs = [item for item in items if isinstance(item, dict)]
-        save_release_runs(runs)
-        return runs
-    return []
+    with RELEASE_RUNS_LOCK:
+        if RELEASE_RUNS_PATH.exists():
+            raw = json.loads(RELEASE_RUNS_PATH.read_text(encoding="utf-8"))
+            items = raw.get("runs", raw if isinstance(raw, list) else [])
+            return [item for item in items if isinstance(item, dict)]
+        if SCHEDULE_RUNS_PATH.exists():
+            raw = json.loads(SCHEDULE_RUNS_PATH.read_text(encoding="utf-8"))
+            items = raw.get("runs", raw if isinstance(raw, list) else [])
+            runs = [item for item in items if isinstance(item, dict)]
+            save_release_runs(runs)
+            return runs
+        return []
 
 
 def save_release_runs(runs: list[dict[str, Any]]) -> None:
-    RELEASE_RUNS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    RELEASE_RUNS_PATH.write_text(json.dumps({"runs": runs[-300:]}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    with RELEASE_RUNS_LOCK:
+        RELEASE_RUNS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{RELEASE_RUNS_PATH.name}.", suffix=".tmp", dir=RELEASE_RUNS_PATH.parent)
+        temporary_path = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+                output.write(json.dumps({"runs": runs[-300:]}, ensure_ascii=False, indent=2) + "\n")
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary_path, RELEASE_RUNS_PATH)
+        finally:
+            if temporary_path.exists():
+                temporary_path.unlink()
 
 
 def append_release_run(run: dict[str, Any]) -> None:
-    runs = [item for item in load_release_runs() if item.get("id") != run.get("id")]
-    save_release_runs(runs + [run])
+    with RELEASE_RUNS_LOCK:
+        runs = [item for item in load_release_runs() if item.get("id") != run.get("id")]
+        save_release_runs(runs + [run])
 
 
 def new_release_run_id(prefix: str = "run") -> str:
@@ -2268,13 +2796,21 @@ def start_schedule_worker(app: GitOpsApp) -> None:
     def loop() -> None:
         while True:
             try:
-                app.run_due_schedules()
+                schedule_worker_tick(app)
             except Exception as exc:
                 print(f"[schedule] {exc}", file=sys.stderr, flush=True)
-            time.sleep(60)
+            time.sleep(release_run_poll_seconds())
 
     thread = threading.Thread(target=loop, name="gitops-schedule-worker", daemon=True)
     thread.start()
+
+
+def schedule_worker_tick(app: GitOpsApp, now: datetime | None = None) -> dict[str, list[dict[str, Any]]]:
+    return {
+        "builds": app.refresh_building_release_runs(now),
+        "resumed": app.resume_pending_release_runs(now),
+        "due": app.run_due_schedules(now),
+    }
 
 
 def load_dotenv(path: Path) -> None:
@@ -2368,6 +2904,7 @@ def make_handler(app: GitOpsApp):
                 "/api/resident-packages": ("view", lambda: app.resident_package(query.get("tag", ""))),
                 "/api/schedules": ("view", app.schedules),
                 "/api/release-tasks": ("view", app.release_tasks),
+                "/api/release-task-previews": ("view", app.release_task_previews),
                 "/api/release-runs": ("view", lambda: {"ok": True, "runs": load_release_runs()}),
             }
             schedule_route = match_schedule_path(path)
@@ -2430,6 +2967,8 @@ def make_handler(app: GitOpsApp):
                 run_id, action = release_run_action
                 if action == "continue":
                     routes[path] = ("create_tag", lambda run_id=run_id: app.continue_release_run(run_id))
+                elif action == "retry-version-merge":
+                    routes[path] = ("create_tag", lambda run_id=run_id: app.retry_version_merge(run_id))
             self.dispatch_route(path, routes)
 
         def do_PUT(self) -> None:
