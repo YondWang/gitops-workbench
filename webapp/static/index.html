@@ -395,8 +395,7 @@
                   <input name="feature_fallback_ref" value="release" required />
                 </label>
                 <p class="field-hint">
-                  <code>feature/*</code> 会逐仓库优先使用同名 Feature；缺失时使用上方指定的回退分支。
-                  <code>fix</code> 与 <code>release</code> 必须在所有业务仓库存在。
+                  SimOS 必须存在代码来源 ref；非 SimOS 仓库缺少该 ref（包括 <code>feature/*</code>）时，使用上方指定的回退分支。
                 </p>
                 <fieldset class="inline-options" data-config-matrix>
                   <legend>构建配置</legend>

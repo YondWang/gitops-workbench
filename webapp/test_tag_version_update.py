@@ -790,13 +790,25 @@ version:1.0.0
         with self.assertRaisesRegex(ValueError, "release 分支不存在"):
             self.app.resolve_full_release_components("feature/ABC")
 
-    def test_fix_release_does_not_fall_back_when_a_component_branch_is_missing(self) -> None:
+    def test_simos_source_ref_is_still_required(self) -> None:
         self.simos_client._branch_names = ["fix"]
-        self.business_client._branch_names = ["fix"]
+        self.business_client._branch_names = ["release"]
         self.workbench_client._branch_names = ["release"]
 
-        with self.assertRaisesRegex(ValueError, "不存在来源分支：fix"):
-            self.app.resolve_full_release_components("fix")
+        with self.assertRaisesRegex(ValueError, "simos 不存在来源分支：fix_otaEnvVi"):
+            self.app.resolve_full_release_components("fix_otaEnvVi")
+
+    def test_non_simos_missing_requested_ref_falls_back_to_selected_ref(self) -> None:
+        self.simos_client._branch_names = ["fix_otaEnvVi"]
+        self.business_client._branch_names = ["release"]
+        self.workbench_client._branch_names = ["release"]
+
+        resolutions = self.app.resolve_full_release_components("fix_otaEnvVi", "release")
+
+        by_repository = {item["repository_id"]: item for item in resolutions}
+        self.assertEqual(by_repository["simos"]["resolved_ref"], "fix_otaEnvVi")
+        self.assertEqual(by_repository["gitops-workbench"]["resolved_ref"], "release")
+        self.assertEqual(by_repository["gitops-workbench"]["resolution"], "fallback_release")
 
     def test_feature_release_version_plan_uses_the_snapshotted_fallback_commit(self) -> None:
         self.simos_client._branch_names = ["release", "feature/ABC"]
