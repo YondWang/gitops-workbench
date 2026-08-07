@@ -41,7 +41,7 @@ bugfix/<版本号>
 
 ## 完整发版来源解析
 
-完整发版以 SimOS 的来源分支为主线。`fix` 与 `release` 要求所有业务仓库都具有同名分支；`feature/*` 则逐仓库优先使用同名 Feature 分支，缺失时使用该仓库 `release` 的最新 commit。
+完整发版以 SimOS 的来源分支为主线，SimOS 必须具有请求的来源分支。非 SimOS 业务仓库优先使用同名来源 ref；缺失时使用任务中配置的“Feature 缺失时回退分支”（默认 `release`）的最新 commit。该规则同样适用于 `fix_otaEnvVi` 一类非 `feature/*` 的来源 ref。
 
 WebApp 会在发版计划生成时记录每个仓库实际使用的来源分支和 commit。版本 MR、重试与最终 Tag 都复用这份快照，因此等待版本 MR 合并期间其他分支推进不会改变本次包的组件组合。SimOS Tag 会固化这些子模块 commit，现有 CI 继续按该 Tag 构建，无需修改 CI 文件。
 

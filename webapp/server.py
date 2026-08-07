@@ -613,16 +613,16 @@ class GitOpsApp:
                     raise ValueError(f"{repository.id} 不存在来源分支：{requested_ref}")
                 resolved_ref = requested_ref
                 resolution = "simos_source"
-            elif self.is_feature_release_ref(requested_ref) and requested_ref not in branches:
+            elif requested_ref not in branches:
                 if fallback_ref not in branches:
-                    if fallback_ref == "release":
+                    if self.is_feature_release_ref(requested_ref) and fallback_ref == "release":
                         raise ValueError(f"{repository.id} 不存在 Feature 分支 {requested_ref}，且 release 分支不存在")
-                    raise ValueError(f"{repository.id} 不存在 Feature 分支 {requested_ref}，且回退分支不存在：{fallback_ref}")
+                    if self.is_feature_release_ref(requested_ref):
+                        raise ValueError(f"{repository.id} 不存在 Feature 分支 {requested_ref}，且回退分支不存在：{fallback_ref}")
+                    raise ValueError(f"{repository.id} 不存在来源分支：{requested_ref}，且回退分支不存在：{fallback_ref}")
                 resolved_ref = fallback_ref
                 resolution = "fallback_release" if fallback_ref == "release" else "fallback_ref"
             else:
-                if requested_ref not in branches:
-                    raise ValueError(f"{repository.id} 不存在来源分支：{requested_ref}")
                 resolved_ref = requested_ref
                 resolution = "requested_ref"
 
