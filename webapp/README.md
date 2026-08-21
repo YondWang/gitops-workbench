@@ -11,6 +11,7 @@
 - `admin` 可从指定来源分支或 Tag 创建版本级长期分支 `bugfix/<版本号>`。
 - Web 工具创建的 `release`、`bugfix/<版本号>` 默认设置为 GitLab 保护分支。
 - `admin` 可基于分支创建 Tag，默认命名为 `<来源>-<yyyyMMddHHmmss>`；来源分支中的 `/` 会替换为 `-`。
+- `user` 和 `admin` 可从任意 `feature/*` 创建隔离的 Feature 测试包；测试包固定使用 `T` 前缀，并通过临时构建分支触发 GitLab CI。
 - 写操作可选择“当前仓库”或“全部启用仓库”；全部仓库会先做预检查，预检查失败时不会写任何仓库。
 
 Web 工具只做分支创建和 Tag 创建，不做 Feature 合入、Bugfix 同步或自动 MR。Feature 合回来源分支、Bugfix 发版后同步回 `release`，统一在 GitLab MR 中完成。
@@ -44,6 +45,8 @@ bugfix/<版本号>
 完整发版以 SimOS 的来源分支为主线，SimOS 必须具有请求的来源分支。非 SimOS 业务仓库优先使用同名来源 ref；缺失时使用任务中配置的“Feature 缺失时回退分支”（默认 `release`）的最新 commit。该规则同样适用于 `fix_otaEnvVi` 一类非 `feature/*` 的来源 ref。
 
 WebApp 会在发版计划生成时记录每个仓库实际使用的来源分支和 commit。版本 MR、重试与最终 Tag 都复用这份快照，因此等待版本 MR 合并期间其他分支推进不会改变本次包的组件组合。SimOS Tag 会固化这些子模块 commit，现有 CI 继续按该 Tag 构建，无需修改 CI 文件。
+
+Feature 测试包规则：来源必须为 `feature/*`；服务端从该分支的 `version.info` 读取四段版本，默认沿用当前版本计算逻辑递增第四位。勾选“切换周版本（第三位 +1）”只增加计算结果的第三位，第四位不会被重置为 `001`。Tag 由服务端生成（例如 `feature-release_login_T3.1.24.021_202608071530`），user 不能手填或删除。SimOS 使用 `automation/feature-package/...` 临时构建分支写入 T 版本与组件 commit 快照后打 Tag；原始 Feature 分支、正式版本线和 Release 任务都不会被更新。Tag 创建会触发真实 GitLab CI，所有仓库预检通过前不会发生写操作。
 
 版本号按精确 SimOS 来源分支独立维护：`fix`、`release`、`feature/ABC` 与 `feature/XYZ` 的版本文件和版本兜底值互不共享。
 
@@ -113,3 +116,26 @@ http://127.0.0.1:8765
 ```
 
 服务器迁移时，只需要 Python 3、项目文件和可访问 GitLab 的网络环境。
+
+## 本地模拟 GitLab/CI
+
+不要用生产 `.env.local` 验证 Feature 打包。模拟模式使用本地 JSON 保存分支、Tag、文件和 Pipeline 状态，不访问 GitLab，也不会触发服务器 CI。
+
+从项目根目录启动：
+
+```bash
+docker compose -f docker-compose.simulation.yml up --build
+```
+
+浏览器打开 `http://127.0.0.1:8765`，使用 `user / user123` 登录。模拟数据预置 `feature/release_login`、`V3.1.24.020` 和一个历史 T Tag，可验证默认第四位递增和第三位递增。
+
+模拟模式由 `GITOPS_MODE=simulation` 控制：它只构造本地 `SimulatedGitLabClient`，数据只写入 `webapp/data-simulation`，不会使用生产 Token、`/data/simos-ci`、TLS 证书或自动发版调度。模拟 Tag 会生成成功状态的本地 Pipeline 记录。
+
+停止后恢复初始模拟数据：
+
+```bash
+docker compose -f docker-compose.simulation.yml down
+git checkout -- webapp/data-simulation/simulation-state.json
+```
+
+验证真实 `.gitlab-ci.yml`、Runner 和构建产物时，应使用独立 GitLab sandbox 项目及 Token；不要将生产项目配置放进模拟 Compose。

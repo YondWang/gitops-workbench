@@ -370,8 +370,12 @@ function renderSession() {
   $("#currentRole").className = `badge ${state.session.role === "admin" ? "ok" : "muted"}`;
 
   const isAdmin = state.session.role === "admin";
+  const permissions = state.config?.roles?.[state.session.role] || [];
+  const canCreateFeaturePackage = permissions.includes("create_feature_package");
   document.querySelectorAll("[data-admin-only]").forEach((el) => el.classList.toggle("hidden", !isAdmin));
   document.querySelectorAll("[data-user-block]").forEach((el) => el.classList.toggle("hidden", isAdmin));
+  document.querySelectorAll("[data-feature-package-only]").forEach((el) => el.classList.toggle("hidden", !canCreateFeaturePackage));
+  document.querySelectorAll("[data-feature-package-denied]").forEach((el) => el.classList.toggle("hidden", canCreateFeaturePackage));
   if (!isAdmin && ["release", "bugfix", "tag", "schedules", "repositories"].some((id) => $(`#${id}`).classList.contains("active-view"))) {
     switchView("overview");
   }
@@ -415,6 +419,8 @@ function renderRepositories() {
               <strong>${escapeHtml(repo.name)}</strong>
               <div class="meta">${escapeHtml(repo.base_url)} / ${escapeHtml(repo.project)}</div>
             </td>
+            <td><code>${escapeHtml(repo.submodule_path || (repo.id === "simos" || repo.id === "config" ? "不适用" : `src/${repo.id}`))}</code></td>
+            <td><code>${escapeHtml(String(repo.revision_bit || "—"))}</code></td>
             <td>${repo.token_loaded ? "已加载" : "未加载"} <div class="meta">${escapeHtml(repo.token_env)}</div></td>
             <td>${repo.enabled ? "启用" : "停用"}</td>
             <td>
@@ -424,7 +430,7 @@ function renderRepositories() {
           </tr>
         `,
       )
-      .join("") || `<tr><td colspan="5">暂无仓库配置</td></tr>`;
+      .join("") || `<tr><td colspan="7">暂无仓库配置</td></tr>`;
 }
 
 function renderSchedules() {
@@ -777,8 +783,26 @@ function renderSelectOptions() {
   fillSelect("#featureRef", featureRefs.featureSources, "release");
   fillSelect("#bugfixRef", bugfixRefs.refs, "release");
   fillSelect("#tagRef", tagRefs.branches);
+  fillSelect("#featurePackageRef", (state.commonRefs?.feature_branches || []).map((item) => item.name).sort((a, b) => a.localeCompare(b)));
   renderTagDeleteOptions();
   syncTagUpdateVersionControl();
+  refreshFeaturePackagePreview().catch((error) => setText("#featurePackageVersionPreview", error.message));
+}
+
+async function refreshFeaturePackagePreview() {
+  const form = $("#featurePackageForm");
+  const preview = $("#featurePackageVersionPreview");
+  const ref = form?.elements.ref?.value || "";
+  if (!form || !preview || !ref) {
+    if (preview) preview.textContent = "选择 Feature 分支后计算";
+    return;
+  }
+  const params = new URLSearchParams({
+    ref,
+    force_week_bump: String(Boolean(form.elements.force_week_bump?.checked)),
+  });
+  const result = await api(`/api/feature-package/preview?${params}`);
+  preview.textContent = result.ok ? `${result.version} · ${result.tag_name}` : result.error || "无法计算版本";
 }
 
 function scopeValue(formSelector) {
@@ -898,6 +922,7 @@ async function refreshAll() {
   const config = await api("/api/config");
   state.config = config;
   state.repositories = config.repositories || [];
+  renderSession();
   renderRepositorySelect();
   renderRepositories();
   renderConfig();
@@ -1146,6 +1171,8 @@ function fillRepositoryForm(repo) {
   form.elements.name.value = repo?.name || "";
   form.elements.base_url.value = repo?.base_url || "https://www.chancee-shanghai.cn:9900";
   form.elements.project.value = repo?.project || "";
+  form.elements.submodule_path.value = repo?.submodule_path || "";
+  form.elements.revision_bit.value = repo?.revision_bit || "";
   form.elements.default_ref.value = repo?.default_ref || "main";
   form.elements.token_env.value = repo?.token_env || "GITLAB_TOKEN";
   form.elements.enabled.checked = repo ? Boolean(repo.enabled) : true;
@@ -1244,6 +1271,37 @@ async function runManualRelease(form) {
   }
 }
 
+async function refreshManualReleasePreview() {
+  const form = $("#manualReleaseForm");
+  const preview = $("#manualReleaseVersionPreview");
+  if (!form || !preview) return;
+  const body = formValues(form);
+  if (!body.source_ref) {
+    preview.textContent = "选择来源分支后计算";
+    return;
+  }
+  const params = new URLSearchParams({
+    source_ref: body.source_ref,
+    feature_fallback_ref: body.feature_fallback_ref || "release",
+    version_prefix_mode: body.version_prefix_mode || "auto",
+    manual_version_prefix: body.manual_version_prefix || "V",
+    force_week_bump: String(Boolean(form.elements.force_week_bump?.checked)),
+  });
+  try {
+    const result = await api(`/api/release-runs/manual-preview?${params}`);
+    preview.textContent = result.ok && result.current_version && result.version && result.tag_name
+      ? `${result.current_version} → ${result.version} · ${result.tag_name}`
+      : result.error || "计算结果不完整，请检查来源分支后重试";
+  } catch (error) {
+    preview.textContent = error.message;
+  }
+}
+
+function markManualReleasePreviewDirty() {
+  const preview = $("#manualReleaseVersionPreview");
+  if (preview) preview.textContent = "输入已变更，待点击“计算版本”";
+}
+
 async function rerunExistingTag(form) {
   const body = formValues(form);
   const result = await postJson("/api/release-runs/rerun-tag", body);
@@ -1326,6 +1384,21 @@ function bindEvents() {
   $("#featureForm").addEventListener("submit", (event) => {
     event.preventDefault();
     handleOperation("创建 feature", "/api/feature/create", event.currentTarget).catch((error) => appendLog("创建 feature 失败", error.message));
+  });
+
+  $("#featurePackageForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    handleOperation("创建 Feature 测试包", "/api/feature-package/create", event.currentTarget).catch((error) => appendLog("创建 Feature 测试包失败", error.message));
+  });
+  $("#featurePackageForm")?.elements.ref?.addEventListener("change", () =>
+    refreshFeaturePackagePreview().catch((error) => setText("#featurePackageVersionPreview", error.message)),
+  );
+  $("#featurePackageForm")?.elements.force_week_bump?.addEventListener("change", () =>
+    refreshFeaturePackagePreview().catch((error) => setText("#featurePackageVersionPreview", error.message)),
+  );
+  $("#manualReleaseCalculateBtn")?.addEventListener("click", refreshManualReleasePreview);
+  ["source_ref", "feature_fallback_ref", "version_prefix_mode", "manual_version_prefix", "force_week_bump"].forEach((name) => {
+    $("#manualReleaseForm")?.elements[name]?.addEventListener("change", markManualReleasePreviewDirty);
   });
 
   $("#releaseForm").addEventListener("submit", (event) => {

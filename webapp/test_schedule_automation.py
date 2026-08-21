@@ -61,6 +61,7 @@ class FakeClient:
         self._tag_names: list[str] = []
         self._merge_requests: list[dict[str, Any]] = []
         self.branch_commit = {"id": f"{repo_id}-new", "short_id": f"{repo_id}-new", "parent_ids": []}
+        self.software_yaml = 'version: "3.1.24.019"\ncomponents:\n'
 
     def project(self) -> dict[str, Any]:
         return {"id": self.repo_id}
@@ -87,6 +88,8 @@ class FakeClient:
             return VERSION_INFO
         if file_path == "pkg.info":
             return "version:3.1.24.0\n"
+        if file_path == "software.yaml":
+            return self.software_yaml
         raise server.GitLabError("missing", status=404, payload={})
 
     def branch(self, name: str) -> dict[str, Any]:
@@ -200,13 +203,13 @@ class ScheduleAutomationTest(unittest.TestCase):
         result = self.app.schedule_dry_run("daily-simos-resident-release", now="2026-07-03T16:00:00+08:00")
 
         self.assertTrue(result["ok"])
-        self.assertEqual(result["plan"]["version"], "V3.1.25.020")
+        self.assertEqual(result["plan"]["version"], "V3.1.25.019")
         self.assertEqual(result["plan"]["version_prefix"], "V")
         self.assertEqual(result["plan"]["ref"], "fix")
-        self.assertEqual(result["plan"]["tag_name"], "fix_V3.1.25.020_202607031600")
+        self.assertEqual(result["plan"]["tag_name"], "fix_V3.1.25.019_202607031600")
         self.assertEqual(result["plan"]["cloud_category"], "车机/CI自动构建")
         self.assertNotIn("effective_cloud_category", result["plan"])
-        self.assertEqual(result["plan"]["cloud_dir"], "/public/Versions/2026-07-03_V3.1.25.020/车机/CI自动构建")
+        self.assertEqual(result["plan"]["cloud_dir"], "/public/Versions/2026-07-03_V3.1.25.019/车机/CI自动构建")
         self.assertIn("SIMOS_CLOUD_CATEGORY=车机/CI自动构建", result["plan"]["message"])
         self.assertIn("SIMOS_CONFIG_MATRIX=SIMBOT_R6_A:360,SIMBOT_R6_B:360s", result["plan"]["message"])
         self.assertTrue(result["plan"]["requires_weekly_version_confirmation"])
@@ -220,7 +223,7 @@ class ScheduleAutomationTest(unittest.TestCase):
         self.assertFalse(any(call[0] == "create_merge_request" for call in self.client.calls))
         self.assertFalse(any(call[0] == "create_tag" for call in self.client.calls))
         runs = self.app.schedule_runs("daily-simos-resident-release")
-        self.assertEqual(runs["runs"][0]["tag_name"], "fix_V3.1.25.020_202607031600")
+        self.assertEqual(runs["runs"][0]["tag_name"], "fix_V3.1.25.019_202607031600")
 
     def test_full_release_plan_and_run_preserve_component_resolution_snapshot(self) -> None:
         result = self.app.schedule_run_now("daily-simos-resident-release", now="2026-07-04T16:00:00+08:00")
@@ -272,13 +275,65 @@ class ScheduleAutomationTest(unittest.TestCase):
         self.assertEqual(result["task"]["feature_fallback_ref"], "bugfix/V1.2.3")
         self.assertEqual(result["plan"]["feature_fallback_ref"], "bugfix/V1.2.3")
 
+    def test_manual_release_carries_weekly_version_bump(self) -> None:
+        result = self.app.manual_release_run(
+            {
+                "source_ref": "fix",
+                "force_week_bump": True,
+                "now": "2026-07-04T16:00:00+08:00",
+            }
+        )
+        self.assertTrue(result["task"]["force_week_bump"])
+        self.assertTrue(result["plan"]["force_week_bump"])
+
+    def test_manual_release_preview_reads_remote_software_yaml_and_weekly_bump(self) -> None:
+        result = self.app.manual_release_preview(
+            {
+                "source_ref": "fix",
+                "force_week_bump": True,
+                "now": "2026-07-06T16:00:00+08:00",
+            }
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["current_version"], "3.1.24.019")
+        self.assertEqual(result["version"], "V3.1.25.019")
+        self.assertEqual(result["changed_components"], [])
+
+    def test_release_plan_excludes_unchanged_submodule_from_fourth_version_part(self) -> None:
+        business_repo = RepositoryConfig(
+            id="business",
+            name="business",
+            base_url="https://gitlab.example",
+            project="OS/business",
+            token_env="BUSINESS_TOKEN",
+        )
+        simos_client = FakeClient("simos")
+        business_client = FakeClient("business")
+        simos_client.software_yaml = """version: \"3.1.24.020\"
+commits:
+  main: \"simos-new\"
+  business: \"business-new\"
+"""
+        self.app.store = FakeStore([self.repo, business_repo])  # type: ignore[assignment]
+        self.app.client_for = lambda repo: simos_client if repo.id == "simos" else business_client  # type: ignore[method-assign]
+        simos_client._tag_names.append("fix_V3.1.24.099_202607061000")
+
+        plan = self.app.resolve_release_plan({**server.DEFAULT_SCHEDULE, "force_week_bump": True}, now="2026-07-06T16:00:00+08:00")
+
+        self.assertEqual(plan["version_number"], "3.1.25.020")
+        self.assertEqual(
+            self.app.manual_release_preview({"source_ref": "fix", "force_week_bump": True, "now": "2026-07-06T16:00:00+08:00"})["changed_components"],
+            [],
+        )
+
     def test_continue_after_weekly_confirmation_creates_version_mr(self) -> None:
         self.app.save_schedule({"id": "daily-simos-resident-release", "config_ref": "SIMBOT_R6_B"})
         result = self.app.schedule_run_now("daily-simos-resident-release", now="2026-07-03T16:00:00+08:00")
         continued = self.app.continue_release_run(result["run"]["id"])
 
         self.assertEqual(continued["run"]["status"], "merging_version_mr")
-        self.assertEqual(continued["run"]["tag_name"], "fix_V3.1.25.020_202607031600")
+        self.assertEqual(continued["run"]["tag_name"], "fix_V3.1.25.019_202607031600")
         self.assertTrue(any(call[0] == "create_merge_request" for call in self.client.calls))
         self.assertIn(("accept_merge_request", 7), self.client.calls)
         self.assertFalse(any(call[0] == "create_tag" for call in self.client.calls))
@@ -565,6 +620,41 @@ class ScheduleAutomationTest(unittest.TestCase):
 
         self.assertEqual(statuses, [200])
         self.app.release_task_previews.assert_called_once_with()
+
+    def test_manual_release_preview_get_route_is_not_treated_as_a_run_id(self) -> None:
+        token = self.app.auth.login("admin", "admin123")["token"]
+        self.app.manual_release_preview = Mock(return_value={"ok": True, "version": "V3.1.24.020"})  # type: ignore[method-assign]
+        handler = object.__new__(server.make_handler(self.app))
+        handler.path = "/api/release-runs/manual-preview?source_ref=fix"
+        handler.headers = {"Cookie": server.login_cookie(token)}
+        handler.wfile = io.BytesIO()
+        handler.extra_headers = {}
+        statuses: list[int] = []
+        handler.send_response = lambda status, *args: statuses.append(status)
+        handler.send_header = lambda *args: None
+        handler.end_headers = lambda: None
+
+        handler.do_GET()
+
+        self.assertEqual(statuses, [200])
+        self.app.manual_release_preview.assert_called_once_with(
+            {
+                "source_ref": "fix",
+                "feature_fallback_ref": "release",
+                "version_prefix_mode": "auto",
+                "manual_version_prefix": "V",
+                "force_week_bump": False,
+            }
+        )
+
+    def test_manual_release_preview_ui_uses_an_explicit_calculation_button(self) -> None:
+        index = (server.STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+        app_js = (server.STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="manualReleaseCalculateBtn"', index)
+        self.assertIn("计算版本", index)
+        self.assertIn('manualReleaseCalculateBtn")?.addEventListener("click", refreshManualReleasePreview)', app_js)
+        self.assertIn("待点击“计算版本”", app_js)
 
     def test_same_week_existing_third_only_bumps_fourth(self) -> None:
         self.client._tag_names.append("fix_V3.1.25.020_202607031600")

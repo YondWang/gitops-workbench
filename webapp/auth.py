@@ -17,10 +17,11 @@ SESSION_SECONDS = 8 * 60 * 60
 PBKDF2_ITERATIONS = 160_000
 
 ROLE_PERMISSIONS = {
-    "user": {"view", "create_feature"},
+    "user": {"view", "create_feature", "create_feature_package"},
     "admin": {
         "view",
         "create_feature",
+        "create_feature_package",
         "create_release",
         "create_bugfix",
         "create_tag",

@@ -1,0 +1,86 @@
+{
+  "repositories": {
+    "simos": {
+      "branches": {
+        "main": {
+          "commit_id": "simos-main-commit",
+          "files": {}
+        },
+        "release": {
+          "commit_id": "simos-release-commit",
+          "files": {
+            "version.info": "Version:V3.1.24.020\nNextVersion:\"\"\nPreVersion:V3.1.24.019\n\nsimos_commitid:simos-release-commit\nbusiness_commitid:business-release-commit\n\nsimos_branch:release\nbusiness_branch:release\n\nDate:2026-08-06 10:00:00\n"
+          }
+        },
+        "feature/release_login": {
+          "commit_id": "simos-feature-login-commit",
+          "files": {
+            "version.info": "Version:V3.1.24.020\nNextVersion:\"\"\nPreVersion:V3.1.24.019\n\nsimos_commitid:simos-feature-login-commit\nbusiness_commitid:business-release-commit\n\nsimos_branch:feature/release_login\nbusiness_branch:release\n\nDate:2026-08-07 10:00:00\n"
+          }
+        }
+      },
+      "tags": [
+        {
+          "name": "feature-release_login_T3.1.24.020_202608061000",
+          "target": "simos-feature-login-commit"
+        }
+      ]
+    },
+    "business": {
+      "branches": {
+        "main": {
+          "commit_id": "business-main-commit",
+          "files": {}
+        },
+        "release": {
+          "commit_id": "business-release-commit",
+          "files": {}
+        }
+      },
+      "tags": []
+    }
+  },
+  "baseline_repositories": {
+    "simos": {
+      "branches": {
+        "main": {
+          "commit_id": "simos-main-commit",
+          "files": {}
+        },
+        "release": {
+          "commit_id": "simos-release-commit",
+          "files": {
+            "version.info": "Version:V3.1.24.020\nNextVersion:\"\"\nPreVersion:V3.1.24.019\n\nsimos_commitid:simos-release-commit\nbusiness_commitid:business-release-commit\n\nsimos_branch:release\nbusiness_branch:release\n\nDate:2026-08-06 10:00:00\n"
+          }
+        },
+        "feature/release_login": {
+          "commit_id": "simos-feature-login-commit",
+          "files": {
+            "version.info": "Version:V3.1.24.020\nNextVersion:\"\"\nPreVersion:V3.1.24.019\n\nsimos_commitid:simos-feature-login-commit\nbusiness_commitid:business-release-commit\n\nsimos_branch:feature/release_login\nbusiness_branch:release\n\nDate:2026-08-07 10:00:00\n"
+          }
+        }
+      },
+      "tags": [
+        {
+          "name": "feature-release_login_T3.1.24.020_202608061000",
+          "target": "simos-feature-login-commit"
+        }
+      ]
+    },
+    "business": {
+      "branches": {
+        "main": {
+          "commit_id": "business-main-commit",
+          "files": {}
+        },
+        "release": {
+          "commit_id": "business-release-commit",
+          "files": {}
+        }
+      },
+      "tags": []
+    }
+  },
+  "pipelines": [],
+  "next_pipeline_id": 1
+}

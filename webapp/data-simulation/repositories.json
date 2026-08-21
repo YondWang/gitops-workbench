@@ -1,0 +1,24 @@
+{
+  "repositories": [
+    {
+      "id": "simos",
+      "name": "simos (simulation)",
+      "base_url": "http://simulation.invalid",
+      "project": "sandbox/simos",
+      "enabled": true,
+      "default_ref": "main",
+      "token_env": "SIMULATION_TOKEN",
+      "ssl_verify": false
+    },
+    {
+      "id": "business",
+      "name": "business (simulation)",
+      "base_url": "http://simulation.invalid",
+      "project": "sandbox/business",
+      "enabled": true,
+      "default_ref": "main",
+      "token_env": "SIMULATION_TOKEN",
+      "ssl_verify": false
+    }
+  ]
+}

@@ -1,0 +1,588 @@
+{
+  "runs": [
+    {
+      "id": "release-20260810154657252023",
+      "task_id": "manual-release",
+      "schedule_id": "manual-release",
+      "trigger": "manual",
+      "execution_type": "full_release",
+      "status": "closed",
+      "source_ref": "fix",
+      "feature_fallback_ref": "fix",
+      "component_resolutions": [
+        {
+          "repository_id": "business",
+          "repository_name": "business",
+          "component": "business",
+          "requested_ref": "fix",
+          "resolved_ref": "fix",
+          "resolution": "requested_ref",
+          "commit_id": "1933491004afe1ce89f3945cad362f96cf708756"
+        },
+        {
+          "repository_id": "simos",
+          "repository_name": "simos",
+          "component": "simos",
+          "requested_ref": "fix",
+          "resolved_ref": "fix",
+          "resolution": "simos_source",
+          "commit_id": "634ebd89555034596833b7c4c7416179f1562bae"
+        }
+      ],
+      "config_ref": "SIMBOT_R6_A",
+      "config_matrix": [
+        {
+          "config_ref": "SIMBOT_R6_A",
+          "label": "360"
+        },
+        {
+          "config_ref": "SIMBOT_R6_B",
+          "label": "360s"
+        }
+      ],
+      "config_matrix_value": "SIMBOT_R6_A:360,SIMBOT_R6_B:360s",
+      "source_ref_slug": "fix",
+      "version_number": "3.1.1.041",
+      "version_prefix": "V",
+      "release_version": "V3.1.1.041",
+      "version": "V3.1.1.041",
+      "tag_name": "fix_V3.1.1.041_202608101546",
+      "cloud_dir": "/public/Versions/2026-08-10_V3.1.1.041/车机/CI自动构建",
+      "started_at": "2026-08-10T15:46:50.116304+08:00",
+      "updated_at": "2026-08-10T15:47:10.785808+08:00",
+      "finished_at": "2026-08-10T15:47:10.785808+08:00",
+      "phase": "waiting_version_mr",
+      "result": {
+        "ok": false,
+        "operation": "create_tag",
+        "phase": "waiting_version_mr",
+        "blocked": true,
+        "tag_name": "fix_V3.1.1.041_202608101546",
+        "message": "已创建 simos 版本号更新 MR，请合并后再次创建 Tag",
+        "precheck": [
+          {
+            "repository": {
+              "id": "business",
+              "name": "business",
+              "base_url": "https://www.chancee-shanghai.cn:9900",
+              "project": "software_hmi_app/business",
+              "enabled": true,
+              "default_ref": "main",
+              "token_env": "GITLAB_TOKEN",
+              "ssl_verify": true,
+              "token_loaded": true
+            },
+            "ok": true,
+            "context": {
+              "source_ref": "fix",
+              "tag_name": "fix_V3.1.1.041_202608101546",
+              "message": "resident release build\n\nSIMOS_CLOUD_CATEGORY=车机/CI自动构建\nSIMOS_CONFIG_MATRIX=SIMBOT_R6_A:360,SIMBOT_R6_B:360s\nSIMOS_CONFIG_REFS=SIMBOT_R6_A,SIMBOT_R6_B\nSIMOS_CONFIG_REF=SIMBOT_R6_A",
+              "update_version": true,
+              "ref_commit_id": "1933491004afe1ce89f3945cad362f96cf708756",
+              "component_resolution": {
+                "repository_id": "business",
+                "requested_ref": "fix",
+                "resolved_ref": "fix",
+                "commit_id": "1933491004afe1ce89f3945cad362f96cf708756",
+                "repository_name": "business",
+                "component": "business",
+                "resolution": "requested_ref"
+              },
+              "ref": "fix"
+            }
+          },
+          {
+            "repository": {
+              "id": "simos",
+              "name": "simos",
+              "base_url": "https://www.chancee-shanghai.cn:9900",
+              "project": "OS/simos",
+              "enabled": true,
+              "default_ref": "main",
+              "token_env": "GITLAB_TOKEN",
+              "ssl_verify": true,
+              "token_loaded": true
+            },
+            "ok": true,
+            "context": {
+              "source_ref": "fix",
+              "tag_name": "fix_V3.1.1.041_202608101546",
+              "message": "resident release build\n\nSIMOS_CLOUD_CATEGORY=车机/CI自动构建\nSIMOS_CONFIG_MATRIX=SIMBOT_R6_A:360,SIMBOT_R6_B:360s\nSIMOS_CONFIG_REFS=SIMBOT_R6_A,SIMBOT_R6_B\nSIMOS_CONFIG_REF=SIMBOT_R6_A",
+              "update_version": true,
+              "ref_commit_id": "634ebd89555034596833b7c4c7416179f1562bae",
+              "component_resolution": {
+                "repository_id": "simos",
+                "requested_ref": "fix",
+                "resolved_ref": "fix",
+                "commit_id": "634ebd89555034596833b7c4c7416179f1562bae",
+                "repository_name": "simos",
+                "component": "simos",
+                "resolution": "simos_source"
+              },
+              "ref": "fix",
+              "version_update": {
+                "updated": true,
+                "ref": "fix",
+                "component": "simos",
+                "previous_version": "V3.1.30.064",
+                "version": "V3.1.1.041",
+                "version_number": "3.1.1.041",
+                "version_prefix": "V",
+                "previous_commit": "d434438ebe0f6703995589482bed3933dfca0285",
+                "source_commit": "634ebd89555034596833b7c4c7416179f1562bae",
+                "files": [],
+                "base_version": "3.1.1.041",
+                "base_version_is_final": true
+              }
+            }
+          }
+        ],
+        "version_update": {
+          "updated": true,
+          "ref": "fix",
+          "component": "simos",
+          "previous_version": "V3.1.30.064",
+          "version": "V3.1.1.041",
+          "version_number": "3.1.1.041",
+          "version_prefix": "V",
+          "previous_commit": "d434438ebe0f6703995589482bed3933dfca0285",
+          "source_commit": "634ebd89555034596833b7c4c7416179f1562bae",
+          "files": [
+            "version.info",
+            "software.yaml"
+          ],
+          "base_version": "3.1.1.041",
+          "base_version_is_final": true,
+          "changed_components": [
+            "simos"
+          ],
+          "branch": "automation/version-info/fix_V3.1.1.041_202608101546",
+          "commit": {
+            "id": "b5c16a62900737072c94a17976d799f45097a2ee",
+            "short_id": "b5c16a629007",
+            "branch": "automation/version-info/fix_V3.1.1.041_202608101546"
+          },
+          "merge_request": {
+            "id": 3782,
+            "iid": 498,
+            "project_id": 20,
+            "title": "Update version info before tag fix_V3.1.1.041_202608101546",
+            "description": null,
+            "state": "opened",
+            "created_at": "2026-08-10T15:46:57.270+08:00",
+            "updated_at": "2026-08-10T15:46:57.270+08:00",
+            "merged_by": null,
+            "merge_user": null,
+            "merged_at": null,
+            "closed_by": null,
+            "closed_at": null,
+            "target_branch": "fix",
+            "source_branch": "automation/version-info/fix_V3.1.1.041_202608101546",
+            "user_notes_count": 0,
+            "upvotes": 0,
+            "downvotes": 0,
+            "author": {
+              "id": 21,
+              "username": "YonderWang",
+              "public_email": null,
+              "name": "zongyuan wang",
+              "state": "active",
+              "locked": false,
+              "avatar_url": "https://secure.gravatar.com/avatar/3266092ce9724f3b899ab812c9a3fea2366fe26de5c560cd6784da53033cad27?s=80&d=identicon",
+              "web_url": "https://www.chancee-shanghai.cn:9900/YonderWang"
+            },
+            "assignees": [],
+            "assignee": null,
+            "reviewers": [],
+            "source_project_id": 20,
+            "target_project_id": 20,
+            "labels": [],
+            "draft": false,
+            "imported": false,
+            "imported_from": "none",
+            "work_in_progress": false,
+            "milestone": null,
+            "merge_when_pipeline_succeeds": false,
+            "merge_status": "checking",
+            "detailed_merge_status": "preparing",
+            "merge_after": null,
+            "sha": "b5c16a62900737072c94a17976d799f45097a2ee",
+            "merge_commit_sha": null,
+            "squash_commit_sha": null,
+            "discussion_locked": null,
+            "should_remove_source_branch": null,
+            "force_remove_source_branch": false,
+            "prepared_at": null,
+            "reference": "!498",
+            "references": {
+              "short": "!498",
+              "relative": "!498",
+              "full": "OS/simos!498"
+            },
+            "web_url": "https://www.chancee-shanghai.cn:9900/OS/simos/-/merge_requests/498",
+            "time_stats": {
+              "time_estimate": 0,
+              "total_time_spent": 0,
+              "human_time_estimate": null,
+              "human_total_time_spent": null
+            },
+            "squash": true,
+            "squash_on_merge": true,
+            "task_completion_status": {
+              "count": 0,
+              "completed_count": 0
+            },
+            "has_conflicts": false,
+            "blocking_discussions_resolved": true,
+            "subscribed": true,
+            "changes_count": null,
+            "latest_build_started_at": null,
+            "latest_build_finished_at": null,
+            "first_deployed_to_production_at": null,
+            "pipeline": null,
+            "head_pipeline": null,
+            "diff_refs": null,
+            "merge_error": null,
+            "user": {
+              "can_merge": true
+            }
+          }
+        },
+        "merge_request": {
+          "id": 3782,
+          "iid": 498,
+          "project_id": 20,
+          "title": "Update version info before tag fix_V3.1.1.041_202608101546",
+          "description": null,
+          "state": "opened",
+          "created_at": "2026-08-10T15:46:57.270+08:00",
+          "updated_at": "2026-08-10T15:46:57.270+08:00",
+          "merged_by": null,
+          "merge_user": null,
+          "merged_at": null,
+          "closed_by": null,
+          "closed_at": null,
+          "target_branch": "fix",
+          "source_branch": "automation/version-info/fix_V3.1.1.041_202608101546",
+          "user_notes_count": 0,
+          "upvotes": 0,
+          "downvotes": 0,
+          "author": {
+            "id": 21,
+            "username": "YonderWang",
+            "public_email": null,
+            "name": "zongyuan wang",
+            "state": "active",
+            "locked": false,
+            "avatar_url": "https://secure.gravatar.com/avatar/3266092ce9724f3b899ab812c9a3fea2366fe26de5c560cd6784da53033cad27?s=80&d=identicon",
+            "web_url": "https://www.chancee-shanghai.cn:9900/YonderWang"
+          },
+          "assignees": [],
+          "assignee": null,
+          "reviewers": [],
+          "source_project_id": 20,
+          "target_project_id": 20,
+          "labels": [],
+          "draft": false,
+          "imported": false,
+          "imported_from": "none",
+          "work_in_progress": false,
+          "milestone": null,
+          "merge_when_pipeline_succeeds": false,
+          "merge_status": "checking",
+          "detailed_merge_status": "preparing",
+          "merge_after": null,
+          "sha": "b5c16a62900737072c94a17976d799f45097a2ee",
+          "merge_commit_sha": null,
+          "squash_commit_sha": null,
+          "discussion_locked": null,
+          "should_remove_source_branch": null,
+          "force_remove_source_branch": false,
+          "prepared_at": null,
+          "reference": "!498",
+          "references": {
+            "short": "!498",
+            "relative": "!498",
+            "full": "OS/simos!498"
+          },
+          "web_url": "https://www.chancee-shanghai.cn:9900/OS/simos/-/merge_requests/498",
+          "time_stats": {
+            "time_estimate": 0,
+            "total_time_spent": 0,
+            "human_time_estimate": null,
+            "human_total_time_spent": null
+          },
+          "squash": true,
+          "squash_on_merge": true,
+          "task_completion_status": {
+            "count": 0,
+            "completed_count": 0
+          },
+          "has_conflicts": false,
+          "blocking_discussions_resolved": true,
+          "subscribed": true,
+          "changes_count": null,
+          "latest_build_started_at": null,
+          "latest_build_finished_at": null,
+          "first_deployed_to_production_at": null,
+          "pipeline": null,
+          "head_pipeline": null,
+          "diff_refs": null,
+          "merge_error": null,
+          "user": {
+            "can_merge": true
+          }
+        },
+        "auto_merge_version_mr": true,
+        "results": []
+      },
+      "task": {
+        "id": "manual-release",
+        "enabled": false,
+        "name": "手动完整发版构建",
+        "timezone": "Asia/Shanghai",
+        "cron": "0 16 * * *",
+        "daily_time": "16:00",
+        "source_ref_strategy": "fixed_ref",
+        "default_ref": "fix",
+        "feature_fallback_ref": "fix",
+        "config_ref": "",
+        "config_matrix_enabled": true,
+        "config_matrix": [
+          {
+            "config_ref": "SIMBOT_R6_A",
+            "label": "360",
+            "enabled": true
+          },
+          {
+            "config_ref": "SIMBOT_R6_B",
+            "label": "360s",
+            "enabled": true
+          }
+        ],
+        "version_source": "simos_version_info",
+        "manual_version_number": "",
+        "version_prefix_mode": "auto",
+        "manual_version_prefix": "V",
+        "cloud_category": "车机/CI自动构建",
+        "execution_type": "full_release",
+        "ref_strategy": "editable",
+        "manual_version": ""
+      },
+      "plan": {
+        "schedule_id": "manual-release",
+        "task_id": "manual-release",
+        "repository_id": "simos",
+        "project": "OS/simos",
+        "ref": "fix",
+        "source_ref": "fix",
+        "feature_fallback_ref": "fix",
+        "component_resolutions": [
+          {
+            "repository_id": "business",
+            "repository_name": "business",
+            "component": "business",
+            "requested_ref": "fix",
+            "resolved_ref": "fix",
+            "resolution": "requested_ref",
+            "commit_id": "1933491004afe1ce89f3945cad362f96cf708756"
+          },
+          {
+            "repository_id": "simos",
+            "repository_name": "simos",
+            "component": "simos",
+            "requested_ref": "fix",
+            "resolved_ref": "fix",
+            "resolution": "simos_source",
+            "commit_id": "634ebd89555034596833b7c4c7416179f1562bae"
+          }
+        ],
+        "config_ref": "SIMBOT_R6_A",
+        "source_ref_slug": "fix",
+        "version": "V3.1.1.041",
+        "version_number": "3.1.1.041",
+        "version_prefix": "V",
+        "release_version": "V3.1.1.041",
+        "tag_name": "fix_V3.1.1.041_202608101546",
+        "message": "resident release build\n\nSIMOS_CLOUD_CATEGORY=车机/CI自动构建\nSIMOS_CONFIG_MATRIX=SIMBOT_R6_A:360,SIMBOT_R6_B:360s\nSIMOS_CONFIG_REFS=SIMBOT_R6_A,SIMBOT_R6_B\nSIMOS_CONFIG_REF=SIMBOT_R6_A",
+        "cloud_category": "车机/CI自动构建",
+        "config_matrix_enabled": true,
+        "config_matrix": [
+          {
+            "config_ref": "SIMBOT_R6_A",
+            "label": "360"
+          },
+          {
+            "config_ref": "SIMBOT_R6_B",
+            "label": "360s"
+          }
+        ],
+        "config_refs": [
+          "SIMBOT_R6_A",
+          "SIMBOT_R6_B"
+        ],
+        "config_matrix_value": "SIMBOT_R6_A:360,SIMBOT_R6_B:360s",
+        "cloud_dir": "/public/Versions/2026-08-10_V3.1.1.041/车机/CI自动构建",
+        "planned_at": "2026-08-10T15:46:50.116304+08:00",
+        "repositories": [
+          {
+            "id": "business",
+            "name": "business",
+            "base_url": "https://www.chancee-shanghai.cn:9900",
+            "project": "software_hmi_app/business",
+            "enabled": true,
+            "default_ref": "main",
+            "token_env": "GITLAB_TOKEN",
+            "ssl_verify": true,
+            "token_loaded": true
+          },
+          {
+            "id": "simos",
+            "name": "simos",
+            "base_url": "https://www.chancee-shanghai.cn:9900",
+            "project": "OS/simos",
+            "enabled": true,
+            "default_ref": "main",
+            "token_env": "GITLAB_TOKEN",
+            "ssl_verify": true,
+            "token_loaded": true
+          }
+        ],
+        "weekly_version": {
+          "version_number": "3.1.1.041",
+          "requires_confirmation": false,
+          "reason": "current_week_existing_third",
+          "week": "2026-W33"
+        }
+      },
+      "create_tag_payload": {
+        "scope": "all",
+        "ref": "fix",
+        "tag_name": "fix_V3.1.1.041_202608101546",
+        "message": "resident release build\n\nSIMOS_CLOUD_CATEGORY=车机/CI自动构建\nSIMOS_CONFIG_MATRIX=SIMBOT_R6_A:360,SIMBOT_R6_B:360s\nSIMOS_CONFIG_REFS=SIMBOT_R6_A,SIMBOT_R6_B\nSIMOS_CONFIG_REF=SIMBOT_R6_A",
+        "update_version": true,
+        "base_version": "3.1.1.041",
+        "base_version_is_final": true,
+        "version_prefix": "V",
+        "auto_merge_version_mr": true,
+        "component_resolutions": [
+          {
+            "repository_id": "business",
+            "repository_name": "business",
+            "component": "business",
+            "requested_ref": "fix",
+            "resolved_ref": "fix",
+            "resolution": "requested_ref",
+            "commit_id": "1933491004afe1ce89f3945cad362f96cf708756"
+          },
+          {
+            "repository_id": "simos",
+            "repository_name": "simos",
+            "component": "simos",
+            "requested_ref": "fix",
+            "resolved_ref": "fix",
+            "resolution": "simos_source",
+            "commit_id": "634ebd89555034596833b7c4c7416179f1562bae"
+          }
+        ]
+      },
+      "version_update_branch": "automation/version-info/fix_V3.1.1.041_202608101546",
+      "merge_request": {
+        "id": 3782,
+        "iid": 498,
+        "project_id": 20,
+        "title": "Update version info before tag fix_V3.1.1.041_202608101546",
+        "description": null,
+        "state": "opened",
+        "created_at": "2026-08-10T15:46:57.270+08:00",
+        "updated_at": "2026-08-10T15:46:57.270+08:00",
+        "merged_by": null,
+        "merge_user": null,
+        "merged_at": null,
+        "closed_by": null,
+        "closed_at": null,
+        "target_branch": "fix",
+        "source_branch": "automation/version-info/fix_V3.1.1.041_202608101546",
+        "user_notes_count": 0,
+        "upvotes": 0,
+        "downvotes": 0,
+        "author": {
+          "id": 21,
+          "username": "YonderWang",
+          "public_email": null,
+          "name": "zongyuan wang",
+          "state": "active",
+          "locked": false,
+          "avatar_url": "https://secure.gravatar.com/avatar/3266092ce9724f3b899ab812c9a3fea2366fe26de5c560cd6784da53033cad27?s=80&d=identicon",
+          "web_url": "https://www.chancee-shanghai.cn:9900/YonderWang"
+        },
+        "assignees": [],
+        "assignee": null,
+        "reviewers": [],
+        "source_project_id": 20,
+        "target_project_id": 20,
+        "labels": [],
+        "draft": false,
+        "imported": false,
+        "imported_from": "none",
+        "work_in_progress": false,
+        "milestone": null,
+        "merge_when_pipeline_succeeds": false,
+        "merge_status": "checking",
+        "detailed_merge_status": "preparing",
+        "merge_after": null,
+        "sha": "b5c16a62900737072c94a17976d799f45097a2ee",
+        "merge_commit_sha": null,
+        "squash_commit_sha": null,
+        "discussion_locked": null,
+        "should_remove_source_branch": null,
+        "force_remove_source_branch": false,
+        "prepared_at": null,
+        "reference": "!498",
+        "references": {
+          "short": "!498",
+          "relative": "!498",
+          "full": "OS/simos!498"
+        },
+        "web_url": "https://www.chancee-shanghai.cn:9900/OS/simos/-/merge_requests/498",
+        "time_stats": {
+          "time_estimate": 0,
+          "total_time_spent": 0,
+          "human_time_estimate": null,
+          "human_total_time_spent": null
+        },
+        "squash": true,
+        "squash_on_merge": true,
+        "task_completion_status": {
+          "count": 0,
+          "completed_count": 0
+        },
+        "has_conflicts": false,
+        "blocking_discussions_resolved": true,
+        "subscribed": true,
+        "changes_count": null,
+        "latest_build_started_at": null,
+        "latest_build_finished_at": null,
+        "first_deployed_to_production_at": null,
+        "pipeline": null,
+        "head_pipeline": null,
+        "diff_refs": null,
+        "merge_error": null,
+        "user": {
+          "can_merge": true
+        }
+      },
+      "version_merge": {
+        "iid": 498,
+        "web_url": "https://www.chancee-shanghai.cn:9900/OS/simos/-/merge_requests/498",
+        "state": "closed",
+        "attempt_count": 0,
+        "requested_at": "2026-08-10T15:46:57.260976+08:00",
+        "last_checked_at": "2026-08-10T15:47:10.785808+08:00",
+        "next_retry_at": "2026-08-10T15:47:07.260976+08:00",
+        "last_error": "版本号更新 MR 已关闭或取消"
+      },
+      "error": "版本号更新 MR 已关闭或取消"
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
+        DEBIAN_APT_MIRROR: ${DEBIAN_APT_MIRROR:-deb.debian.org/debian}
+        DEBIAN_APT_SECURITY_MIRROR: ${DEBIAN_APT_SECURITY_MIRROR:-deb.debian.org/debian-security}
+    image: gitops-workbench:simulation
+    container_name: gitops-workbench-simulation
+    restart: "no"
+    environment:
+      GITOPS_HOST: 0.0.0.0
+      GITOPS_PORT: 8765
+      GITOPS_MODE: simulation
+      GITOPS_SCHEDULER_ENABLED: "false"
+      GITOPS_ADMIN_PASSWORD: admin123
+      GITOPS_USER_PASSWORD: user123
+      GITOPS_SESSION_SECRET: local-simulation-only-secret
+      GITOPS_DATA_DIR: /app/data
+      GITOPS_SIMULATION_STATE: /app/data/simulation-state.json
+      SIMOS_CI_ARTIFACT_ROOT: /app/data/simulation-artifacts
+    volumes:
+      - ./webapp/data-simulation:/app/data
+    ports:
+      - "127.0.0.1:8765:8765"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/api/session', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
