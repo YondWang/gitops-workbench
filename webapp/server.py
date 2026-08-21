@@ -33,16 +33,18 @@ from branch_policy import (
 )
 from gitlab_client import GitLabClient, GitLabConfig, GitLabError
 from repository_store import RepositoryConfig, RepositoryStore
+from simulated_gitlab import SimulatedGitLabClient
 
 
 ROOT = Path(__file__).resolve().parent
 STATIC_ROOT = ROOT / "static"
-REPOSITORIES_PATH = ROOT / "data" / "repositories.json"
-VERSION_SETTINGS_PATH = ROOT / "data" / "version-settings.json"
-SCHEDULES_PATH = ROOT / "data" / "schedules.json"
-SCHEDULE_RUNS_PATH = ROOT / "data" / "schedule-runs.json"
-RELEASE_TASKS_PATH = Path(os.environ.get("GITOPS_RELEASE_TASKS_PATH", str(ROOT / "data" / "release_tasks.json")))
-RELEASE_RUNS_PATH = Path(os.environ.get("GITOPS_RELEASE_RUNS_PATH", str(ROOT / "data" / "release_runs.json")))
+DATA_ROOT = Path(os.environ.get("GITOPS_DATA_DIR", str(ROOT / "data")))
+REPOSITORIES_PATH = DATA_ROOT / "repositories.json"
+VERSION_SETTINGS_PATH = DATA_ROOT / "version-settings.json"
+SCHEDULES_PATH = DATA_ROOT / "schedules.json"
+SCHEDULE_RUNS_PATH = DATA_ROOT / "schedule-runs.json"
+RELEASE_TASKS_PATH = Path(os.environ.get("GITOPS_RELEASE_TASKS_PATH", str(DATA_ROOT / "release_tasks.json")))
+RELEASE_RUNS_PATH = Path(os.environ.get("GITOPS_RELEASE_RUNS_PATH", str(DATA_ROOT / "release_runs.json")))
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "gitlab": {
@@ -114,6 +116,7 @@ VERSION_COMPONENT_REVISIONS = {
 VERSION_MERGE_RETRY_SECONDS = 10
 VERSION_MERGE_MAX_ATTEMPTS = 6
 RELEASE_RUNS_LOCK = threading.RLock()
+FEATURE_PACKAGE_LOCK = threading.RLock()
 
 
 def release_runs_locked(method: Callable[..., Any]) -> Callable[..., Any]:
@@ -175,8 +178,8 @@ class GitOpsApp:
             "repositories": repos,
             "version_update": load_version_settings(),
             "roles": {
-                "user": ["view", "create_feature"],
-                "admin": ["view", "create_feature", "create_release", "create_bugfix", "create_tag", "admin"],
+                "user": ["view", "create_feature", "create_feature_package"],
+                "admin": ["view", "create_feature", "create_feature_package", "create_release", "create_bugfix", "create_tag", "admin"],
             },
         }
 
@@ -244,6 +247,7 @@ class GitOpsApp:
         branches = [branch_maps[0][name] for name in branch_names]
         tags = [tag_maps[0][name] for name in tag_names]
         feature_sources = [branch for branch in branches if branch["kind"] in {"release", "bugfix"}]
+        feature_branches = [branch for branch in branches if branch["kind"] == "feature"]
         return {
             "ok": True,
             "repositories": repositories,
@@ -251,6 +255,7 @@ class GitOpsApp:
             "tags": tags,
             "refs": branches + tags,
             "feature_sources": feature_sources,
+            "feature_branches": feature_branches,
         }
 
     def resident_package(self, tag: str) -> dict[str, Any]:
@@ -396,12 +401,45 @@ class GitOpsApp:
                 "manual_version_number": str(payload.get("manual_version_number") or payload.get("manual_version") or ""),
                 "version_prefix_mode": str(payload.get("version_prefix_mode") or "auto"),
                 "manual_version_prefix": str(payload.get("manual_version_prefix") or payload.get("version_prefix") or "V"),
+                "force_week_bump": truthy(payload.get("force_week_bump", False)),
                 "cloud_category": str(payload.get("cloud_category") or DEFAULT_SCHEDULE["cloud_category"]),
             }
         )
         plan = self.resolve_release_plan(task, str(payload.get("now") or "") or None)
         run = self.start_full_release_run(task, plan, trigger="manual")
         return {"ok": True, "task": task, "plan": plan, "run": run}
+
+    def manual_release_preview(self, payload: dict[str, Any]) -> dict[str, Any]:
+        task = normalize_release_task(
+            {
+                **DEFAULT_SCHEDULE,
+                "id": "manual-release-preview",
+                "enabled": False,
+                "default_ref": str(payload.get("source_ref") or payload.get("default_ref") or "fix"),
+                "feature_fallback_ref": str(payload.get("feature_fallback_ref") or "release"),
+                "source_ref_strategy": "fixed_ref",
+                "version_source": "simos_version_info",
+                "version_prefix_mode": str(payload.get("version_prefix_mode") or "auto"),
+                "manual_version_prefix": str(payload.get("manual_version_prefix") or "V"),
+                "force_week_bump": truthy(payload.get("force_week_bump", False)),
+            }
+        )
+        plan = self.resolve_release_plan(task, str(payload.get("now") or "") or None)
+        simos_target = self.optional_simos_target()
+        if simos_target is None:
+            raise ValueError("发版任务需要启用 simos 仓库")
+        software_yaml = software_yaml_text(simos_target.client, plan["source_ref"])
+        return {
+            "ok": True,
+            "current_version": software_yaml_version_from_text(software_yaml),
+            "version": plan["release_version"],
+            "version_number": plan["version_number"],
+            "tag_name": plan["tag_name"],
+            "changed_components": changed_components_from_software_baseline(
+                plan["component_resolutions"], software_yaml_component_commits(software_yaml)
+            ),
+            "component_resolutions": plan["component_resolutions"],
+        }
 
     def rerun_tag_release(self, payload: dict[str, Any]) -> dict[str, Any]:
         tag = require_resident_tag(str(payload.get("tag_name") or payload.get("tag") or ""))
@@ -601,6 +639,7 @@ class GitOpsApp:
         repositories = self.release_repositories()
         if not repositories:
             raise ValueError("没有启用的业务仓库")
+        validate_submodule_configs(repositories)
 
         resolutions: list[dict[str, str]] = []
         for repository in repositories:
@@ -635,6 +674,7 @@ class GitOpsApp:
                     "repository_id": repository.id,
                     "repository_name": repository.name,
                     "component": version_component(repository),
+                    "submodule_path": configured_submodule_path(repository),
                     "requested_ref": requested_ref,
                     "resolved_ref": resolved_ref,
                     "resolution": resolution,
@@ -658,6 +698,13 @@ class GitOpsApp:
                 "version_number": version_number,
                 "requires_confirmation": False,
                 "reason": "manual_version",
+                "week": week_key(local_now),
+            }
+        elif truthy(schedule.get("force_week_bump", False)):
+            weekly_version = {
+                "version_number": version_number,
+                "requires_confirmation": False,
+                "reason": "manual_weekly_third_bump",
                 "week": week_key(local_now),
             }
         else:
@@ -698,6 +745,7 @@ class GitOpsApp:
             "planned_at": local_now.isoformat(),
             "repositories": [repo.public_dict(self.token_loaded(repo)) for repo in self.release_repositories()],
             "weekly_version": weekly_version,
+            "force_week_bump": bool(schedule.get("force_week_bump", False)),
         }
         if weekly_version.get("requires_confirmation"):
             plan["requires_weekly_version_confirmation"] = True
@@ -732,7 +780,7 @@ class GitOpsApp:
             if not version:
                 raise ValueError("自动任务使用手动版本时必须填写版本号")
             return version
-        return normalize_version_number(self.version_from_version_info(target, ref))
+        return software_yaml_version(target.client, ref)
 
     def resolve_release_version_number(
         self,
@@ -743,16 +791,19 @@ class GitOpsApp:
     ) -> str:
         if str(schedule.get("version_source") or "simos_version_info") == "manual":
             return self.resolve_schedule_version(schedule, self.optional_simos_target() or self.target("simos"), ref)
-        version = self.default_tag_version_for_request(
-            {
-                "scope": "all",
-                "version_prefix": version_prefix,
-                "component_resolutions": component_resolutions or [],
-            },
-            ref,
-            True,
-            "",
+        simos_target = self.optional_simos_target()
+        if simos_target is None:
+            raise ValueError("发版任务需要启用 simos 仓库")
+        software_yaml = software_yaml_text(simos_target.client, ref)
+        current_version = software_yaml_version_from_text(software_yaml)
+        changed = changed_components_from_software_baseline(
+            component_resolutions or [], software_yaml_component_commits(software_yaml)
         )
+        version = dynamic_version_from_changed_components(
+            current_version, changed, repository_revision_bits(self.release_repositories())
+        )
+        if truthy(schedule.get("force_week_bump", False)):
+            version = bump_week_version(version)
         return normalize_version_number(version)
 
     def create_schedule_tag(self, schedule: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
@@ -1354,6 +1405,210 @@ class GitOpsApp:
 
         return self.run_operation(payload, "create_tag", precheck, execute)
 
+    @release_runs_locked
+    def create_feature_package(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Create an isolated T package from a Feature source ref.
+
+        The source Feature branch is never updated. SimOS receives a temporary
+        build ref containing the resolved component pins and package version;
+        other component repositories receive the same Tag at their resolved
+        commits. Tag creation is intentionally separate from generic Tag admin
+        permission so a user cannot widen this operation to another ref.
+        """
+        ref = str(payload.get("ref") or "").strip()
+        if not ref.startswith("feature/") or len(ref) <= len("feature/"):
+            return self.feature_package_precheck_error("Feature 包来源必须是 feature/* 分支")
+        if str(payload.get("tag_name") or "").strip():
+            return self.feature_package_precheck_error("Feature 包 Tag 不能手动指定")
+        if str(payload.get("scope") or "all").strip() not in {"", "all"}:
+            return self.feature_package_precheck_error("Feature 包必须使用全部启用仓库")
+
+        raw_now = str(payload.get("now") or "").strip()
+        try:
+            local_now = datetime.fromisoformat(raw_now) if raw_now else datetime.now().astimezone()
+            now_text = local_now.isoformat()
+            with FEATURE_PACKAGE_LOCK:
+                return self._create_feature_package_locked(ref, payload, local_now, now_text)
+        except (ValueError, GitLabError) as exc:
+            return self.feature_package_precheck_error(str(exc))
+
+    @staticmethod
+    def feature_package_precheck_error(error: str) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "operation": "create_feature_package",
+            "phase": "precheck",
+            "error": error,
+            "precheck": [],
+            "results": [],
+        }
+
+    def feature_package_preview(self, payload: dict[str, Any]) -> dict[str, Any]:
+        ref = str(payload.get("ref") or "").strip()
+        if not ref.startswith("feature/") or len(ref) <= len("feature/"):
+            return self.feature_package_precheck_error("Feature 包来源必须是 feature/* 分支")
+        try:
+            local_now = datetime.fromisoformat(str(payload.get("now") or "")) if payload.get("now") else datetime.now().astimezone()
+            targets = self.targets({"scope": "all"})
+            simos_target = next((target for target in targets if is_simos_repo(target.repo)), None)
+            if simos_target is None:
+                raise ValueError("Feature 包需要启用 simos 仓库")
+            resolutions = self.resolve_full_release_components(ref, "release")
+            source_version = require_existing_version(
+                parse_version_info(simos_target.client.get_file_text(VERSION_INFO_PATH, ref))
+            )
+            version_number = feature_package_version(
+                source_version,
+                simos_target.client.tag_names(),
+                local_now.isoformat(),
+                force_week_bump=truthy(payload.get("force_week_bump", False)),
+            )
+            package_version = apply_version_prefix(version_number, "T")
+            tag_name = default_tag_name(ref, package_version, local_now.strftime("%Y%m%d%H%M"))
+            return {
+                "ok": True,
+                "operation": "create_feature_package_preview",
+                "phase": "precheck",
+                "source_ref": ref,
+                "source_version": source_version,
+                "version_number": version_number,
+                "version": package_version,
+                "tag_name": tag_name,
+                "component_resolutions": resolutions,
+            }
+        except (ValueError, GitLabError) as exc:
+            return self.feature_package_precheck_error(str(exc))
+
+    def _create_feature_package_locked(
+        self,
+        ref: str,
+        payload: dict[str, Any],
+        local_now: datetime,
+        now_text: str,
+    ) -> dict[str, Any]:
+        targets = self.targets({"scope": "all"})
+        simos_target = next((target for target in targets if is_simos_repo(target.repo)), None)
+        if simos_target is None:
+            raise ValueError("Feature 包需要启用 simos 仓库")
+
+        fallback_ref = "release"
+        resolutions = self.resolve_full_release_components(ref, fallback_ref)
+        resolution_by_repo = {item["repository_id"]: item for item in resolutions}
+        simos_resolution = resolution_by_repo.get(simos_target.repo.id)
+        if simos_resolution is None:
+            raise ValueError("未解析到 simos Feature 来源")
+
+        version_text = simos_target.client.get_file_text(VERSION_INFO_PATH, ref)
+        fields = parse_version_info(version_text)
+        source_version = require_existing_version(fields)
+        version_number = feature_package_version(
+            source_version,
+            simos_target.client.tag_names(),
+            now_text,
+            force_week_bump=truthy(payload.get("force_week_bump", False)),
+        )
+        package_version = apply_version_prefix(version_number, "T")
+        stamp = local_now.strftime("%Y%m%d%H%M")
+        tag_name = default_tag_name(ref, package_version, stamp)
+        build_branch = feature_package_build_branch(tag_name)
+
+        for target in targets:
+            branch_names = set(target.client.branch_names())
+            tag_names = set(target.client.tag_names())
+            resolution = resolution_by_repo.get(target.repo.id)
+            if resolution is None:
+                raise ValueError(f"未解析到仓库来源：{target.repo.id}")
+            if tag_name in tag_names:
+                raise ValueError(f"Tag 已存在：{tag_name}")
+            if target.repo.id == simos_target.repo.id and build_branch in branch_names:
+                raise ValueError(f"临时构建分支已存在：{build_branch}")
+
+        component_refs = {
+            item["component"]: {
+                "ref": item["resolved_ref"],
+                "commit_id": item["commit_id"],
+                "submodule_path": item["submodule_path"],
+            }
+            for item in resolutions
+        }
+        changed_components = list(component_refs)
+        next_version, next_version_info = render_version_info_full(
+            fields,
+            component_refs,
+            local_now.strftime("%Y-%m-%d %H:%M:%S"),
+            changed_components,
+            requested_version_prefix="T",
+            forced_version=package_version,
+        )
+        actions = [
+            {"action": "update", "file_path": VERSION_INFO_PATH, "content": next_version_info},
+            {
+                "action": "update",
+                "file_path": SOFTWARE_YAML_PATH,
+                "content": render_software_yaml(next_version, component_refs, local_now.strftime("%Y-%m-%d %H:%M:%S")),
+            },
+        ]
+        message = f"Create Feature package {tag_name} from {ref}"
+
+        try:
+            if isinstance(simos_target.client, GitLabClient) and shutil.which("git"):
+                commit = self.commit_version_update_with_git(
+                    simos_target,
+                    {"ref": ref, "actions": actions, "component_refs": component_refs},
+                    build_branch,
+                    message,
+                )
+            else:
+                simos_target.client.create_branch(build_branch, ref)
+                commit = simos_target.client.create_commit(build_branch, message, actions)
+            simos_commit_id = str(commit.get("id") or commit.get("short_id") or "")
+            if not simos_commit_id:
+                raise ValueError("临时构建分支提交成功但未返回 commit id")
+
+            results: list[dict[str, Any]] = []
+            for target in targets:
+                resolution = resolution_by_repo[target.repo.id]
+                target_ref = simos_commit_id if target.repo.id == simos_target.repo.id else resolution["commit_id"]
+                tag = target.client.create_tag(tag_name, target_ref, message)
+                results.append(
+                    {
+                        "repository": target.repo.public_dict(self.token_loaded(target.repo)),
+                        "ok": True,
+                        "result": {
+                            "tag": tag,
+                            "ref": target_ref,
+                            "resolved_ref": resolution["resolved_ref"],
+                            "resolution": resolution["resolution"],
+                        },
+                    }
+                )
+        except (ValueError, GitLabError) as exc:
+            return {
+                "ok": False,
+                "operation": "create_feature_package",
+                "phase": "execute",
+                "error": str(exc),
+                "source_ref": ref,
+                "version": package_version,
+                "version_number": version_number,
+                "tag_name": tag_name,
+                "build_branch": build_branch,
+                "component_resolutions": resolutions,
+                "results": [],
+            }
+        return {
+            "ok": True,
+            "operation": "create_feature_package",
+            "phase": "execute",
+            "source_ref": ref,
+            "version": package_version,
+            "version_number": version_number,
+            "tag_name": tag_name,
+            "build_branch": build_branch,
+            "component_resolutions": resolutions,
+            "results": results,
+        }
+
     def delete_tags(self, payload: dict[str, Any]) -> dict[str, Any]:
         tag_names = parse_tag_names(payload.get("tags", ""))
 
@@ -1550,10 +1805,11 @@ class GitOpsApp:
             component: {
                 "ref": self.version_file_component_ref(target, contexts[target.repo.id], tag_name),
                 "commit_id": self.context_commit_id(target, contexts[target.repo.id]),
+                "submodule_path": target.repo.submodule_path,
             }
             for target in targets
             for component in [version_component(target.repo)]
-            if component in VERSION_COMPONENTS
+            if component
         }
         changed_components = [
             component
@@ -1980,6 +2236,9 @@ class GitOpsApp:
         return OperationTarget(repo=repo, client=self.client_for(repo))
 
     def client_for(self, repo: RepositoryConfig) -> GitLabClient:
+        if os.environ.get("GITOPS_MODE", "gitlab").strip().lower() == "simulation":
+            state_path = Path(os.environ.get("GITOPS_SIMULATION_STATE", str(DATA_ROOT / "simulation-state.json")))
+            return SimulatedGitLabClient(state_path, repo_id=repo.id, project=repo.project)  # type: ignore[return-value]
         token = os.environ.get(repo.token_env, "")
         return GitLabClient(
             GitLabConfig(
@@ -2182,6 +2441,48 @@ def resolve_weekly_version_policy(tag_names: list[str], computed_version_number:
         "reason": "not_friday_no_weekly_bump",
         "week": week_key(local_now),
     }
+
+
+def feature_package_version(
+    source_version: str,
+    tag_names: list[str],
+    now: str,
+    force_week_bump: bool = False,
+) -> str:
+    """Calculate a Feature package number without changing formal release policy.
+
+    Feature packages use the existing four-part numbering convention. The normal
+    path advances the build part; a forced weekly bump advances the week part but
+    deliberately keeps the already-calculated build part. No special ``001``
+    reset is introduced here.
+    """
+    version_number = normalize_version_number(source_version)
+    parts = version_number.split(".")
+    if len(parts) != 4:
+        raise ValueError("Feature 包版本号必须是四段，例如 3.1.24.020")
+    local_now = datetime.fromisoformat(now)
+    current = [int(part) for part in parts]
+    width = max(len(parts[3]), 3)
+    week_versions = versions_from_tags_in_week(tag_names, local_now)
+    if week_versions:
+        current[2] = max(item[2] for item in week_versions)
+        current[3] = max(item[3] for item in week_versions if item[2] == current[2]) + 1
+    else:
+        current[3] += 1
+    if force_week_bump:
+        current[2] += 1
+    return format_four_part_version(current, width)
+
+
+def feature_package_build_branch(tag_name: str) -> str:
+    safe = []
+    for ch in tag_name:
+        if "A" <= ch <= "Z" or "a" <= ch <= "z" or "0" <= ch <= "9" or ch in {".", "_", "-"}:
+            safe.append(ch)
+        else:
+            safe.append("-")
+    name = "".join(safe).strip(".-_") or datetime.now().strftime("%Y%m%d%H%M%S")
+    return f"automation/feature-package/{name}"
 
 
 def versions_from_tags_in_week(tag_names: list[str], local_now: datetime) -> list[tuple[int, int, int, int]]:
@@ -2506,25 +2807,135 @@ def render_software_yaml(version: str, component_refs: dict[str, dict[str, str]]
         "components:",
         f'  main: "{version}"',
     ]
-    for component in VERSION_COMPONENTS:
-        if component == "simos":
-            continue
-        if component in component_refs:
-            lines.append(f'  {component}: "{component_refs[component]["ref"]}"')
+    for component, item in component_refs.items():
+        if component != "simos":
+            lines.append(f'  {component}: "{item["ref"]}"')
     lines.append("commits:")
     main_commit = component_refs.get("simos", {}).get("commit_id", "")
     lines.append(f'  main: "{main_commit}"')
-    for component in VERSION_COMPONENTS:
-        if component == "simos":
-            continue
-        if component in component_refs:
-            lines.append(f'  {component}: "{component_refs[component]["commit_id"]}"')
+    for component, item in component_refs.items():
+        if component != "simos":
+            lines.append(f'  {component}: "{item["commit_id"]}"')
     lines.append(f'date: "{current_time}"')
     return "\n".join(lines) + "\n"
 
 
 def submodule_update_paths(component_refs: dict[str, dict[str, str]]) -> dict[str, str]:
-    return {component: f"src/{component}" for component in SUBMODULE_COMPONENTS if component in component_refs}
+    return {
+        component: str(item.get("submodule_path") or f"src/{component}")
+        for component, item in component_refs.items()
+        if component != "simos"
+    }
+
+
+def validate_submodule_configs(repositories: list[RepositoryConfig]) -> None:
+    paths: dict[str, str] = {}
+    for repository in repositories:
+        if is_simos_repo(repository) or is_config_repo(repository):
+            continue
+        path = configured_submodule_path(repository)
+        if not path.startswith("src/") or ".." in path:
+            raise ValueError(f"仓库 {repository.id} 的子模块路径必须是 src/... 且不能包含 ..")
+        if path in paths:
+            raise ValueError(f"子模块路径重复：{path}（仓库 {paths[path]} 与 {repository.id}）")
+        paths[path] = repository.id
+
+
+def configured_submodule_path(repository: RepositoryConfig) -> str:
+    return str(repository.submodule_path or f"src/{repository.id}").strip().strip("/")
+
+
+def software_yaml_version(client: Any, ref: str) -> str:
+    return software_yaml_version_from_text(software_yaml_text(client, ref))
+
+
+def software_yaml_text(client: Any, ref: str) -> str:
+    try:
+        return client.get_file_text(SOFTWARE_YAML_PATH, ref)
+    except GitLabError as exc:
+        raise ValueError(f"远端 {SOFTWARE_YAML_PATH} 不存在，无法读取版本号") from exc
+
+
+def software_yaml_version_from_text(text: str) -> str:
+    match = re.search(r"(?m)^\s*version\s*:\s*[\"']?([^\"'\s#]+)", text)
+    if not match:
+        raise ValueError(f"远端 {SOFTWARE_YAML_PATH} 缺少 version 字段")
+    version = normalize_version_number(match.group(1))
+    if len(version.split(".")) != 4:
+        raise ValueError(f"远端 {SOFTWARE_YAML_PATH} 的 version 必须是四段版本号")
+    return version
+
+
+def software_yaml_component_commits(text: str) -> dict[str, str]:
+    commits: dict[str, str] = {}
+    in_commits = False
+    for line in text.splitlines():
+        if re.fullmatch(r"\s*commits\s*:\s*(?:#.*)?", line):
+            in_commits = True
+            continue
+        if in_commits:
+            if line and not line[0].isspace():
+                break
+            match = re.fullmatch(r"\s{2,}([A-Za-z0-9_-]+)\s*:\s*[\"']?([^\"'\s#]+)[\"']?\s*(?:#.*)?", line)
+            if match:
+                commits[match.group(1)] = match.group(2)
+    return commits
+
+
+def changed_components_from_software_baseline(resolutions: list[dict[str, str]], baseline_commits: dict[str, str]) -> list[str]:
+    changed: list[str] = []
+    for item in resolutions:
+        component = str(item.get("component") or "").strip()
+        commit_id = str(item.get("commit_id") or "").strip()
+        if not component or not commit_id or component == "simos":
+            continue
+        if baseline_commits.get(component) != commit_id and component not in changed:
+            changed.append(component)
+    return changed
+
+
+def dynamic_version_from_changed_components(
+    previous_version: str, changed_components: list[str], revision_bits: dict[str, int] | None = None
+) -> str:
+    normalized = normalize_version_number(previous_version)
+    parts = normalized.split(".")
+    if len(parts) != 4:
+        raise ValueError("远端 software.yaml 的 version 必须是四段版本号")
+    components = list(dict.fromkeys(changed_components))
+    if not components:
+        return normalized
+    values = [int(part) for part in parts]
+    revisions = dynamic_component_revisions(components, revision_bits)
+    if len(components) == 1:
+        values[3] += revisions[components[0]]
+    else:
+        values[3] = sum(revisions[component] for component in components)
+    return format_four_part_version(values, max(len(parts[3]), 3))
+
+
+def repository_revision_bits(repositories: list[RepositoryConfig]) -> dict[str, int]:
+    return {version_component(repository): repository.revision_bit for repository in repositories if repository.revision_bit > 0}
+
+
+def dynamic_component_revisions(components: list[str], revision_bits: dict[str, int] | None = None) -> dict[str, int]:
+    """Return legacy revision bits plus deterministic bits for newly enabled repositories."""
+    revisions = dict(revision_bits or {})
+    revisions.update({component: VERSION_COMPONENT_REVISIONS[component] for component in components if component in VERSION_COMPONENT_REVISIONS})
+    next_bit = max([*VERSION_COMPONENT_REVISIONS.values(), *revisions.values()], default=1) * 2
+    for component in sorted(component for component in components if component not in revisions):
+        revisions[component] = next_bit
+        next_bit *= 2
+    return revisions
+
+
+def bump_week_version(version: str) -> str:
+    normalized = normalize_version_number(version)
+    parts = normalized.split(".")
+    if len(parts) != 4:
+        raise ValueError("版本号必须是四段版本号")
+    values = [int(part) for part in parts]
+    values[2] += 1
+    return format_four_part_version(values, max(len(parts[3]), 3))
 
 
 def component_commit_changed(component: str, current_commit_id: str, version_plan: dict[str, Any]) -> bool:
@@ -2635,6 +3046,7 @@ def normalize_release_task(payload: dict[str, Any]) -> dict[str, Any]:
     if task["version_prefix_mode"] not in {"auto", "manual"}:
         raise ValueError("version_prefix_mode 只能是 auto 或 manual")
     task["manual_version_prefix"] = normalize_version_prefix(str(task.get("manual_version_prefix") or "V"))
+    task["force_week_bump"] = truthy(task.get("force_week_bump", False))
     task["cloud_category"] = str(task.get("cloud_category") or DEFAULT_SCHEDULE["cloud_category"]).strip("/")
     if not task["cloud_category"] or ".." in task["cloud_category"] or task["cloud_category"].startswith("/"):
         raise ValueError("云盘分类目录非法")
@@ -2916,7 +3328,30 @@ def make_handler(app: GitOpsApp):
                 "/api/release-tasks": ("view", app.release_tasks),
                 "/api/release-task-previews": ("view", app.release_task_previews),
                 "/api/release-runs": ("view", lambda: {"ok": True, "runs": load_release_runs()}),
+                "/api/release-runs/manual-preview": (
+                    "create_tag",
+                    lambda: app.manual_release_preview(
+                        {
+                            "source_ref": query.get("source_ref", ""),
+                            "feature_fallback_ref": query.get("feature_fallback_ref", "release"),
+                            "version_prefix_mode": query.get("version_prefix_mode", "auto"),
+                            "manual_version_prefix": query.get("manual_version_prefix", "V"),
+                            "force_week_bump": truthy(query.get("force_week_bump", "false")),
+                        }
+                    ),
+                ),
             }
+            if path == "/api/feature-package/preview":
+                routes[path] = (
+                    "create_feature_package",
+                    lambda: app.feature_package_preview(
+                        {
+                            "ref": query.get("ref", ""),
+                            "now": query.get("now", ""),
+                            "force_week_bump": truthy(query.get("force_week_bump", "false")),
+                        }
+                    ),
+                )
             schedule_route = match_schedule_path(path)
             if schedule_route and schedule_route[1] == "runs":
                 routes[path] = ("view", lambda schedule_id=schedule_route[0]: app.schedule_runs(schedule_id))
@@ -2924,7 +3359,7 @@ def make_handler(app: GitOpsApp):
             if release_task_route and release_task_route[1] == "runs":
                 routes[path] = ("view", lambda task_id=release_task_route[0]: app.schedule_runs(task_id))
             release_run_id = match_release_run_path(path)
-            if release_run_id:
+            if release_run_id and path not in routes:
                 routes[path] = ("view", lambda run_id=release_run_id: {"ok": True, "run": next((item for item in load_release_runs() if item.get("id") == run_id), None)})
             repo_route = match_repo_get(path)
             if repo_route:
@@ -2950,6 +3385,7 @@ def make_handler(app: GitOpsApp):
                 "/api/repositories": ("admin", lambda: app.add_repository(payload)),
                 "/api/release/create": ("create_release", lambda: app.create_release(payload)),
                 "/api/feature/create": ("create_feature", lambda: app.create_feature(payload)),
+                "/api/feature-package/create": ("create_feature_package", lambda: app.create_feature_package(payload)),
                 "/api/bugfix/create": ("create_bugfix", lambda: app.create_bugfix(payload)),
                 "/api/tags/create": ("create_tag", lambda: app.create_tag(payload)),
                 "/api/tags/delete": ("create_tag", lambda: app.delete_tags(payload)),

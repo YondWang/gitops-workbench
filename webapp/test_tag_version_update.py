@@ -8,7 +8,7 @@ from unittest import mock
 
 import branch_policy
 import server
-from repository_store import RepositoryConfig
+from repository_store import RepositoryConfig, RepositoryStore
 
 
 VERSION_INFO = """Version:1.0.0
@@ -76,9 +76,9 @@ class FakeClient:
         self.call_log = call_log
         self.version_info = version_info
         self.pkg_info = "version:1.0.0\n"
-        self.software_yaml = """version: "1.0.0"
+        self.software_yaml = """version: "1.0.0.000"
 components:
-  main: "1.0.0"
+  main: "1.0.0.000"
   business: "release"
 commits:
   main: "simos-old"
@@ -219,6 +219,7 @@ class TagVersionUpdateTest(unittest.TestCase):
             base_url="https://gitlab.example",
             project="group/business",
             token_env="GITLAB_TOKEN",
+            submodule_path="src/business",
         )
         self.workbench_repo = RepositoryConfig(
             id="gitops-workbench",
@@ -226,6 +227,7 @@ class TagVersionUpdateTest(unittest.TestCase):
             base_url="https://gitlab.example",
             project="group/gitops-workbench",
             token_env="GITLAB_TOKEN",
+            submodule_path="src/workbench",
         )
         self.simos_repo = RepositoryConfig(
             id="simos",
@@ -332,6 +334,127 @@ version:1.0.0
                 "localization": "src/localization",
             },
         )
+
+    def test_submodule_path_mapping_uses_dynamic_repository_paths(self) -> None:
+        refs = {
+            "costmap_node": {"ref": "fix", "commit_id": "costmap-new", "submodule_path": "src/costmap_node"},
+            "laser_filter": {"ref": "fix", "commit_id": "laser-new", "submodule_path": "src/laser_filter"},
+        }
+        self.assertEqual(
+            server.submodule_update_paths(refs),
+            {"costmap_node": "src/costmap_node", "laser_filter": "src/laser_filter"},
+        )
+
+    def test_remote_software_yaml_is_release_version_source(self) -> None:
+        self.simos_client.software_yaml = 'version: "3.1.24.020"\ncomponents:\n'
+        self.assertEqual(server.software_yaml_version(self.simos_client, "fix"), "3.1.24.020")
+
+    def test_remote_software_yaml_version_rejects_missing_version(self) -> None:
+        self.simos_client.software_yaml = "components:\n"
+        with self.assertRaisesRegex(ValueError, "software.yaml.*version"):
+            server.software_yaml_version(self.simos_client, "fix")
+
+    def test_new_enabled_components_receive_deterministic_version_revision_bits(self) -> None:
+        self.assertEqual(
+            server.dynamic_version_from_changed_components("3.1.24.020", ["costmap_node", "laser_filter"]),
+            "3.1.24.192",
+        )
+
+    def test_component_change_detection_compares_software_yaml_commits(self) -> None:
+        baseline = server.software_yaml_component_commits(
+            """version: \"3.1.24.020\"
+commits:
+  main: \"simos-old\"
+  business: \"business-old\"
+  costmap_node: \"costmap-old\"
+"""
+        )
+        resolutions = [
+            {"component": "simos", "commit_id": "simos-old"},
+            {"component": "business", "commit_id": "business-new"},
+            {"component": "costmap_node", "commit_id": "costmap-old"},
+        ]
+
+        self.assertEqual(server.changed_components_from_software_baseline(resolutions, baseline), ["business"])
+
+    def test_component_change_detection_ignores_simos_main_commit(self) -> None:
+        baseline = server.software_yaml_component_commits(
+            """version: \"3.1.24.020\"
+commits:
+  main: \"simos-old\"
+"""
+        )
+
+        self.assertEqual(
+            server.changed_components_from_software_baseline(
+                [{"component": "simos", "commit_id": "simos-new"}], baseline
+            ),
+            [],
+        )
+
+    def test_dynamic_component_bits_are_stable_repository_configuration(self) -> None:
+        repositories = [
+            RepositoryConfig(
+                id="costmap_node",
+                name="costmap_node",
+                base_url="https://gitlab.example",
+                project="group/costmap_node",
+                revision_bit=64,
+            ),
+            RepositoryConfig(
+                id="laser_filter",
+                name="laser_filter",
+                base_url="https://gitlab.example",
+                project="group/laser_filter",
+                revision_bit=128,
+            ),
+        ]
+
+        self.assertEqual(server.repository_revision_bits(repositories), {"costmap_node": 64, "laser_filter": 128})
+        self.assertEqual(
+            server.dynamic_version_from_changed_components("3.1.24.020", ["laser_filter"], {"laser_filter": 128}),
+            "3.1.24.148",
+        )
+
+    def test_new_repository_receives_and_preserves_next_revision_bit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RepositoryStore(Path(directory) / "repositories.json", [])
+            created = store.add(
+                {
+                    "id": "costmap_node",
+                    "name": "costmap_node",
+                    "base_url": "https://gitlab.example",
+                    "project": "group/costmap_node",
+                }
+            )
+            updated = store.update("costmap_node", {"name": "costmap node"})
+
+            self.assertEqual(created.revision_bit, 64)
+            self.assertEqual(updated.revision_bit, 64)
+            self.assertEqual(store.get("costmap_node").revision_bit, 64)
+
+    def test_config_repository_does_not_consume_a_component_revision_bit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RepositoryStore(Path(directory) / "repositories.json", [])
+            config = store.add(
+                {
+                    "id": "config",
+                    "name": "config",
+                    "base_url": "https://gitlab.example",
+                    "project": "OS/config",
+                }
+            )
+            component = store.add(
+                {
+                    "id": "costmap_node",
+                    "name": "costmap_node",
+                    "base_url": "https://gitlab.example",
+                    "project": "group/costmap_node",
+                }
+            )
+
+            self.assertEqual(config.revision_bit, 0)
+            self.assertEqual(component.revision_bit, 64)
 
     def test_single_repository_tag_without_version_info_falls_back_to_simos_version(self) -> None:
         with mock.patch.object(server, "default_tag_name", side_effect=lambda ref, version: f"{ref}_{version}_DATE"):
@@ -690,6 +813,10 @@ version:1.0.0
         )
 
     def test_does_not_bump_again_when_branch_head_is_prior_version_update_commit(self) -> None:
+        self.workbench_repo = RepositoryConfig(
+            **{**self.workbench_repo.__dict__, "enabled": False}
+        )
+        self.app.store.repos = [self.business_repo, self.workbench_repo, self.simos_repo]
         self.simos_client.version_info = CURRENT_VERSION_INFO
         self.simos_client.branch_commit = {
             "id": "version-head",
@@ -949,7 +1076,7 @@ version:3.1.22.0
                     {"action": "update", "file_path": "software.yaml", "content": 'version: "1.0.1"\n'},
                 ],
                 "component_refs": {
-                    "business": {"ref": "release", "commit_id": "business-new"},
+                    "business": {"ref": "release", "commit_id": "business-new", "submodule_path": "src/business"},
                 },
             },
             "automation/version-info/release-20260615100000",
@@ -966,6 +1093,39 @@ version:3.1.22.0
         self.assertEqual(
             update_index_calls,
             [["update-index", "--add", "--cacheinfo", "160000", "business-new", "src/business"]],
+        )
+
+    def test_git_version_commit_updates_each_dynamic_submodule_path(self) -> None:
+        git_client = server.GitLabClient(
+            server.GitLabConfig(base_url="https://gitlab.example", project="group/simos", token="secret-token")
+        )
+        target = server.OperationTarget(self.simos_repo, git_client)
+        calls: list[list[str]] = []
+
+        def fake_run_git(args: list[str], cwd: str | None, env: dict[str, str] | None = None) -> str:
+            calls.append(args)
+            return "abcdef1234567890\n" if args[0] == "rev-parse" else ""
+
+        self.app.run_git = fake_run_git  # type: ignore[method-assign]
+        self.app.commit_version_update_with_git(
+            target,
+            {
+                "ref": "fix",
+                "actions": [{"action": "update", "file_path": "version.info", "content": "Version:1.0.0\n"}],
+                "component_refs": {
+                    "costmap_node": {"commit_id": "costmap-new", "submodule_path": "src/costmap_node"},
+                    "laser_filter": {"commit_id": "laser-new", "submodule_path": "src/laser_filter"},
+                },
+            },
+            "automation/feature-package/test",
+            "test dynamic submodules",
+        )
+        self.assertEqual(
+            [args for args in calls if args[0] == "update-index"],
+            [
+                ["update-index", "--add", "--cacheinfo", "160000", "costmap-new", "src/costmap_node"],
+                ["update-index", "--add", "--cacheinfo", "160000", "laser-new", "src/laser_filter"],
+            ],
         )
 
 

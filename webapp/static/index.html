@@ -154,6 +154,33 @@
               <button class="primary">创建 feature 分支</button>
             </form>
           </article>
+          <article class="panel form-panel" data-feature-package-only>
+            <div class="panel-title">
+              <h2>创建 Feature 测试包</h2>
+              <span class="badge muted">T 包</span>
+            </div>
+            <form id="featurePackageForm">
+              <input type="hidden" name="scope" value="all" />
+              <label>
+                来源 Feature 分支
+                <select id="featurePackageRef" name="ref" required></select>
+              </label>
+              <label class="checkline">
+                <input id="featurePackageForceWeek" name="force_week_bump" type="checkbox" />
+                切换周版本（第三位 +1）
+              </label>
+              <div class="readonly-field">
+                <div class="eyebrow">本次测试包版本</div>
+                <code id="featurePackageVersionPreview">选择 Feature 分支后计算</code>
+              </div>
+              <p class="field-hint">系统会创建隔离的临时构建分支和 T Tag，不修改原 Feature 分支；创建 Tag 会触发 GitLab CI。</p>
+              <button class="primary">创建测试包</button>
+            </form>
+          </article>
+          <article class="panel readonly-panel" data-user-block data-feature-package-denied>
+            <h2>权限不足</h2>
+            <p>当前账号没有 Feature 测试包权限。</p>
+          </article>
         </section>
 
         <section id="bugfix" class="view">
@@ -432,8 +459,17 @@
                   云盘分类
                   <input name="cloud_category" value="车机/CI自动构建" required />
                 </label>
+                <label class="checkline">
+                  <input name="force_week_bump" type="checkbox" />
+                  周版本号 +1
+                </label>
                 <div class="button-row">
+                  <button id="manualReleaseCalculateBtn" class="secondary" type="button">计算版本</button>
                   <button class="primary">完整发版构建</button>
+                </div>
+                <div class="readonly-field">
+                  <div class="eyebrow">本次预计版本</div>
+                  <code id="manualReleaseVersionPreview">填写来源分支后点击“计算版本”</code>
                 </div>
               </form>
               <form id="rerunTagForm" class="compact-form">
@@ -550,6 +586,8 @@
                     <tr>
                       <th>ID</th>
                       <th>项目</th>
+                      <th>子模块路径</th>
+                      <th>版本修订位</th>
                       <th>Token</th>
                       <th>状态</th>
                       <th>操作</th>
@@ -579,6 +617,14 @@
                 <label>
                   项目路径
                   <input name="project" placeholder="software_hmi_app/business" required />
+                </label>
+                <label>
+                  SimOS 子模块路径
+                  <input name="submodule_path" placeholder="src/business；留空按 src/仓库ID" />
+                </label>
+                <label>
+                  版本修订位
+                  <input name="revision_bit" type="number" min="1" step="1" readonly />
                 </label>
                 <label>
                   默认来源分支
