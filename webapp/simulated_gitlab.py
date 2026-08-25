@@ -153,13 +153,28 @@ class SimulatedGitLabClient:
             raise GitLabError("Tag 目标不能为空", status=400, payload={})
         item = {"name": tag_name, "target": target, "message": message}
         repository["tags"].append(item)
-        pipeline_id = int(state["next_pipeline_id"])
-        state["next_pipeline_id"] = pipeline_id + 1
-        state["pipelines"].append(
-            {"id": pipeline_id, "repo_id": self.repo_id, "ref": tag_name, "status": "success", "source": "push"}
-        )
         self._save(state)
         return {"name": tag_name, "target": target, "message": message}
+
+    def create_pipeline(self, ref: str, variables: dict[str, str] | None = None) -> dict[str, Any]:
+        state = self._load()
+        repository = self._repo(state)
+        if not any(item["name"] == ref for item in repository["tags"]):
+            raise GitLabError(f"Tag 不存在：{ref}", status=404, payload={})
+        pipeline_id = int(state["next_pipeline_id"])
+        state["next_pipeline_id"] = pipeline_id + 1
+        pipeline = {
+            "id": pipeline_id,
+            "repo_id": self.repo_id,
+            "ref": ref,
+            "status": "success",
+            "source": "api",
+            "variables": dict(variables or {}),
+            "web_url": f"https://simulated.gitlab/{self.project_path}/-/pipelines/{pipeline_id}",
+        }
+        state["pipelines"].append(pipeline)
+        self._save(state)
+        return pipeline
 
     def pipelines(self, ref: str = "", status: str = "", source: str = "") -> list[dict[str, Any]]:
         return [

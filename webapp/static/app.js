@@ -45,6 +45,9 @@ function postJson(path, body) {
 
 function formValues(form) {
   const data = Object.fromEntries(new FormData(form).entries());
+  form.querySelectorAll("select[multiple]").forEach((select) => {
+    data[select.name] = Array.from(select.selectedOptions, (option) => option.value);
+  });
   form.querySelectorAll('input[type="checkbox"]').forEach((input) => {
     if (input.name === "config_matrix") return;
     data[input.name] = input.checked;
@@ -531,7 +534,7 @@ function renderScheduleRuns() {
           <tr class="${run.id === selectedRun?.id ? "selected-schedule-run" : ""}"${run.tag_name ? ` data-select-resident-run="${escapeHtml(run.id)}" role="button" tabindex="0" aria-selected="${run.id === selectedRun?.id}"` : ""}>
             <td><span class="${releaseRunStatusClass(run.status)}">${escapeHtml(releaseRunStatusText(run.status))}</span></td>
             <td><code>${escapeHtml(run.tag_name || "-")}</code><div class="meta">${escapeHtml(run.started_at || "")}</div></td>
-            <td><code>${escapeHtml(run.source_ref || run.ref || "-")}</code><div class="meta">config: ${escapeHtml(configMatrixLabel(run))} · ${escapeHtml(run.release_version || run.version || "")}</div></td>
+            <td><code>${escapeHtml(run.source_ref || run.ref || "-")}</code><div class="meta">config: ${escapeHtml(configMatrixLabel(run))} · ${escapeHtml(run.release_version || run.version || "")}</div><div class="meta">OTA: ${escapeHtml((run.ota_target_envs || []).join("、") || "未注册")}</div></td>
             <td>
               <code>${escapeHtml(run.cloud_dir || run.error || "-")}</code>
               ${renderVersionMerge(run)}
@@ -634,12 +637,18 @@ function fillScheduleForm(schedule = null) {
     version_prefix_mode: "auto",
     manual_version_prefix: "V",
     cloud_category: "车机/CI自动构建",
+    ota_target_envs: ["test"],
   };
   Object.entries(next).forEach(([key, value]) => {
     const field = form.elements[key];
     if (!field) return;
     if (field.type === "checkbox") {
       field.checked = Boolean(value);
+    } else if (field.multiple) {
+      const selected = new Set(Array.isArray(value) ? value : []);
+      Array.from(field.options).forEach((option) => {
+        option.selected = selected.has(option.value);
+      });
     } else {
       field.value = value ?? "";
     }

@@ -155,8 +155,11 @@ DEFAULT_SCHEDULE: dict[str, Any] = {
     "version_prefix_mode": "auto",
     "manual_version_prefix": "V",
     "cloud_category": "车机/CI自动构建",
+    "ota_target_envs": ["test"],
     "execution_type": "full_release",
 }
+
+OTA_TARGET_ENVIRONMENTS = frozenset({"dev", "test", "prod"})
 
 
 @dataclass(frozen=True)
@@ -403,6 +406,7 @@ class GitOpsApp:
                 "manual_version_prefix": str(payload.get("manual_version_prefix") or payload.get("version_prefix") or "V"),
                 "force_week_bump": truthy(payload.get("force_week_bump", False)),
                 "cloud_category": str(payload.get("cloud_category") or DEFAULT_SCHEDULE["cloud_category"]),
+                "ota_target_envs": payload.get("ota_target_envs", payload.get("ota_target_env", DEFAULT_SCHEDULE["ota_target_envs"])),
             }
         )
         plan = self.resolve_release_plan(task, str(payload.get("now") or "") or None)
@@ -443,7 +447,28 @@ class GitOpsApp:
 
     def rerun_tag_release(self, payload: dict[str, Any]) -> dict[str, Any]:
         tag = require_resident_tag(str(payload.get("tag_name") or payload.get("tag") or ""))
+        ota_target_envs = normalize_ota_target_envs(payload.get("ota_target_envs", payload.get("ota_target_env")))
         now = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
+        try:
+            pipeline = self.start_simos_pipeline(tag, ota_target_envs)
+        except (ValueError, GitLabError) as exc:
+            run = {
+                "id": new_release_run_id("rerun"),
+                "task_id": "",
+                "schedule_id": "",
+                "trigger": "rerun_tag",
+                "execution_type": "rerun_existing_tag",
+                "status": "failed",
+                "tag_name": tag,
+                "source_ref": tag,
+                "ota_target_envs": ota_target_envs,
+                "started_at": now,
+                "updated_at": now,
+                "finished_at": now,
+                "error": f"Tag 已存在，但启动 API Pipeline 失败；可在修复后再次重跑：{exc}",
+            }
+            append_release_run(run)
+            return {"ok": False, "run": run}
         package = self.resident_package(tag)
         status = "published" if package.get("status") in {"ready", "success"} else "building"
         run = {
@@ -455,12 +480,14 @@ class GitOpsApp:
             "status": status,
             "tag_name": tag,
             "source_ref": tag,
+            "ota_target_envs": ota_target_envs,
             "started_at": now,
             "updated_at": now,
             "finished_at": now if status == "published" else "",
             "package": package,
             "cloud_dir": package.get("cloud_dir") or package.get("artifact_path") or "",
-            "pipeline_url": package.get("pipeline_url") or package.get("job_url") or "",
+            "pipeline_id": pipeline.get("id") or pipeline.get("pipeline_id") or "",
+            "pipeline_url": pipeline.get("web_url") or package.get("pipeline_url") or package.get("job_url") or "",
         }
         append_release_run(run)
         return {"ok": True, "run": run}
@@ -727,6 +754,7 @@ class GitOpsApp:
             "source_ref": ref,
             "feature_fallback_ref": feature_fallback_ref,
             "component_resolutions": component_resolutions,
+            "ota_target_envs": normalize_ota_target_envs(schedule.get("ota_target_envs", schedule.get("ota_target_env"))),
             "config_ref": config_ref,
             "source_ref_slug": source_ref_slug,
             "version": release_version,
@@ -822,6 +850,7 @@ class GitOpsApp:
             "version_prefix": plan["version_prefix"],
             "auto_merge_version_mr": True,
             "component_resolutions": list(plan.get("component_resolutions") or []),
+            "ota_target_envs": plan.get("ota_target_envs"),
         }
         if bool(plan.get("config_matrix_enabled", True)) and not plan.get("config_matrix"):
             result = {
@@ -897,6 +926,7 @@ class GitOpsApp:
             "version": plan.get("release_version") or plan.get("version", ""),
             "tag_name": plan.get("tag_name", ""),
             "cloud_dir": plan.get("cloud_dir", ""),
+            "ota_target_envs": list(plan.get("ota_target_envs") or []),
             "started_at": plan.get("planned_at", now),
             "updated_at": now,
             "finished_at": now if status in {"failed", "precheck_failed"} else "",
@@ -915,8 +945,13 @@ class GitOpsApp:
                 "version_prefix": plan.get("version_prefix"),
                 "auto_merge_version_mr": True,
                 "component_resolutions": list(plan.get("component_resolutions") or []),
+                "ota_target_envs": list(plan.get("ota_target_envs") or []),
             },
         }
+        pipeline = result.get("pipeline") if isinstance(result.get("pipeline"), dict) else {}
+        if pipeline:
+            run["pipeline_id"] = pipeline.get("id") or pipeline.get("pipeline_id") or ""
+            run["pipeline_url"] = pipeline.get("web_url") or ""
         version_update = result.get("version_update") or {}
         if isinstance(version_update, dict):
             run["version_update_branch"] = version_update.get("branch", "")
@@ -1400,10 +1435,35 @@ class GitOpsApp:
                 result["component_resolution"] = context["component_resolution"]
             return result
 
-        if update_version:
-            return self.run_tag_with_simos_version_update(payload, precheck)
+        result = self.run_tag_with_simos_version_update(payload, precheck) if update_version else self.run_operation(payload, "create_tag", precheck, execute)
+        if not result.get("ok"):
+            return result
+        if not any(is_simos_repo(target.repo) for target in self.targets(payload)):
+            return result
+        ota_target_envs = normalize_optional_ota_target_envs(payload.get("ota_target_envs", payload.get("ota_target_env")))
+        try:
+            result["pipeline"] = self.start_simos_pipeline(tag_name, ota_target_envs)
+        except (ValueError, GitLabError) as exc:
+            result.update(
+                {
+                    "ok": False,
+                    "phase": "pipeline",
+                    "message": f"Tag 已创建，但启动 API Pipeline 失败；可使用已有 Tag 重跑恢复：{exc}",
+                    "pipeline_start_error": str(exc),
+                }
+            )
+        return result
 
-        return self.run_operation(payload, "create_tag", precheck, execute)
+    def start_simos_pipeline(self, tag_name: str, ota_target_envs: list[str] | None = None) -> dict[str, Any]:
+        simos_target = self.optional_simos_target()
+        if simos_target is None:
+            raise ValueError("启动构建 Pipeline 需要启用 simos 仓库")
+        create_pipeline = getattr(simos_target.client, "create_pipeline", None)
+        if not callable(create_pipeline):
+            # Older test doubles do not implement the GitLab Pipeline API.
+            return {"status": "not_started", "message": "GitLab client does not support Pipeline API"}
+        variables = {"SIMOS_OTA_TARGET_ENVS": ",".join(ota_target_envs)} if ota_target_envs else None
+        return create_pipeline(tag_name, variables)
 
     @release_runs_locked
     def create_feature_package(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1582,6 +1642,7 @@ class GitOpsApp:
                         },
                     }
                 )
+            pipeline = self.start_simos_pipeline(tag_name)
         except (ValueError, GitLabError) as exc:
             return {
                 "ok": False,
@@ -1606,6 +1667,7 @@ class GitOpsApp:
             "tag_name": tag_name,
             "build_branch": build_branch,
             "component_resolutions": resolutions,
+            "pipeline": pipeline,
             "results": results,
         }
 
@@ -3050,8 +3112,34 @@ def normalize_release_task(payload: dict[str, Any]) -> dict[str, Any]:
     task["cloud_category"] = str(task.get("cloud_category") or DEFAULT_SCHEDULE["cloud_category"]).strip("/")
     if not task["cloud_category"] or ".." in task["cloud_category"] or task["cloud_category"].startswith("/"):
         raise ValueError("云盘分类目录非法")
+    task["ota_target_envs"] = normalize_ota_target_envs(task.get("ota_target_envs", task.get("ota_target_env")))
+    task.pop("ota_target_env", None)
     task["execution_type"] = "full_release"
     return task
+
+
+def normalize_ota_target_envs(value: Any, default: tuple[str, ...] = ("test",)) -> list[str]:
+    if value is None:
+        candidates = list(default)
+    elif isinstance(value, str):
+        candidates = [item.strip() for item in value.split(",") if item.strip()]
+    elif isinstance(value, (list, tuple, set)):
+        candidates = [str(item).strip() for item in value if str(item).strip()]
+    else:
+        raise ValueError("OTA 上传环境格式非法")
+    if not candidates:
+        raise ValueError("至少选择一个 OTA 上传环境")
+    invalid = [item for item in candidates if item.lower() not in OTA_TARGET_ENVIRONMENTS]
+    if invalid:
+        raise ValueError("OTA 上传环境只能是 dev、test 或 prod")
+    selected = {item.lower() for item in candidates}
+    return [item for item in ("dev", "test", "prod") if item in selected]
+
+
+def normalize_optional_ota_target_envs(value: Any) -> list[str] | None:
+    if value in (None, ""):
+        return None
+    return normalize_ota_target_envs(value)
 
 
 def normalize_daily_time(value: str) -> str:

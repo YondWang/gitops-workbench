@@ -46,6 +46,10 @@ class SimulatedGitLabClientTest(unittest.TestCase):
             reloaded = SimulatedGitLabClient(state_path, repo_id="simos", project="sandbox/simos")
             self.assertEqual(reloaded.get_file_text("version.info", "automation/test"), "Version:T3.1.24.021\n")
             self.assertEqual(reloaded.tag_names(), [tag["name"]])
+            self.assertEqual(reloaded.pipelines(ref=tag["name"]), [])
+            pipeline = reloaded.create_pipeline(tag["name"], {"SIMOS_OTA_TARGET_ENVS": "dev,test"})
+            self.assertEqual(pipeline["source"], "api")
+            self.assertEqual(pipeline["variables"], {"SIMOS_OTA_TARGET_ENVS": "dev,test"})
             self.assertEqual(reloaded.pipelines(ref=tag["name"])[0]["status"], "success")
 
             with self.assertRaisesRegex(GitLabError, "Tag 已存在"):

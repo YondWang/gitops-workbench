@@ -379,6 +379,14 @@
                   云盘分类
                   <input name="cloud_category" value="车机/CI自动构建" required />
                 </label>
+                <label>
+                  OTA 上传环境
+                  <select name="ota_target_envs" multiple required>
+                    <option value="dev">开发</option>
+                    <option value="test" selected>测试</option>
+                    <option value="prod">生产</option>
+                  </select>
+                </label>
                 <div class="readonly-field">
                   <div class="eyebrow">Tag 预览</div>
                   <code id="scheduleTagPreview">保存或试运行后显示</code>
@@ -459,6 +467,14 @@
                   云盘分类
                   <input name="cloud_category" value="车机/CI自动构建" required />
                 </label>
+                <label>
+                  OTA 上传环境
+                  <select name="ota_target_envs" multiple required>
+                    <option value="dev">开发</option>
+                    <option value="test" selected>测试</option>
+                    <option value="prod">生产</option>
+                  </select>
+                </label>
                 <label class="checkline">
                   <input name="force_week_bump" type="checkbox" />
                   周版本号 +1
@@ -476,6 +492,14 @@
                 <label>
                   已有 SimOS Tag
                   <input name="tag_name" placeholder="fix_V3.1.24.020_202607031600" required />
+                </label>
+                <label>
+                  OTA 上传环境
+                  <select name="ota_target_envs" multiple required>
+                    <option value="dev">开发</option>
+                    <option value="test" selected>测试</option>
+                    <option value="prod">生产</option>
+                  </select>
                 </label>
                 <div class="button-row">
                   <button type="submit">重跑/刷新已有 Tag 构建</button>

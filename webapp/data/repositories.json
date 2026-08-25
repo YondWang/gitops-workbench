@@ -8,7 +8,9 @@
       "enabled": true,
       "default_ref": "main",
       "token_env": "GITLAB_TOKEN",
-      "ssl_verify": true
+      "ssl_verify": true,
+      "submodule_path": "",
+      "revision_bit": 2
     },
     {
       "id": "gitops-workbench",
@@ -18,7 +20,9 @@
       "enabled": false,
       "default_ref": "main",
       "token_env": "GITLAB_TOKEN",
-      "ssl_verify": true
+      "ssl_verify": true,
+      "submodule_path": "",
+      "revision_bit": 64
     },
     {
       "id": "simos",
@@ -28,7 +32,9 @@
       "enabled": true,
       "default_ref": "main",
       "token_env": "GITLAB_TOKEN",
-      "ssl_verify": true
+      "ssl_verify": true,
+      "submodule_path": "",
+      "revision_bit": 1
     },
     {
       "id": "config",
@@ -38,7 +44,9 @@
       "enabled": false,
       "default_ref": "main",
       "token_env": "GITLAB_TOKEN",
-      "ssl_verify": true
+      "ssl_verify": true,
+      "submodule_path": "",
+      "revision_bit": 0
     }
   ]
 }
