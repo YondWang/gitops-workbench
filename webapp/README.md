@@ -46,7 +46,7 @@ bugfix/<版本号>
 
 WebApp 会在发版计划生成时记录每个仓库实际使用的来源分支和 commit。版本 MR、重试与最终 Tag 都复用这份快照，因此等待版本 MR 合并期间其他分支推进不会改变本次包的组件组合。SimOS Tag 会固化这些子模块 commit，现有 CI 继续按该 Tag 构建，无需修改 CI 文件。
 
-Feature 测试包规则：来源必须为 `feature/*`；服务端从该分支的 `version.info` 读取四段版本，默认沿用当前版本计算逻辑递增第四位。勾选“切换周版本（第三位 +1）”只增加计算结果的第三位，第四位不会被重置为 `001`。Tag 由服务端生成（例如 `feature-release_login_T3.1.24.021_202608071530`），user 不能手填或删除。SimOS 使用 `automation/feature-package/...` 临时构建分支写入 T 版本与组件 commit 快照后打 Tag；原始 Feature 分支、正式版本线和 Release 任务都不会被更新。Tag 创建会触发真实 GitLab CI，所有仓库预检通过前不会发生写操作。
+Feature 测试包规则：来源必须为 `feature/*`；服务端从该分支的 `version.info` 读取四段版本，默认沿用当前版本计算逻辑递增第四位。勾选“切换周版本（第三位 +1）”只增加计算结果的第三位，第四位不会被重置为 `001`。Tag 由服务端生成（例如 `feature-release_login_T3.1.24.021_202608071530`），user 不能手填或删除。SimOS 使用 `automation/feature-package/...` 临时构建分支写入 T 版本与组件 commit 快照后打 Tag；原始 Feature 分支、正式版本线和 Release 任务都不会被更新。所有 Tag 在预检成功后由 Workbench 显式调用 GitLab Pipeline API 构建，避免 Tag push 产生无变量的重复流水线。
 
 版本号按精确 SimOS 来源分支独立维护：`fix`、`release`、`feature/ABC` 与 `feature/XYZ` 的版本文件和版本兜底值互不共享。
 
@@ -85,6 +85,21 @@ GITOPS_RELEASE_RUN_POLL_SECONDS=10
 ```
 
 该变量控制服务端检查未完成发版运行的秒数，默认值为 `10`；它负责在浏览器关闭或服务恢复后继续检查版本 MR 的实际合入状态。resident 包状态不修改 GitLab CI，而是读取 Tag Pipeline 和 Job 的真实状态；页面仅在发版任务页可见且构建活跃时每 5 秒刷新。
+
+## OTA 云平台注册
+
+完整发版、定时完整发版和“已有 Tag 重跑”仅对管理员开放。页面可多选 OTA 环境 `dev`、`test`、`prod`；Workbench 将已选环境合成为 GitLab Pipeline variable `SIMOS_OTA_TARGET_ENVS`（例如 `dev,test`）并只创建一条 API Pipeline。该 Pipeline 仅构建和发布一次，最后由唯一的 `upload_ota_cloud` job 依次向每个所选云环境注册两个 OTA ZIP。定时任务默认使用 `test`，并将每次运行使用的环境记录在运行列表中。Feature 测试包和普通建 Tag 同样通过 Pipeline API 构建，但不传递该变量，因此 CI 不会向 OTA 云平台注册。
+
+SimOS 的 `.gitlab-ci.yml` 仅接受 Workbench 创建的 API Tag pipeline，直接在 GitLab 或命令行创建 Tag 只会创建 Tag，不会启动 CI。GitLab Token 必须拥有创建 pipeline 的 `api` 权限。
+
+云端凭据不属于 Workbench 配置，也绝不能写入 `data/`、日志、Tag、URL 或仓库文件。请在 SimOS 项目的 GitLab CI/CD Variables 中配置以下变量，并标记为 `masked` 和 `protected`：
+
+```text
+SIMOS_OTA_APP_KEY
+SIMOS_OTA_SECRET_KEY
+```
+
+正式 Tag 必须命中 GitLab Protected Tag 规则，否则受保护变量不会注入流水线。用于 `zipUrl` 的 `simos-debs` Generic Package Registry ZIP 必须允许云平台匿名 HTTPS 下载；CI 向云端传递的只是公开 ZIP URL，不含 GitLab Job Token、Deploy Token 或其他凭据。云端登录凭据如曾出现在聊天、工单或日志中，应先由云平台作废并重新签发，再写入 GitLab Variables。
 
 仓库列表保存到：
 
@@ -129,7 +144,7 @@ docker compose -f docker-compose.simulation.yml up --build
 
 浏览器打开 `http://127.0.0.1:8765`，使用 `user / user123` 登录。模拟数据预置 `feature/release_login`、`V3.1.24.020` 和一个历史 T Tag，可验证默认第四位递增和第三位递增。
 
-模拟模式由 `GITOPS_MODE=simulation` 控制：它只构造本地 `SimulatedGitLabClient`，数据只写入 `webapp/data-simulation`，不会使用生产 Token、`/data/simos-ci`、TLS 证书或自动发版调度。模拟 Tag 会生成成功状态的本地 Pipeline 记录。
+模拟模式由 `GITOPS_MODE=simulation` 控制：它只构造本地 `SimulatedGitLabClient`，数据只写入 `webapp/data-simulation`，不会使用生产 Token、`/data/simos-ci`、TLS 证书或自动发版调度。模拟 Tag 只有经 API 启动后才会生成成功状态的本地 Pipeline 记录。
 
 停止后恢复初始模拟数据：
 

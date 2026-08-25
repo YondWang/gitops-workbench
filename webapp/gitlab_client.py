@@ -185,6 +185,15 @@ class GitLabClient:
             payload["message"] = message
         return self.request("POST", self.project_api_path("/repository/tags"), payload=payload)
 
+    def create_pipeline(self, ref: str, variables: dict[str, str] | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"ref": ref}
+        if variables:
+            payload["variables"] = [
+                {"key": str(key), "value": str(value)}
+                for key, value in sorted(variables.items())
+            ]
+        return self.request("POST", self.project_api_path("/pipeline"), payload=payload)
+
     def delete_tag(self, tag_name: str) -> dict[str, Any]:
         self.request("DELETE", self.project_api_path(f"/repository/tags/{quote(tag_name, safe='')}"))
         return {"name": tag_name, "deleted": True}
