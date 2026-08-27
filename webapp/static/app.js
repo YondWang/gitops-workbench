@@ -1213,6 +1213,7 @@ function summarizeOperationResult(result) {
     })),
     blocked: result.blocked,
     terminated: result.terminated,
+    error: result.error,
     message: result.message,
     tag_name: result.tag_name,
     version_update: result.version_update,

@@ -15,7 +15,7 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from functools import wraps
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -76,7 +76,20 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "default_ref": "main",
             "token_env": "GITLAB_TOKEN",
             "ssl_verify": True,
-        }
+        },
+        {
+            # This is the protected CI control repository. It is intentionally
+            # disabled: it must never appear as a product repository or a
+            # user-selectable write target.
+            "id": "gitops-workbench",
+            "name": "gitops-workbench CI",
+            "base_url": "https://www.chancee-shanghai.cn:9900",
+            "project": "software_hmi_app/gitops-control",
+            "enabled": False,
+            "default_ref": "main",
+            "token_env": "GITLAB_TOKEN",
+            "ssl_verify": True,
+        },
     ],
     "server": {
         "host": "127.0.0.1",
@@ -3634,10 +3647,31 @@ def default_repositories(config: dict[str, Any]) -> list[RepositoryConfig]:
     return [RepositoryConfig(**item) for item in repositories]
 
 
+def ensure_feature_package_ci_repository(store: RepositoryStore, config: dict[str, Any]) -> None:
+    """Migrate existing repository stores with the internal CI target missing."""
+    feature_config = config.get("feature_package_ci") or {}
+    if not isinstance(feature_config, dict):
+        raise ValueError("feature_package_ci 配置非法")
+    repository_id = str(feature_config.get("repository_id") or "").strip()
+    if not repository_id:
+        raise ValueError("缺少 feature_package_ci.repository_id 配置")
+    try:
+        store.get(repository_id)
+        return
+    except ValueError:
+        pass
+
+    repository = next((item for item in default_repositories(config) if item.id == repository_id), None)
+    if repository is None:
+        raise ValueError(f"缺少可信 Feature CI 仓库配置：{repository_id}")
+    store.add(asdict(repository))
+
+
 def build_app(config_path: str | None) -> tuple[GitOpsApp, dict[str, Any]]:
     load_dotenv(ROOT / ".env.local")
     config = load_json_config(config_path)
     store = RepositoryStore(REPOSITORIES_PATH, default_repositories(config))
+    ensure_feature_package_ci_repository(store, config)
     return GitOpsApp(store, AuthManager.from_environment(), config), config
 
 

@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -111,6 +112,20 @@ class FeaturePackageTest(unittest.TestCase):
         self.assertIn("create_feature_package", auth.ROLE_PERMISSIONS["user"])
         self.assertNotIn("create_tag", auth.ROLE_PERMISSIONS["user"])
 
+    def test_existing_repository_store_is_migrated_with_internal_ci_target(self):
+        config = {**server.DEFAULT_CONFIG}
+        with tempfile.TemporaryDirectory() as directory:
+            store = server.RepositoryStore(Path(directory) / "repositories.json", [])
+            for repository in server.default_repositories(config):
+                if repository.id != "gitops-workbench":
+                    store.add(asdict(repository))
+
+            server.ensure_feature_package_ci_repository(store, config)
+
+            trusted = store.get("gitops-workbench")
+            self.assertEqual(trusted.project, "software_hmi_app/gitops-control")
+            self.assertFalse(trusted.enabled)
+
     def test_preview_uses_timestamp_t_version_without_write(self):
         app, clients = make_feature_app()
         result = app.feature_package_preview(self.package_payload())
@@ -203,6 +218,7 @@ class FeaturePackageTest(unittest.TestCase):
         self.assertNotIn("featurePackageForceWeek", index); self.assertIn("/api/feature-package/runs", app_js)
         self.assertIn('["#featurePackageForm", "#featurePackageRef", "feature_branches", ""]', app_js)
         self.assertNotIn('fillSelect("#featurePackageRef", (state.commonRefs', app_js)
+        self.assertIn("error: result.error", app_js)
         self.assertIn("GITOPS_FEATURE_CONTEXT_HMAC", verifier)
         self.assertNotIn("upload-ota", ci)
         self.assertNotIn("release-note", ci)
