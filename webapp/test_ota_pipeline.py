@@ -52,13 +52,24 @@ class OtaPipelineTest(unittest.TestCase):
             },
         )
 
-    def test_ota_target_environments_default_to_test_and_reject_unknown_or_empty_values(self) -> None:
-        self.assertEqual(server.normalize_release_task({"id": "ota-default"})["ota_target_envs"], ["test"])
+    def test_ota_target_environments_are_opt_in_and_reject_unknown_values(self) -> None:
+        self.assertEqual(server.normalize_release_task({"id": "ota-default"})["ota_target_envs"], [])
         self.assertEqual(server.normalize_ota_target_envs(["prod", "dev", "prod"]), ["dev", "prod"])
+        self.assertEqual(server.normalize_ota_target_envs([]), [])
+        self.assertEqual(server.normalize_ota_target_envs(""), [])
         with self.assertRaisesRegex(ValueError, "OTA 上传环境"):
             server.normalize_ota_target_envs(["staging"])
-        with self.assertRaisesRegex(ValueError, "至少"):
-            server.normalize_ota_target_envs([])
+
+    def test_empty_ota_selection_starts_pipeline_without_ota_variable(self) -> None:
+        self.app.resident_package = Mock(return_value={"status": "pending_or_missing"})  # type: ignore[method-assign]
+
+        result = self.app.rerun_tag_release(
+            {"tag_name": "fix_V3.1.24.021_202608071530", "ota_target_envs": []}
+        )
+
+        self.assertTrue(result["ok"])
+        self.client.create_pipeline.assert_called_once_with("fix_V3.1.24.021_202608071530", None)
+        self.assertEqual(result["run"]["ota_target_envs"], [])
 
     def test_existing_tag_rerun_creates_one_api_pipeline_with_multiple_selected_environments(self) -> None:
         self.app.resident_package = Mock(return_value={"status": "pending_or_missing"})  # type: ignore[method-assign]
@@ -88,8 +99,7 @@ class OtaPipelineTest(unittest.TestCase):
 
         result = self.app.create_tag(
             {
-                "scope": "single",
-                "repository_id": "business",
+                "repository_ids": ["business"],
                 "ref": "fix",
                 "tag_name": "fix_V3.1.24.021_202608071530",
             }
@@ -102,6 +112,9 @@ class OtaPipelineTest(unittest.TestCase):
         index = (server.STATIC_ROOT / "index.html").read_text(encoding="utf-8")
 
         self.assertEqual(index.count('name="ota_target_envs" multiple'), 3)
+        self.assertNotIn('name="ota_target_envs" multiple required', index)
+        self.assertNotIn('<option value="test" selected>', index)
+        self.assertEqual(index.count("留空时只构建和发布，不创建 OTA 上传阶段。"), 3)
         for value in ("dev", "test", "prod"):
             self.assertIn(f'<option value="{value}"', index)
 

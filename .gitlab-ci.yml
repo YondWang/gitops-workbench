@@ -93,6 +93,12 @@ spec:
 ---
 workflow:
   rules:
+    - if: '$CI_PIPELINE_SOURCE == "api" && $CI_COMMIT_REF_NAME == "ci/feature-package" && $GITOPS_FEATURE_PACKAGE == "1"'
+      when: always
+    # Keep the existing Workbench manual-input entry points available. API
+    # pipelines other than the signed Feature entry point stay disabled.
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+      when: always
     - when: never
 
 image: docker.m.daocloud.io/curlimages/curl:latest
@@ -153,3 +159,4 @@ include:
   - local: ".gitlab/ci/tag-list.yml"
   - local: ".gitlab/ci/sync-check.yml"
   - local: ".gitlab/ci/version-status.yml"
+  - local: ".gitlab/ci/feature-package.yml"

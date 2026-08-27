@@ -2,7 +2,6 @@ const state = {
   session: null,
   config: null,
   repositories: [],
-  currentRepositoryId: "",
   branches: [],
   tags: [],
   simosTags: [],
@@ -15,6 +14,7 @@ const state = {
   residentPackageRefreshedAt: null,
   schedules: [],
   scheduleRuns: [],
+  featurePackageRuns: [],
   selectedScheduleRunId: null,
   schedulePreviews: {},
   configBranches: [],
@@ -63,19 +63,18 @@ function formValues(form) {
   form.querySelectorAll('select[multiple]').forEach((select) => {
     data[select.name] = Array.from(select.selectedOptions).map((option) => option.value).filter(Boolean);
   });
+  const repositoryInputs = Array.from(form.querySelectorAll('input[name="repository_ids"]'));
+  if (repositoryInputs.length) {
+    data.repository_ids = repositoryInputs
+      .filter((input) => input.type === "hidden" || input.checked)
+      .map((input) => input.value)
+      .filter(Boolean);
+  }
   return data;
 }
 
 function operationBody(form) {
-  const body = formValues(form);
-  return {
-    ...body,
-    repository_id: body.repository_id || state.currentRepositoryId,
-  };
-}
-
-function currentRepository() {
-  return state.repositories.find((repo) => repo.id === state.currentRepositoryId) || state.repositories[0] || null;
+  return formValues(form);
 }
 
 function simosRepository() {
@@ -386,28 +385,13 @@ function renderSession() {
 
 function renderConfig() {
   if (!state.config) return;
-  const repo = currentRepository();
-  $("#projectName").textContent = repo ? `${repo.name} / ${repo.project}` : "暂无仓库";
+  const repositories = businessRepositories();
+  $("#projectName").textContent = repositories.length ? `已启用 ${repositories.length} 个业务仓库` : "暂无业务仓库";
   const baseInput = $("#tagForm")?.elements.base_version;
   if (baseInput && !baseInput.value) {
     baseInput.value = defaultVersionBase();
   }
   $("#configOutput").textContent = JSON.stringify(state.config, null, 2);
-}
-
-function renderRepositorySelect() {
-  const select = $("#repositorySelect");
-  const previous = state.currentRepositoryId || select.value;
-  select.innerHTML =
-    state.repositories
-      .map((repo) => `<option value="${escapeHtml(repo.id)}">${escapeHtml(repo.name)} · ${escapeHtml(repo.project)}</option>`)
-      .join("") || `<option value="">暂无仓库</option>`;
-  if (state.repositories.some((repo) => repo.id === previous)) {
-    state.currentRepositoryId = previous;
-  } else {
-    state.currentRepositoryId = state.config?.default_repository_id || state.repositories[0]?.id || "";
-  }
-  select.value = state.currentRepositoryId;
 }
 
 function renderRepositories() {
@@ -447,6 +431,24 @@ function renderSchedules() {
   renderSchedulePreviewFromForm();
   renderScheduleList();
   renderScheduleRuns();
+}
+
+function renderFeaturePackageRuns() {
+  const body = $("#featurePackageRunsBody");
+  if (!body) return;
+  body.innerHTML = state.featurePackageRuns.map((run) => {
+    const pipeline = run.pipeline_url
+      ? `<a href="${escapeHtml(run.pipeline_url)}" target="_blank" rel="noreferrer">#${escapeHtml(run.pipeline_id || "-")}</a>`
+      : "-";
+    const cloudDir = run.nextcloud?.cloud_dir || run.result?.nextcloud?.cloud_dir || "-";
+    return `<tr>
+      <td><code>${escapeHtml(run.version || "-")}</code></td>
+      <td><code>${escapeHtml(run.source_ref || "-")}</code></td>
+      <td><span class="pill">${escapeHtml(run.status || "queued")}</span></td>
+      <td>${pipeline}</td>
+      <td><code>${escapeHtml(cloudDir)}</code></td>
+    </tr>`;
+  }).join("") || '<tr><td colspan="5">暂无构建记录</td></tr>';
 }
 
 function renderScheduleList() {
@@ -637,7 +639,7 @@ function fillScheduleForm(schedule = null) {
     version_prefix_mode: "auto",
     manual_version_prefix: "V",
     cloud_category: "车机/CI自动构建",
-    ota_target_envs: ["test"],
+    ota_target_envs: [],
   };
   Object.entries(next).forEach(([key, value]) => {
     const field = form.elements[key];
@@ -746,15 +748,42 @@ function renderSchedulePreviewFromForm() {
   preview.textContent = `${sourceRefSlug(ref)}_${prefix}${versionNumber}_${new Date().toISOString().slice(0, 16).replace(/[-T:]/g, "").slice(0, 12)} · config:${configRef}`;
 }
 
+function overviewRepositoryFilterId() {
+  return $("#overviewRepositoryFilter")?.value || "";
+}
+
+function filterOverviewByRepository(items) {
+  const repositoryId = overviewRepositoryFilterId();
+  return repositoryId ? items.filter((item) => item.repository_id === repositoryId) : items;
+}
+
+function renderOverviewRepositoryFilter() {
+  const select = $("#overviewRepositoryFilter");
+  if (!select) return;
+  const previous = select.value;
+  const repositories = businessRepositories();
+  select.innerHTML = [
+    '<option value="">全部仓库</option>',
+    ...repositories.map((repo) => `<option value="${escapeHtml(repo.id)}">${escapeHtml(repo.name)}</option>`),
+  ].join("");
+  select.value = repositories.some((repo) => repo.id === previous) ? previous : "";
+}
+
+function overviewCount(current, total) {
+  return current === total ? String(total) : `${current}/${total}`;
+}
+
 function renderBranches() {
   const kind = $("#branchTypeFilter")?.value || "all";
-  const branches = kind === "all" ? state.branches : state.branches.filter((branch) => branch.kind === kind);
-  $("#branchCount").textContent = kind === "all" ? String(branches.length) : `${branches.length}/${state.branches.length}`;
+  const repositoryBranches = filterOverviewByRepository(state.branches);
+  const branches = kind === "all" ? repositoryBranches : repositoryBranches.filter((branch) => branch.kind === kind);
+  $("#branchCount").textContent = overviewCount(branches.length, state.branches.length);
   $("#branchesBody").innerHTML =
     branches
       .map(
         (branch) => `
           <tr>
+            <td><code>${escapeHtml(branch.repository_name || branch.repository_id || "-")}</code></td>
             <td>${branch.web_url ? `<a href="${escapeHtml(branch.web_url)}" target="_blank"><code>${escapeHtml(branch.name)}</code></a>` : `<code>${escapeHtml(branch.name)}</code>`}</td>
             <td><span class="pill">${escapeHtml(branch.kind)}</span></td>
             <td>${branch.protected ? "是" : "否"}</td>
@@ -762,19 +791,19 @@ function renderBranches() {
           </tr>
         `,
       )
-      .join("") || `<tr><td colspan="4">暂无分支或未读取到数据</td></tr>`;
-  renderSelectOptions();
+      .join("") || `<tr><td colspan="5">暂无分支或未读取到数据</td></tr>`;
 }
 
 function renderTags() {
-  $("#tagCount").textContent = String(state.tags.length);
+  const tags = filterOverviewByRepository(state.tags);
+  $("#tagCount").textContent = overviewCount(tags.length, state.tags.length);
   $("#tagList").innerHTML =
-    state.tags
+    tags
       .slice(0, 30)
       .map(
         (tag) => `
           <li>
-            <strong>${escapeHtml(tag.name)}</strong>
+            <strong>${escapeHtml(tag.name)}</strong> <span class="meta">${escapeHtml(tag.repository_name || tag.repository_id || "-")}</span>
             <div class="meta"><code>${escapeHtml(tag.commit_id || tag.target || "")}</code> ${escapeHtml(tag.commit_title || "")}</div>
           </li>
         `,
@@ -783,17 +812,10 @@ function renderTags() {
 }
 
 function renderSelectOptions() {
-  const releaseRefs = sourceOptions(scopeValue("#releaseForm"));
-  const featureRefs = sourceOptions(scopeValue("#featureForm"));
-  const bugfixRefs = sourceOptions(scopeValue("#bugfixForm"));
-  const tagRefs = sourceOptions(scopeValue("#tagForm"));
-
-  fillSelect("#releaseRef", releaseRefs.refs);
-  fillSelect("#featureRef", featureRefs.featureSources, "release");
-  fillSelect("#bugfixRef", bugfixRefs.refs, "release");
-  fillSelect("#tagRef", tagRefs.branches);
-  fillSelect("#featurePackageRef", (state.commonRefs?.feature_branches || []).map((item) => item.name).sort((a, b) => a.localeCompare(b)));
-  renderTagDeleteOptions();
+  renderRepositorySelectors();
+  refreshOperationRefs().catch((error) => appendLog("刷新操作来源失败", error.message));
+  fillCloudCategoryOptions();
+  renderTagDeleteOptions().catch((error) => appendLog("刷新可删除 Tag 失败", error.message));
   syncTagUpdateVersionControl();
   refreshFeaturePackagePreview().catch((error) => setText("#featurePackageVersionPreview", error.message));
 }
@@ -802,40 +824,69 @@ async function refreshFeaturePackagePreview() {
   const form = $("#featurePackageForm");
   const preview = $("#featurePackageVersionPreview");
   const ref = form?.elements.ref?.value || "";
-  if (!form || !preview || !ref) {
+  const repositoryIds = selectedRepositoryIds("#featurePackageForm");
+  if (!form || !preview || !ref || !repositoryIds.length) {
     if (preview) preview.textContent = "选择 Feature 分支后计算";
     return;
   }
   const params = new URLSearchParams({
     ref,
-    force_week_bump: String(Boolean(form.elements.force_week_bump?.checked)),
+    baseline_ref: form.elements.baseline_ref?.value || "",
+    cloud_category: form.elements.cloud_category?.value || "",
+    repository_ids: repositoryIds.join(","),
   });
   const result = await api(`/api/feature-package/preview?${params}`);
-  preview.textContent = result.ok ? `${result.version} · ${result.tag_name}` : result.error || "无法计算版本";
+  preview.textContent = result.ok ? result.version : result.error || "无法计算版本";
 }
 
-function scopeValue(formSelector) {
-  const form = $(formSelector);
-  return form?.elements.scope?.value || "single";
+function businessRepositories() {
+  return state.repositories.filter((repo) => repo.enabled && repo.id !== "config" && repo.id !== "gitops-workbench");
 }
 
-function sourceOptions(scope) {
-  const source =
-    scope === "all"
-      ? {
-          branches: state.commonRefs?.branches || [],
-          tags: state.commonRefs?.tags || [],
-          featureSources: state.commonRefs?.feature_sources || [],
-        }
-      : {
-          branches: state.branches,
-          tags: state.tags,
-          featureSources: state.branches.filter((item) => item.kind === "release" || item.kind === "bugfix"),
-        };
-  const branches = source.branches.map((item) => item.name).sort((a, b) => a.localeCompare(b));
-  const tags = source.tags.map((item) => item.name).sort((a, b) => a.localeCompare(b));
-  const featureSources = source.featureSources.map((item) => item.name).sort((a, b) => a.localeCompare(b));
-  return { branches, tags, refs: [...branches, ...tags], featureSources };
+function renderRepositorySelectors() {
+  const mappings = ["release", "feature", "featurePackage", "bugfix", "tag", "tagDelete"];
+  const repositories = businessRepositories();
+  mappings.forEach((name) => {
+    const root = $(`#${name}Repositories`);
+    if (!root) return;
+    const selected = Array.from(root.querySelectorAll('input[name="repository_ids"]:checked')).map((input) => input.value);
+    root.innerHTML = repositories.map((repo) => `<label><input type="checkbox" name="repository_ids" value="${escapeHtml(repo.id)}" ${selected.includes(repo.id) ? "checked" : ""} /> ${escapeHtml(repo.name)}</label>`).join("") || "<span class=\"meta\">暂无可操作仓库</span>";
+  });
+}
+
+function selectedRepositoryIds(formSelector) {
+  return Array.from($(formSelector)?.querySelectorAll('input[name="repository_ids"]:checked') || []).map((input) => input.value);
+}
+
+async function refreshOperationRefs() {
+  const mappings = [
+    ["#releaseForm", "#releaseRef", "refs", ""],
+    ["#featureForm", "#featureRef", "feature_sources", "release"],
+    ["#featurePackageForm", "#featurePackageRef", "feature_branches", ""],
+    ["#bugfixForm", "#bugfixRef", "refs", "release"],
+    ["#tagForm", "#tagRef", "branches", ""],
+  ];
+  await Promise.all(mappings.map(async ([formSelector, selectSelector, key, preferred]) => {
+    const ids = selectedRepositoryIds(formSelector);
+    if (!ids.length) {
+      fillSelect(selectSelector, []);
+      return;
+    }
+    const data = await api(`/api/common-refs?repository_ids=${encodeURIComponent(ids.join(","))}`);
+    fillSelect(selectSelector, (data[key] || []).map((item) => item.name).sort((a, b) => a.localeCompare(b)), preferred);
+  }));
+}
+
+function fillCloudCategoryOptions() {
+  const categories = state.config?.package_cloud_categories || [];
+  const defaultCategory = state.config?.default_package_cloud_category || "";
+  ["#featurePackageCloudCategory", "#tagCloudCategory", ".cloud-category-select"].forEach((selector) => {
+    document.querySelectorAll(selector).forEach((select) => {
+      const previous = select.value;
+      select.innerHTML = categories.map((category) => `<option value="${escapeHtml(category)}">${escapeHtml(category)}</option>`).join("");
+      select.value = categories.includes(previous) ? previous : defaultCategory;
+    });
+  });
 }
 
 function fillMultiSelect(selector, values) {
@@ -858,18 +909,17 @@ function fillMultiSelect(selector, values) {
   select.disabled = false;
 }
 
-function tagDeleteOptions(scope) {
-  const tags = scope === "all" ? state.commonRefs?.tags || [] : state.tags;
-  return tags.map((item) => item.name).sort((a, b) => a.localeCompare(b));
-}
-
-function renderTagDeleteOptions() {
-  const deleteScope = $("#tagDeleteForm")?.elements.scope?.value || "single";
-  const deleteOptions = tagDeleteOptions(deleteScope);
-  fillMultiSelect("#tagDeleteSelect", deleteOptions);
+async function renderTagDeleteOptions() {
+  const deleteIds = selectedRepositoryIds("#tagDeleteForm");
   const deleteHint = $("#tagDeleteHint");
-  if (deleteHint) {
-    deleteHint.textContent = deleteScope === "all" ? `显示全部启用仓库共有 Tag，共 ${deleteOptions.length} 个` : `显示当前仓库 Tag，共 ${deleteOptions.length} 个`;
+  if (!deleteIds.length) {
+    fillMultiSelect("#tagDeleteSelect", []);
+    if (deleteHint) deleteHint.textContent = "至少选择一个仓库后显示共同 Tag。";
+  } else {
+    const data = await api(`/api/common-refs?repository_ids=${encodeURIComponent(deleteIds.join(","))}`);
+    const deleteOptions = (data.tags || []).map((item) => item.name).sort((a, b) => a.localeCompare(b));
+    fillMultiSelect("#tagDeleteSelect", deleteOptions);
+    if (deleteHint) deleteHint.textContent = `显示所选仓库共有 Tag，共 ${deleteOptions.length} 个。`;
   }
 
   const simosRepo = simosRepository();
@@ -896,9 +946,9 @@ function syncTagUpdateVersionControl() {
   const checkbox = form.elements.update_version;
   const baseField = $("#tagBaseVersionField");
   const baseInput = form.elements.base_version;
-  const enabled = form.elements.scope?.value === "all";
+  const enabled = selectedRepositoryIds("#tagForm").length === businessRepositories().length && businessRepositories().length > 0;
   checkbox.disabled = !enabled;
-  checkbox.title = enabled ? "" : "仅在全部启用仓库范围可用";
+  checkbox.title = enabled ? "" : "仅在选择全部启用业务仓库时可用";
   checkbox.closest(".checkline")?.classList.toggle("disabled", !enabled);
   if (!enabled) {
     checkbox.checked = false;
@@ -932,26 +982,15 @@ async function refreshAll() {
   state.config = config;
   state.repositories = config.repositories || [];
   renderSession();
-  renderRepositorySelect();
   renderRepositories();
   renderConfig();
 
-  if (!state.currentRepositoryId) {
-    state.branches = [];
-    state.tags = [];
-    state.simosTags = [];
-    state.commonRefs = null;
-    renderBranches();
-    renderTags();
-    return;
-  }
-
   const search = $("#branchSearch").value.trim();
-  const params = new URLSearchParams({ repository_id: state.currentRepositoryId });
+  const params = new URLSearchParams();
   if (search) params.set("search", search);
   const simosRepo = simosRepository();
   const configRepo = configRepository();
-  const [branches, tags, commonRefs, simosTags, schedules, configBranches, previews] = await Promise.all([
+  const [branches, tags, commonRefs, simosTags, schedules, configBranches, previews, featureRuns] = await Promise.all([
     api(`/api/branches?${params}`),
     api(`/api/tags?${params}`),
     api("/api/common-refs").catch((error) => {
@@ -978,6 +1017,10 @@ async function refreshAll() {
       appendLog("刷新下次发布预览失败", error.message);
       return null;
     }),
+    api("/api/feature-package/runs").catch((error) => {
+      appendLog("刷新 Feature 构建记录失败", error.message);
+      return null;
+    }),
   ]);
   state.branches = branches.branches || [];
   state.tags = tags.tags || [];
@@ -985,12 +1028,16 @@ async function refreshAll() {
   state.commonRefs = commonRefs;
   state.schedules = schedules?.tasks || schedules?.schedules || [];
   state.scheduleRuns = schedules?.runs || [];
+  state.featurePackageRuns = featureRuns?.runs || [];
   applySchedulePreviews(previews);
   state.configBranches = configBranches?.branches || [];
   renderConfigBranchOptions();
+  renderOverviewRepositoryFilter();
+  renderSelectOptions();
   renderBranches();
   renderTags();
   renderSchedules();
+  renderFeaturePackageRuns();
 }
 
 async function refreshWorkspace() {
@@ -1007,7 +1054,7 @@ async function refreshWorkspace() {
     }
     appendLog("刷新完成", {
       view: document.querySelector(".view.active-view")?.id || "",
-      repository: state.currentRepositoryId,
+      repositories: businessRepositories().map((repo) => repo.id),
       schedules: state.schedules.length,
       branches: state.branches.length,
       tags: state.tags.length,
@@ -1366,13 +1413,12 @@ function bindEvents() {
     renderSession();
   });
 
-  $("#repositorySelect").addEventListener("change", async (event) => {
-    state.currentRepositoryId = event.currentTarget.value;
-    await refreshAll().catch((error) => appendLog("切换仓库失败", error.message));
-  });
-
   $("#refreshBtn").addEventListener("click", () => refreshWorkspace().catch((error) => appendLog("刷新失败", error.message)));
   $("#branchSearch").addEventListener("change", () => refreshAll().catch((error) => appendLog("搜索失败", error.message)));
+  $("#overviewRepositoryFilter").addEventListener("change", () => {
+    renderBranches();
+    renderTags();
+  });
   $("#branchTypeFilter").addEventListener("change", () => renderBranches());
   $("#clearLogBtn").addEventListener("click", () => {
     state.log = [];
@@ -1383,10 +1429,16 @@ function bindEvents() {
     button.addEventListener("click", () => switchView(button.dataset.view));
   });
 
-  document.querySelectorAll('form select[name="scope"]').forEach((select) => {
-    select.addEventListener("change", renderSelectOptions);
+  document.querySelectorAll(".repository-selector").forEach((selector) => {
+    selector.addEventListener("change", () => {
+      refreshOperationRefs().catch((error) => appendLog("刷新操作来源失败", error.message));
+      renderTagDeleteOptions().catch((error) => appendLog("刷新可删除 Tag 失败", error.message));
+      syncTagUpdateVersionControl();
+      if (selector.id === "featurePackageRepositories") {
+        refreshFeaturePackagePreview().catch((error) => setText("#featurePackageVersionPreview", error.message));
+      }
+    });
   });
-  $("#tagDeleteForm")?.elements.scope?.addEventListener("change", renderTagDeleteOptions);
   $("#tagForm")?.elements.update_version?.addEventListener("change", syncTagUpdateVersionControl);
   syncTagUpdateVersionControl();
 
@@ -1402,9 +1454,9 @@ function bindEvents() {
   $("#featurePackageForm")?.elements.ref?.addEventListener("change", () =>
     refreshFeaturePackagePreview().catch((error) => setText("#featurePackageVersionPreview", error.message)),
   );
-  $("#featurePackageForm")?.elements.force_week_bump?.addEventListener("change", () =>
+  ["ref", "baseline_ref", "cloud_category"].forEach((name) => $("#featurePackageForm")?.elements[name]?.addEventListener("change", () =>
     refreshFeaturePackagePreview().catch((error) => setText("#featurePackageVersionPreview", error.message)),
-  );
+  ));
   $("#manualReleaseCalculateBtn")?.addEventListener("click", refreshManualReleasePreview);
   ["source_ref", "feature_fallback_ref", "version_prefix_mode", "manual_version_prefix", "force_week_bump"].forEach((name) => {
     $("#manualReleaseForm")?.elements[name]?.addEventListener("change", markManualReleasePreviewDirty);
@@ -1451,6 +1503,7 @@ function bindEvents() {
     event.preventDefault();
     rerunExistingTag(event.currentTarget).catch((error) => appendLog("重跑已有 Tag 失败", error.message));
   });
+  $("#refreshFeaturePackageRunsBtn")?.addEventListener("click", () => refreshAll().catch((error) => appendLog("刷新 Feature 构建记录失败", error.message)));
   $("#scheduleListBody")?.addEventListener("click", (event) => {
     const editId = event.target.dataset.editSchedule;
     const deleteId = event.target.dataset.deleteSchedule;

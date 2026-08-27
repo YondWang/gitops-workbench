@@ -19,6 +19,16 @@
       "default_ref": "main",
       "token_env": "SIMULATION_TOKEN",
       "ssl_verify": false
+    },
+    {
+      "id": "gitops-workbench",
+      "name": "workbench CI (simulation)",
+      "base_url": "http://simulation.invalid",
+      "project": "software_hmi_app/gitops-control",
+      "enabled": false,
+      "default_ref": "main",
+      "token_env": "SIMULATION_TOKEN",
+      "ssl_verify": false
     }
   ]
 }

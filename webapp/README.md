@@ -46,7 +46,7 @@ bugfix/<版本号>
 
 WebApp 会在发版计划生成时记录每个仓库实际使用的来源分支和 commit。版本 MR、重试与最终 Tag 都复用这份快照，因此等待版本 MR 合并期间其他分支推进不会改变本次包的组件组合。SimOS Tag 会固化这些子模块 commit，现有 CI 继续按该 Tag 构建，无需修改 CI 文件。
 
-Feature 测试包规则：来源必须为 `feature/*`；服务端从该分支的 `version.info` 读取四段版本，默认沿用当前版本计算逻辑递增第四位。勾选“切换周版本（第三位 +1）”只增加计算结果的第三位，第四位不会被重置为 `001`。Tag 由服务端生成（例如 `feature-release_login_T3.1.24.021_202608071530`），user 不能手填或删除。SimOS 使用 `automation/feature-package/...` 临时构建分支写入 T 版本与组件 commit 快照后打 Tag；原始 Feature 分支、正式版本线和 Release 任务都不会被更新。所有 Tag 在预检成功后由 Workbench 显式调用 GitLab Pipeline API 构建，避免 Tag push 产生无变量的重复流水线。
+Feature 测试包规则：来源必须为 `feature/*`；服务端只读取该分支的远端 `version.info`，并按 Asia/Shanghai 服务端时钟生成 `TyyyyMMddHHmmss_功能描述`，例如 `T20260827153045_login`。Feature 包不创建 SimOS 或业务仓库的远端构建分支、提交、Tag、MR，也不调用 OTA。服务端冻结 SimOS 与组件 SHA，在签名上下文中提交到受保护的 `software_hmi_app/gitops-control@ci/feature-package`；可信 CI 仅在临时工作区写入 `version.info` 和 `software.yaml`，构建后发布 OS/simos Generic Package Registry 与选定 Nextcloud 分类。空“基线分支”要求每个启用组件都有同名 Feature 分支；填写基线后仅缺失组件可从该基线解析，SimOS 仍必须存在该 Feature 分支。`GITOPS_FEATURE_CONTEXT_HMAC_KEY` 必须同时作为 Workbench 服务配置和 Workbench GitLab 的 masked/protected CI 变量，`GITOPS_FEATURE_BUILD_IMAGE` 必须是同一受保护 CI 配置中的受维护构建镜像；编译 Runner 必须是无 Docker socket、无发布凭据的非特权容器执行器。
 
 版本号按精确 SimOS 来源分支独立维护：`fix`、`release`、`feature/ABC` 与 `feature/XYZ` 的版本文件和版本兜底值互不共享。
 
@@ -88,7 +88,7 @@ GITOPS_RELEASE_RUN_POLL_SECONDS=10
 
 ## OTA 云平台注册
 
-完整发版、定时完整发版和“已有 Tag 重跑”仅对管理员开放。页面可多选 OTA 环境 `dev`、`test`、`prod`；Workbench 将已选环境合成为 GitLab Pipeline variable `SIMOS_OTA_TARGET_ENVS`（例如 `dev,test`）并只创建一条 API Pipeline。该 Pipeline 仅构建和发布一次，最后由唯一的 `upload_ota_cloud` job 依次向每个所选云环境注册两个 OTA ZIP。定时任务默认使用 `test`，并将每次运行使用的环境记录在运行列表中。Feature 测试包和普通建 Tag 同样通过 Pipeline API 构建，但不传递该变量，因此 CI 不会向 OTA 云平台注册。
+完整发版、定时完整发版和“已有 Tag 重跑”仅对管理员开放。页面可多选 OTA 环境 `dev`、`test`、`prod`，也可完全不选；Workbench 只在有选择时将环境合成为 GitLab Pipeline variable `SIMOS_OTA_TARGET_ENVS`（例如 `dev,test`）。空选仍会构建并发布 Registry/Nextcloud 包，但三个按环境拆分的 OTA 上传 Job 都不会被创建，因此流水线不会出现 `upload` 阶段。新建定时任务默认不注册 OTA，已有任务保留其保存的环境。每次运行使用的环境会记录在运行列表中。Feature 测试包不接受也不传递该变量，其可信 CI 固定只有 `operate` 阶段，不会创建任何 OTA 上传 Job。
 
 SimOS 的 `.gitlab-ci.yml` 仅接受 Workbench 创建的 API Tag pipeline，直接在 GitLab 或命令行创建 Tag 只会创建 Tag，不会启动 CI。GitLab Token 必须拥有创建 pipeline 的 `api` 权限。
 

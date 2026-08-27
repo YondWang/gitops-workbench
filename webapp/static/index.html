@@ -53,7 +53,6 @@
             <div><strong id="currentUser">-</strong> <span id="currentRole" class="badge muted">-</span></div>
           </div>
           <div class="actions">
-            <select id="repositorySelect" class="repo-select"></select>
             <input id="branchSearch" class="search" placeholder="搜索远端分支" />
             <button id="refreshBtn" class="secondary">刷新</button>
             <button id="logoutBtn">退出</button>
@@ -66,6 +65,7 @@
               <div class="panel-title">
                 <h2>远端分支</h2>
                 <div class="button-row">
+                  <select id="overviewRepositoryFilter" class="compact-select overview-repository-filter" aria-label="按仓库筛选概览"></select>
                   <select id="branchTypeFilter" class="compact-select">
                     <option value="all">全部类型</option>
                     <option value="release">release</option>
@@ -80,6 +80,7 @@
                 <table>
                   <thead>
                     <tr>
+                      <th>仓库</th>
                       <th>分支</th>
                       <th>类型</th>
                       <th>保护</th>
@@ -106,13 +107,7 @@
               <h2>创建 Release 分支</h2>
             </div>
             <form id="releaseForm">
-              <label>
-                操作范围
-                <select name="scope">
-                  <option value="single">当前仓库</option>
-                  <option value="all">全部启用仓库</option>
-                </select>
-              </label>
+              <fieldset class="inline-options repository-selector" id="releaseRepositories"><legend>目标仓库</legend></fieldset>
               <label>
                 来源分支或 Tag
                 <select id="releaseRef" name="ref" required></select>
@@ -127,18 +122,13 @@
         </section>
 
         <section id="feature" class="view">
+          <div class="grid feature-operations-grid">
           <article class="panel form-panel">
             <div class="panel-title">
               <h2>创建 Feature 分支</h2>
             </div>
             <form id="featureForm">
-              <label>
-                操作范围
-                <select name="scope">
-                  <option value="single">当前仓库</option>
-                  <option value="all">全部启用仓库</option>
-                </select>
-              </label>
+              <fieldset class="inline-options repository-selector" id="featureRepositories"><legend>目标仓库</legend></fieldset>
               <label>
                 来源分支
                 <select id="featureRef" name="ref" required></select>
@@ -160,22 +150,39 @@
               <span class="badge muted">T 包</span>
             </div>
             <form id="featurePackageForm">
-              <input type="hidden" name="scope" value="all" />
+              <fieldset class="inline-options repository-selector" id="featurePackageRepositories"><legend>目标仓库</legend></fieldset>
               <label>
                 来源 Feature 分支
                 <select id="featurePackageRef" name="ref" required></select>
               </label>
-              <label class="checkline">
-                <input id="featurePackageForceWeek" name="force_week_bump" type="checkbox" />
-                切换周版本（第三位 +1）
+              <label>
+                基线分支（可选）
+                <input name="baseline_ref" placeholder="留空要求全部组件存在同名 Feature 分支" />
+              </label>
+              <label>
+                云盘分类
+                <select id="featurePackageCloudCategory" name="cloud_category" required></select>
               </label>
               <div class="readonly-field">
                 <div class="eyebrow">本次测试包版本</div>
                 <code id="featurePackageVersionPreview">选择 Feature 分支后计算</code>
               </div>
-              <p class="field-hint">系统会创建隔离的临时构建分支和 T Tag，不修改原 Feature 分支；创建 Tag 会触发 GitLab CI。</p>
+              <p class="field-hint">构建只冻结当前 Feature 的提交快照并在临时工作区注入 T 版本；不会创建远端分支、Tag、提交或 MR，也不会上传 OTA。</p>
               <button class="primary">创建测试包</button>
             </form>
+          </article>
+          </div>
+          <article class="panel" data-feature-package-only>
+            <div class="panel-title">
+              <h2>Feature 构建记录</h2>
+              <button id="refreshFeaturePackageRunsBtn" type="button">刷新</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>版本</th><th>来源</th><th>状态</th><th>Pipeline</th><th>云盘</th></tr></thead>
+                <tbody id="featurePackageRunsBody"><tr><td colspan="5">暂无构建记录</td></tr></tbody>
+              </table>
+            </div>
           </article>
           <article class="panel readonly-panel" data-user-block data-feature-package-denied>
             <h2>权限不足</h2>
@@ -189,13 +196,7 @@
               <h2>创建 Bugfix 版本分支</h2>
             </div>
             <form id="bugfixForm">
-              <label>
-                操作范围
-                <select name="scope">
-                  <option value="single">当前仓库</option>
-                  <option value="all">全部启用仓库</option>
-                </select>
-              </label>
+              <fieldset class="inline-options repository-selector" id="bugfixRepositories"><legend>目标仓库</legend></fieldset>
               <label>
                 来源分支或 Tag
                 <select id="bugfixRef" name="ref" required></select>
@@ -220,13 +221,7 @@
                 <h2>创建 Tag</h2>
               </div>
               <form id="tagForm">
-                <label>
-                  操作范围
-                  <select name="scope">
-                    <option value="single">当前仓库</option>
-                    <option value="all">全部启用仓库</option>
-                  </select>
-                </label>
+                <fieldset class="inline-options repository-selector" id="tagRepositories"><legend>目标仓库</legend></fieldset>
                 <label>
                   Tag 来源
                   <select id="tagRef" name="ref" required></select>
@@ -247,6 +242,10 @@
                   本周基线版本（可选）
                   <input name="base_version" placeholder="如 3.1.23.0，留空使用默认值" disabled />
                 </label>
+                <label>
+                  云盘分类
+                  <select id="tagCloudCategory" name="cloud_category" required></select>
+                </label>
                 <button class="primary">创建 Tag</button>
               </form>
               <div id="pendingVersionTag" class="pending-flow hidden" aria-live="polite">
@@ -265,15 +264,9 @@
                 <div class="panel-title">
                   <h2>批量删除 Tag</h2>
                 </div>
-                <p class="meta">当前仓库显示本仓库 Tag；全部仓库只显示全部启用仓库共有的 Tag。</p>
+                <p class="meta">仅显示已选仓库共有的 Tag。</p>
                 <form id="tagDeleteForm">
-                  <label>
-                    操作范围
-                    <select name="scope">
-                      <option value="single">当前仓库</option>
-                      <option value="all">全部启用仓库</option>
-                    </select>
-                  </label>
+                  <fieldset class="inline-options repository-selector" id="tagDeleteRepositories"><legend>目标仓库</legend></fieldset>
                   <label>
                     选择 Tag
                     <select id="tagDeleteSelect" name="tags" multiple size="10" required></select>
@@ -288,8 +281,7 @@
                 </div>
                 <p class="meta">单独管理 simos 主库的 Tag，不受当前仓库选择影响。</p>
                 <form id="simosTagDeleteForm">
-                  <input type="hidden" name="repository_id" value="simos" />
-                  <input type="hidden" name="scope" value="single" />
+                  <input type="hidden" name="repository_ids" value="simos" />
                   <label>
                     选择 simos Tag
                     <select id="simosTagDeleteSelect" name="tags" multiple size="10" required></select>
@@ -363,7 +355,7 @@
                 <label>
                   版本类型
                   <select name="version_prefix_mode">
-                    <option value="auto">自动：fix/bugfix=V，release=F</option>
+                    <option value="auto">自动：release/fix/bugfix=V</option>
                     <option value="manual">手动选择</option>
                   </select>
                 </label>
@@ -377,15 +369,16 @@
                 </label>
                 <label>
                   云盘分类
-                  <input name="cloud_category" value="车机/CI自动构建" required />
+                  <select class="cloud-category-select" name="cloud_category" required></select>
                 </label>
                 <label>
                   OTA 上传环境
-                  <select name="ota_target_envs" multiple required>
+                  <select name="ota_target_envs" multiple>
                     <option value="dev">开发</option>
-                    <option value="test" selected>测试</option>
+                    <option value="test">测试</option>
                     <option value="prod">生产</option>
                   </select>
+                  <span class="field-hint">可留空；留空时只构建和发布，不创建 OTA 上传阶段。</span>
                 </label>
                 <div class="readonly-field">
                   <div class="eyebrow">Tag 预览</div>
@@ -465,15 +458,16 @@
                 </label>
                 <label>
                   云盘分类
-                  <input name="cloud_category" value="车机/CI自动构建" required />
+                  <select class="cloud-category-select" name="cloud_category" required></select>
                 </label>
                 <label>
                   OTA 上传环境
-                  <select name="ota_target_envs" multiple required>
+                  <select name="ota_target_envs" multiple>
                     <option value="dev">开发</option>
-                    <option value="test" selected>测试</option>
+                    <option value="test">测试</option>
                     <option value="prod">生产</option>
                   </select>
+                  <span class="field-hint">可留空；留空时只构建和发布，不创建 OTA 上传阶段。</span>
                 </label>
                 <label class="checkline">
                   <input name="force_week_bump" type="checkbox" />
@@ -495,11 +489,12 @@
                 </label>
                 <label>
                   OTA 上传环境
-                  <select name="ota_target_envs" multiple required>
+                  <select name="ota_target_envs" multiple>
                     <option value="dev">开发</option>
-                    <option value="test" selected>测试</option>
+                    <option value="test">测试</option>
                     <option value="prod">生产</option>
                   </select>
+                  <span class="field-hint">可留空；留空时只构建和发布，不创建 OTA 上传阶段。</span>
                 </label>
                 <div class="button-row">
                   <button type="submit">重跑/刷新已有 Tag 构建</button>

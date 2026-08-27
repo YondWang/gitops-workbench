@@ -174,6 +174,10 @@ nav {
   padding: 0 8px;
 }
 
+.overview-repository-filter {
+  max-width: 180px;
+}
+
 button {
   min-height: 38px;
   border-radius: 6px;
@@ -274,6 +278,15 @@ button {
 }
 
 #schedules .form-panel {
+  max-width: none;
+}
+
+.feature-operations-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+}
+
+.feature-operations-grid > .form-panel {
   max-width: none;
 }
 
@@ -462,10 +475,6 @@ textarea {
 
 .search {
   width: 260px;
-}
-
-.repo-select {
-  width: 360px;
 }
 
 .checkline {
@@ -724,6 +733,7 @@ code {
 @media (max-width: 980px) {
   .shell,
   .grid.two,
+  .feature-operations-grid,
   #schedules .grid.two {
     grid-template-columns: 1fr;
   }
@@ -747,9 +757,6 @@ code {
     width: 100%;
   }
 
-  .repo-select {
-    width: 100%;
-  }
 }
 
 @media (max-width: 1120px) {

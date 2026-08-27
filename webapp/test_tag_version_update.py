@@ -263,18 +263,44 @@ version:1.0.0
         server.VERSION_SETTINGS_PATH = self.original_version_settings_path
         self.version_settings_tmp.cleanup()
 
+    def add_localization_component(self) -> tuple[RepositoryConfig, FakeClient]:
+        """Add a real business component; the Workbench CI repo is not one."""
+        repository = RepositoryConfig(
+            id="localization",
+            name="localization",
+            base_url="https://gitlab.example",
+            project="group/localization",
+            token_env="GITLAB_TOKEN",
+            submodule_path="src/localization",
+        )
+        client = FakeClient("localization", version_info=None, call_log=self.call_log)
+        self.app.store.repos = [self.business_repo, repository, self.workbench_repo, self.simos_repo]
+        self.clients[repository.id] = client
+        return repository, client
+
     def test_update_version_is_only_allowed_for_all_repositories_scope(self) -> None:
         with self.assertRaisesRegex(ValueError, "只能在全部启用仓库"):
             self.app.create_tag(
                 {
-                    "repository_id": "simos",
-                    "scope": "single",
+                    "repository_ids": ["simos"],
                     "ref": "release",
                     "tag_name": "release-20260615100000",
                     "message": "candidate build",
                     "update_version": True,
                 }
             )
+
+    def test_legacy_write_target_fields_are_rejected_for_every_operation(self) -> None:
+        legacy_payloads = [
+            (self.app.create_release, {"scope": "all", "ref": "release"}),
+            (self.app.create_feature, {"repository_id": "business", "ticket": "TASK1", "desc": "login", "ref": "release"}),
+            (self.app.create_bugfix, {"repo_id": "business", "version": "V1.0.0", "ref": "release"}),
+            (self.app.create_tag, {"scope": "all", "ref": "release", "tag_name": "release-old", "message": "legacy"}),
+            (self.app.delete_tags, {"repository_id": "business", "tags": "legacy"}),
+        ]
+        for operation, payload in legacy_payloads:
+            with self.subTest(operation=operation.__name__), self.assertRaisesRegex(ValueError, "旧 scope/repository_id"):
+                operation(payload)
 
     def test_bump_version_preserves_last_segment_zero_padding(self) -> None:
         self.assertEqual(server.bump_version("3.1.21.063"), "3.1.21.064")
@@ -460,8 +486,7 @@ commits:
         with mock.patch.object(server, "default_tag_name", side_effect=lambda ref, version: f"{ref}_{version}_DATE"):
             result = self.app.create_tag(
                 {
-                    "repository_id": "business",
-                    "scope": "single",
+                    "repository_ids": ["business"],
                     "ref": "release",
                     "message": "candidate build",
                 }
@@ -477,7 +502,7 @@ commits:
         with mock.patch.object(server, "default_tag_name", side_effect=lambda ref, version: f"{ref}_{version}_DATE"):
             result = self.app.create_tag(
                 {
-                    "scope": "all",
+                    "repository_ids": ["simos", "business"],
                     "ref": "release",
                     "message": "candidate build",
                     "update_version": True,
@@ -486,7 +511,7 @@ commits:
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["phase"], "waiting_version_mr")
-        self.assertEqual(result["tag_name"], "release_F1.0.02_DATE")
+        self.assertEqual(result["tag_name"], "release_V1.0.02_DATE")
 
     def test_fix_source_uses_v_version_prefix(self) -> None:
         for client in (self.business_client, self.workbench_client, self.simos_client):
@@ -494,7 +519,7 @@ commits:
         with mock.patch.object(server, "default_tag_name", side_effect=lambda ref, version: f"{ref}_{version}_DATE"):
             result = self.app.create_tag(
                 {
-                    "scope": "all",
+                    "repository_ids": ["simos", "business"],
                     "ref": "fix",
                     "message": "candidate build",
                     "update_version": True,
@@ -510,7 +535,7 @@ commits:
     def test_manual_t_version_prefix_is_written_to_version_files(self) -> None:
         result = self.app.create_tag(
             {
-                "scope": "all",
+                "repository_ids": ["simos", "business"],
                 "ref": "release",
                 "tag_name": "release_T1.0.02_202606151000",
                 "message": "custom build",
@@ -532,8 +557,7 @@ commits:
 
         result = self.app.delete_tags(
             {
-                "repository_id": "business",
-                "scope": "single",
+                "repository_ids": ["business"],
                 "tags": "release-20260615100000\nfix-20260615110000",
             }
         )
@@ -550,7 +574,7 @@ commits:
 
         result = self.app.delete_tags(
             {
-                "scope": "all",
+                "repository_ids": ["simos", "business"],
                 "tags": "release-20260615100000\nfix-20260615110000",
             }
         )
@@ -566,8 +590,7 @@ commits:
 
         result = self.app.delete_tags(
             {
-                "repository_id": "business",
-                "scope": "single",
+                "repository_ids": ["business"],
                 "tags": ["release-20260615100000", "fix-20260615110000"],
             }
         )
@@ -578,7 +601,7 @@ commits:
     def test_all_repository_tag_creates_simos_version_mr_before_any_tag(self) -> None:
         result = self.app.create_tag(
             {
-                "scope": "all",
+                "repository_ids": ["simos", "business"],
                 "ref": "release",
                 "tag_name": "release-20260615100000",
                 "message": "candidate build",
@@ -621,13 +644,13 @@ commits:
 
         actions = version_commit[3]
         version_action = next(action for action in actions if action["file_path"] == "version.info")
-        self.assertIn("Version:F1.0.02", version_action["content"])
+        self.assertIn("Version:V1.0.02", version_action["content"])
         self.assertIn("simos_commitid:simos-new", version_action["content"])
         self.assertIn("business_commitid:business-new", version_action["content"])
         self.assertIn("simos_branch:release-20260615100000", version_action["content"])
         self.assertIn("business_branch:release-20260615100000", version_action["content"])
         software_action = next(action for action in actions if action["file_path"] == "software.yaml")
-        self.assertIn('version: "F1.0.02"', software_action["content"])
+        self.assertIn('version: "V1.0.02"', software_action["content"])
         self.assertIn('business: "release-20260615100000"', software_action["content"])
         self.assertNotIn("pkg.info", result["version_update"]["files"])
         self.assertEqual(result["merge_request"]["state"], "opened")
@@ -635,7 +658,7 @@ commits:
     def test_direct_all_scope_tag_waits_for_version_mr_without_auto_merge_metadata(self) -> None:
         result = self.app.create_tag(
             {
-                "scope": "all",
+                "repository_ids": ["simos", "business"],
                 "ref": "release",
                 "tag_name": "release-20260615100000",
                 "message": "candidate build",
@@ -657,7 +680,7 @@ commits:
             try:
                 result = self.app.create_tag(
                     {
-                        "scope": "all",
+                        "repository_ids": ["simos", "business"],
                         "ref": "release",
                         "tag_name": "release-20260615100000",
                         "message": "candidate build",
@@ -668,7 +691,7 @@ commits:
                 version_commit = next(call for call in self.simos_client.calls if call[0] == "create_commit")
                 version_action = next(action for action in version_commit[3] if action["file_path"] == "version.info")
 
-                self.assertIn("Version:F1.1.02", version_action["content"])
+                self.assertIn("Version:V1.1.02", version_action["content"])
                 self.assertEqual(result["version_update"]["base_version"], "1.1.0")
                 self.assertEqual(self.app.public_config()["version_update"]["base_version"], "1.1.0")
             finally:
@@ -695,7 +718,7 @@ commits:
 
         result = self.app.create_tag(
             {
-                "scope": "all",
+                "repository_ids": ["simos", "business"],
                 "ref": "release",
                 "tag_name": "release-20260615100000",
                 "message": "candidate build",
@@ -708,11 +731,10 @@ commits:
         self.assertEqual(result["phase"], "execute")
         self.assertNotIn("create_commit", [call[0] for call in self.simos_client.calls])
         business_tag = next(call for call in self.business_client.calls if call[0] == "create_tag")
-        workbench_tag = next(call for call in self.workbench_client.calls if call[0] == "create_tag")
         simos_tag = next(call for call in self.simos_client.calls if call[0] == "create_tag")
         self.assertEqual(business_tag, ("create_tag", "release-20260615100000", "release", "candidate build"))
-        self.assertEqual(workbench_tag, ("create_tag", "release-20260615100000", "release", "candidate build"))
         self.assertEqual(simos_tag, ("create_tag", "release-20260615100000", "version-head", "candidate build"))
+        self.assertFalse(any(call[0] == "create_tag" for call in self.workbench_client.calls))
 
     def test_closed_version_mr_terminates_pending_tag_workflow(self) -> None:
         self.simos_client._merge_requests = [
@@ -728,7 +750,7 @@ commits:
 
         result = self.app.create_tag(
             {
-                "scope": "all",
+                "repository_ids": ["simos", "business"],
                 "ref": "release",
                 "tag_name": "release-20260615100000",
                 "message": "candidate build",
@@ -747,7 +769,7 @@ commits:
 
         result = self.app.create_tag(
             {
-                "scope": "all",
+                "repository_ids": ["simos", "business"],
                 "ref": "release",
                 "tag_name": "release-20260615100000",
                 "message": "candidate build",
@@ -759,7 +781,7 @@ commits:
         self.assertEqual(result["phase"], "waiting_version_mr")
         version_commit = next(call for call in self.simos_client.calls if call[0] == "create_commit")
         version_action = next(action for action in version_commit[3] if action["file_path"] == "version.info")
-        self.assertIn("Version:F1.0.1", version_action["content"])
+        self.assertIn("Version:V1.0.1", version_action["content"])
         self.assertIn("business_commitid:business-new", version_action["content"])
 
     def test_version_update_uses_tag_name_not_source_branch_in_software_yaml_and_version_info(self) -> None:
@@ -769,7 +791,7 @@ commits:
 
         result = self.app.create_tag(
             {
-                "scope": "all",
+                "repository_ids": ["simos", "business"],
                 "ref": "fix",
                 "tag_name": "fix_3.1.22.046_202606241430",
                 "message": "fix build",
@@ -795,7 +817,7 @@ commits:
 
         result = self.app.create_tag(
             {
-                "scope": "all",
+                "repository_ids": ["simos", "business"],
                 "ref": "release",
                 "tag_name": "release-20260615100000",
                 "message": "candidate build",
@@ -827,7 +849,7 @@ commits:
 
         result = self.app.create_tag(
             {
-                "scope": "all",
+                "repository_ids": ["simos", "business"],
                 "ref": "release",
                 "tag_name": "release-20260615100000",
                 "message": "candidate build",
@@ -848,7 +870,7 @@ commits:
 
         result = self.app.create_tag(
             {
-                "scope": "all",
+                "repository_ids": ["simos", "business"],
                 "ref": "release",
                 "tag_name": "release-20260615100000",
                 "message": "candidate build",
@@ -874,10 +896,30 @@ commits:
         self.assertEqual([item["name"] for item in result["branches"]], ["bugfix/V1.0.0", "release"])
         self.assertEqual([item["name"] for item in result["tags"]], ["v1"])
 
+    def test_overview_lists_all_business_repositories_without_a_current_repository(self) -> None:
+        self.business_client._branch_names = ["release", "feature/business_login"]
+        self.simos_client._branch_names = ["release", "feature/simos_login"]
+        self.business_client._tag_names = ["business-v1"]
+        self.simos_client._tag_names = ["simos-v1"]
+
+        branches = self.app.branches("")
+        tags = self.app.tags("")
+
+        self.assertIsNone(branches["repository"])
+        self.assertEqual({item["repository_id"] for item in branches["branches"]}, {"business", "simos"})
+        self.assertEqual({item["repository_id"] for item in tags["tags"]}, {"business", "simos"})
+        index = (server.STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+        app_js = (server.STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+        self.assertNotIn("overviewRepositorySelect", index)
+        self.assertNotIn("currentRepositoryId", app_js)
+        self.assertIn('id="overviewRepositoryFilter"', index)
+        self.assertIn("filterOverviewByRepository", app_js)
+
     def test_feature_release_resolves_each_component_or_falls_back_to_release(self) -> None:
+        _, localization_client = self.add_localization_component()
         self.simos_client._branch_names = ["release", "feature/ABC"]
         self.business_client._branch_names = ["release", "feature/ABC"]
-        self.workbench_client._branch_names = ["release"]
+        localization_client._branch_names = ["release"]
 
         resolutions = self.app.resolve_full_release_components("feature/ABC")
 
@@ -886,33 +928,36 @@ commits:
         self.assertEqual(by_repository["simos"]["resolution"], "simos_source")
         self.assertEqual(by_repository["business"]["resolved_ref"], "feature/ABC")
         self.assertEqual(by_repository["business"]["resolution"], "requested_ref")
-        self.assertEqual(by_repository["gitops-workbench"]["resolved_ref"], "release")
-        self.assertEqual(by_repository["gitops-workbench"]["resolution"], "fallback_release")
-        self.assertEqual(by_repository["gitops-workbench"]["commit_id"], "gitops-workbench-new")
+        self.assertEqual(by_repository["localization"]["resolved_ref"], "release")
+        self.assertEqual(by_repository["localization"]["resolution"], "fallback_release")
+        self.assertEqual(by_repository["localization"]["commit_id"], "localization-new")
 
     def test_feature_release_resolves_missing_component_to_selected_fallback_ref(self) -> None:
+        _, localization_client = self.add_localization_component()
         self.simos_client._branch_names = ["release", "feature/ABC"]
         self.business_client._branch_names = ["release", "feature/ABC"]
-        self.workbench_client._branch_names = ["release", "bugfix/V1.2.3"]
+        localization_client._branch_names = ["release", "bugfix/V1.2.3"]
 
         resolutions = self.app.resolve_full_release_components("feature/ABC", "bugfix/V1.2.3")
 
         by_repository = {item["repository_id"]: item for item in resolutions}
-        self.assertEqual(by_repository["gitops-workbench"]["resolved_ref"], "bugfix/V1.2.3")
-        self.assertEqual(by_repository["gitops-workbench"]["resolution"], "fallback_ref")
+        self.assertEqual(by_repository["localization"]["resolved_ref"], "bugfix/V1.2.3")
+        self.assertEqual(by_repository["localization"]["resolution"], "fallback_ref")
 
     def test_feature_release_fails_when_selected_fallback_ref_is_missing(self) -> None:
+        _, localization_client = self.add_localization_component()
         self.simos_client._branch_names = ["release", "feature/ABC"]
         self.business_client._branch_names = ["release", "feature/ABC"]
-        self.workbench_client._branch_names = ["release"]
+        localization_client._branch_names = ["release"]
 
-        with self.assertRaisesRegex(ValueError, "gitops-workbench.*回退分支不存在：bugfix/V1.2.3"):
+        with self.assertRaisesRegex(ValueError, "localization.*回退分支不存在：bugfix/V1.2.3"):
             self.app.resolve_full_release_components("feature/ABC", "bugfix/V1.2.3")
 
     def test_feature_release_fails_when_missing_component_has_no_release(self) -> None:
+        _, localization_client = self.add_localization_component()
         self.simos_client._branch_names = ["release", "feature/ABC"]
         self.business_client._branch_names = ["release", "feature/ABC"]
-        self.workbench_client._branch_names = []
+        localization_client._branch_names = []
 
         with self.assertRaisesRegex(ValueError, "release 分支不存在"):
             self.app.resolve_full_release_components("feature/ABC")
@@ -934,20 +979,21 @@ commits:
 
         by_repository = {item["repository_id"]: item for item in resolutions}
         self.assertEqual(by_repository["simos"]["resolved_ref"], "fix_otaEnvVi")
-        self.assertEqual(by_repository["gitops-workbench"]["resolved_ref"], "release")
-        self.assertEqual(by_repository["gitops-workbench"]["resolution"], "fallback_release")
+        self.assertEqual(by_repository["business"]["resolved_ref"], "release")
+        self.assertEqual(by_repository["business"]["resolution"], "fallback_release")
 
     def test_feature_release_version_plan_uses_the_snapshotted_fallback_commit(self) -> None:
+        _, localization_client = self.add_localization_component()
         self.simos_client._branch_names = ["release", "feature/ABC"]
         self.business_client._branch_names = ["release", "feature/ABC"]
-        self.workbench_client._branch_names = ["release"]
+        localization_client._branch_names = ["release"]
         resolutions = self.app.resolve_full_release_components("feature/ABC")
-        fallback = next(item for item in resolutions if item["repository_id"] == "gitops-workbench")
+        fallback = next(item for item in resolutions if item["repository_id"] == "localization")
         fallback["commit_id"] = "release-commit-captured-before-mr"
 
         result = self.app.create_tag(
             {
-                "scope": "all",
+                "repository_ids": ["simos", "business", "localization"],
                 "ref": "feature/ABC",
                 "tag_name": "feature-ABC_F1.0.2_202607281000",
                 "message": "feature build",
@@ -958,20 +1004,12 @@ commits:
 
         self.assertEqual(result["phase"], "waiting_version_mr")
         precheck = {item["repository"]["id"]: item["context"] for item in result["precheck"]}
-        self.assertEqual(precheck["gitops-workbench"]["ref"], "release")
-        self.assertEqual(precheck["gitops-workbench"]["ref_commit_id"], "release-commit-captured-before-mr")
+        self.assertEqual(precheck["localization"]["ref"], "release")
+        self.assertEqual(precheck["localization"]["ref_commit_id"], "release-commit-captured-before-mr")
 
     def test_feature_release_plan_uses_fallback_snapshot_when_calculating_version(self) -> None:
-        localization_repo = RepositoryConfig(
-            id="localization",
-            name="localization",
-            base_url="https://gitlab.example",
-            project="group/localization",
-            token_env="GITLAB_TOKEN",
-        )
-        localization_client = FakeClient("localization", version_info=None, call_log=self.call_log)
-        self.app.store.repos = [self.business_repo, localization_repo, self.simos_repo]
-        self.clients["localization"] = localization_client
+        _, localization_client = self.add_localization_component()
+        self.simos_client.version_info = VERSION_INFO.replace("Version:1.0.0", "Version:V3.1.24.020")
         self.simos_client._branch_names = ["release", "feature/release_multifloor"]
         self.business_client._branch_names = ["release", "feature/release_multifloor"]
         localization_client._branch_names = ["release"]
@@ -1009,11 +1047,11 @@ commits:
         )
 
         self.assertEqual(
-            self.app.default_tag_version_for_request({"scope": "all"}, "feature/ABC", False, ""),
+            self.app.default_tag_version_for_request({"repository_ids": ["simos", "business"]}, "feature/ABC", False, ""),
             "3.2.0.1",
         )
         self.assertEqual(
-            self.app.default_tag_version_for_request({"scope": "all"}, "fix", False, ""),
+            self.app.default_tag_version_for_request({"repository_ids": ["simos", "business"]}, "fix", False, ""),
             "3.1.24.020",
         )
 

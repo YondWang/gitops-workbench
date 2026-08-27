@@ -38,6 +38,19 @@
         }
       },
       "tags": []
+    },
+    "gitops-workbench": {
+      "branches": {
+        "main": {
+          "commit_id": "workbench-main-commit",
+          "files": {}
+        },
+        "ci/feature-package": {
+          "commit_id": "workbench-feature-ci-commit",
+          "files": {}
+        }
+      },
+      "tags": []
     }
   },
   "baseline_repositories": {
@@ -75,6 +88,19 @@
         },
         "release": {
           "commit_id": "business-release-commit",
+          "files": {}
+        }
+      },
+      "tags": []
+    },
+    "gitops-workbench": {
+      "branches": {
+        "main": {
+          "commit_id": "workbench-main-commit",
+          "files": {}
+        },
+        "ci/feature-package": {
+          "commit_id": "workbench-feature-ci-commit",
           "files": {}
         }
       },

@@ -171,7 +171,14 @@ class ScheduleAutomationTest(unittest.TestCase):
             token_env="SIMOS_TOKEN",
         )
         self.client = FakeClient()
-        self.app = server.GitOpsApp(FakeStore([self.repo]), server.AuthManager.from_environment())
+        self.app = server.GitOpsApp(
+            FakeStore([self.repo]),
+            server.AuthManager.from_environment(),
+            {
+                **server.DEFAULT_CONFIG,
+                "package_cloud_categories": ["车机/CI自动构建", "车机/CI自动构建/360", "车机/夜间构建"],
+            },
+        )
         self.app.client_for = lambda repo: self.client  # type: ignore[method-assign]
         self.app.token_loaded = lambda repo: True  # type: ignore[method-assign]
 
@@ -321,7 +328,7 @@ commits:
 
         plan = self.app.resolve_release_plan({**server.DEFAULT_SCHEDULE, "force_week_bump": True}, now="2026-07-06T16:00:00+08:00")
 
-        self.assertEqual(plan["version_number"], "3.1.25.020")
+        self.assertEqual(plan["version_number"], "3.1.25.019")
         self.assertEqual(
             self.app.manual_release_preview({"source_ref": "fix", "force_week_bump": True, "now": "2026-07-06T16:00:00+08:00"})["changed_components"],
             [],

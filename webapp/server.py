@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -45,6 +48,7 @@ SCHEDULES_PATH = DATA_ROOT / "schedules.json"
 SCHEDULE_RUNS_PATH = DATA_ROOT / "schedule-runs.json"
 RELEASE_TASKS_PATH = Path(os.environ.get("GITOPS_RELEASE_TASKS_PATH", str(DATA_ROOT / "release_tasks.json")))
 RELEASE_RUNS_PATH = Path(os.environ.get("GITOPS_RELEASE_RUNS_PATH", str(DATA_ROOT / "release_runs.json")))
+FEATURE_PACKAGE_RUNS_PATH = Path(os.environ.get("GITOPS_FEATURE_PACKAGE_RUNS_PATH", str(DATA_ROOT / "feature_package_runs.json")))
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "gitlab": {
@@ -77,6 +81,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "server": {
         "host": "127.0.0.1",
         "port": 8765,
+    },
+    "package_cloud_categories": ["车机/CI自动构建", "车机/Feature测试包"],
+    "default_package_cloud_category": "车机/CI自动构建",
+    "feature_package_ci": {
+        "repository_id": "gitops-workbench",
+        "ref": "ci/feature-package",
+        "registry_repository_id": "simos",
     },
 }
 
@@ -117,6 +128,7 @@ VERSION_MERGE_RETRY_SECONDS = 10
 VERSION_MERGE_MAX_ATTEMPTS = 6
 RELEASE_RUNS_LOCK = threading.RLock()
 FEATURE_PACKAGE_LOCK = threading.RLock()
+FEATURE_PACKAGE_RUNS_LOCK = threading.RLock()
 
 
 def release_runs_locked(method: Callable[..., Any]) -> Callable[..., Any]:
@@ -155,7 +167,9 @@ DEFAULT_SCHEDULE: dict[str, Any] = {
     "version_prefix_mode": "auto",
     "manual_version_prefix": "V",
     "cloud_category": "车机/CI自动构建",
-    "ota_target_envs": ["test"],
+    # OTA registration is opt-in. An empty list still builds and publishes the
+    # package, but omits every OTA upload job from the SimOS pipeline.
+    "ota_target_envs": [],
     "execution_type": "full_release",
 }
 
@@ -169,9 +183,10 @@ class OperationTarget:
 
 
 class GitOpsApp:
-    def __init__(self, store: RepositoryStore, auth: AuthManager) -> None:
+    def __init__(self, store: RepositoryStore, auth: AuthManager, config: dict[str, Any] | None = None) -> None:
         self.store = store
         self.auth = auth
+        self.config = config or DEFAULT_CONFIG
 
     def public_config(self) -> dict[str, Any]:
         repos = self.repositories()["repositories"]
@@ -180,6 +195,8 @@ class GitOpsApp:
             "default_repository_id": default_repo,
             "repositories": repos,
             "version_update": load_version_settings(),
+            "package_cloud_categories": self.package_cloud_categories(),
+            "default_package_cloud_category": self.default_package_cloud_category(),
             "roles": {
                 "user": ["view", "create_feature", "create_feature_package"],
                 "admin": ["view", "create_feature", "create_feature_package", "create_release", "create_bugfix", "create_tag", "admin"],
@@ -191,6 +208,29 @@ class GitOpsApp:
             "ok": True,
             "repositories": [repo.public_dict(token_loaded=self.token_loaded(repo)) for repo in self.store.list()],
         }
+
+    def package_cloud_categories(self) -> list[str]:
+        raw = self.config.get("package_cloud_categories", DEFAULT_CONFIG["package_cloud_categories"])
+        if not isinstance(raw, list):
+            raise ValueError("package_cloud_categories 必须是数组")
+        categories = [normalize_cloud_category(item) for item in raw]
+        if not categories:
+            raise ValueError("至少配置一个云盘分类")
+        return list(dict.fromkeys(categories))
+
+    def default_package_cloud_category(self) -> str:
+        value = normalize_cloud_category(
+            self.config.get("default_package_cloud_category", DEFAULT_CONFIG["default_package_cloud_category"])
+        )
+        if value not in self.package_cloud_categories():
+            raise ValueError("default_package_cloud_category 必须在 package_cloud_categories 中")
+        return value
+
+    def require_package_cloud_category(self, value: Any) -> str:
+        category = normalize_cloud_category(value or self.default_package_cloud_category())
+        if category not in self.package_cloud_categories():
+            raise ValueError("云盘分类不在 Workbench 白名单中")
+        return category
 
     def add_repository(self, payload: dict[str, Any]) -> dict[str, Any]:
         repo = RepositoryStore._from_dict(payload)
@@ -214,26 +254,53 @@ class GitOpsApp:
         return {"ok": True, "repository": target.repo.public_dict(self.token_loaded(target.repo)), "project": target.client.project()}
 
     def branches(self, repo_id: str, search: str = "") -> dict[str, Any]:
-        target = self.target(repo_id)
-        branches = [summarize_branch(item) for item in target.client.branches(search)]
+        targets = [self.target(repo_id)] if repo_id else [self.target(item) for item in self.release_repository_ids()]
+        if not targets:
+            raise ValueError("没有启用的业务仓库")
+        branches = [
+            {
+                **summarize_branch(item),
+                "repository_id": target.repo.id,
+                "repository_name": target.repo.name,
+            }
+            for target in targets
+            for item in target.client.branches(search)
+        ]
         return {
             "ok": True,
-            "repository": target.repo.public_dict(self.token_loaded(target.repo)),
+            "repository": targets[0].repo.public_dict(self.token_loaded(targets[0].repo)) if len(targets) == 1 else None,
+            "repositories": [target.repo.public_dict(self.token_loaded(target.repo)) for target in targets],
             "branches": branches,
             "groups": group_branches(branches),
         }
 
     def tags(self, repo_id: str, search: str = "") -> dict[str, Any]:
-        target = self.target(repo_id)
-        tags = [summarize_tag(item) for item in target.client.tags(search)]
+        targets = [self.target(repo_id)] if repo_id else [self.target(item) for item in self.release_repository_ids()]
+        if not targets:
+            raise ValueError("没有启用的业务仓库")
+        tags = [
+            {
+                **summarize_tag(item),
+                "repository_id": target.repo.id,
+                "repository_name": target.repo.name,
+            }
+            for target in targets
+            for item in target.client.tags(search)
+        ]
         return {
             "ok": True,
-            "repository": target.repo.public_dict(self.token_loaded(target.repo)),
+            "repository": targets[0].repo.public_dict(self.token_loaded(targets[0].repo)) if len(targets) == 1 else None,
+            "repositories": [target.repo.public_dict(self.token_loaded(target.repo)) for target in targets],
             "tags": tags,
         }
 
-    def common_refs(self) -> dict[str, Any]:
-        targets = [self.target(repo.id) for repo in self.store.enabled()]
+    def common_refs(self, repository_ids: list[str] | None = None) -> dict[str, Any]:
+        if repository_ids is None:
+            # The Workbench CI repository is an orchestration target, never part of
+            # a product's common source branch calculation.
+            targets = [self.target(repo_id) for repo_id in self.release_repository_ids()]
+        else:
+            targets = self.targets({"repository_ids": repository_ids})
         if not targets:
             raise ValueError("没有启用的仓库")
 
@@ -305,6 +372,18 @@ class GitOpsApp:
     def release_tasks(self) -> dict[str, Any]:
         self.refresh_building_release_runs()
         return {"ok": True, "tasks": load_release_tasks(), "runs": load_release_runs()}
+
+    def feature_package_runs(self) -> dict[str, Any]:
+        self.refresh_feature_package_runs()
+        runs = sorted(load_feature_package_runs(), key=lambda item: str(item.get("started_at") or ""), reverse=True)
+        return {"ok": True, "runs": runs}
+
+    def feature_package_run(self, run_id: str) -> dict[str, Any]:
+        self.refresh_feature_package_runs()
+        run = next((item for item in load_feature_package_runs() if item.get("id") == run_id), None)
+        if run is None:
+            raise ValueError("Feature 构建记录不存在")
+        return {"ok": True, "run": run}
 
     def save_schedule(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.save_release_task(payload)
@@ -433,9 +512,10 @@ class GitOpsApp:
         if simos_target is None:
             raise ValueError("发版任务需要启用 simos 仓库")
         software_yaml = software_yaml_text(simos_target.client, plan["source_ref"])
+        version_info = simos_target.client.get_file_text(VERSION_INFO_PATH, plan["source_ref"])
         return {
             "ok": True,
-            "current_version": software_yaml_version_from_text(software_yaml),
+            "current_version": normalize_version_number(require_existing_version(parse_version_info(version_info))),
             "version": plan["release_version"],
             "version_number": plan["version_number"],
             "tag_name": plan["tag_name"],
@@ -660,10 +740,15 @@ class GitOpsApp:
     def is_feature_release_ref(ref: str) -> bool:
         return ref.startswith("feature/") and len(ref) > len("feature/")
 
-    def resolve_full_release_components(self, requested_ref: str, feature_fallback_ref: str = "release") -> list[dict[str, str]]:
+    def resolve_full_release_components(
+        self,
+        requested_ref: str,
+        feature_fallback_ref: str = "release",
+        repositories: list[RepositoryConfig] | None = None,
+    ) -> list[dict[str, str]]:
         requested_ref = require_ref_name(requested_ref, "完整发版来源分支")
         fallback_ref = require_ref_name(feature_fallback_ref, "Feature 缺失时回退分支")
-        repositories = self.release_repositories()
+        repositories = repositories or self.release_repositories()
         if not repositories:
             raise ValueError("没有启用的业务仓库")
         validate_submodule_configs(repositories)
@@ -742,7 +827,7 @@ class GitOpsApp:
         source_ref_slug = tag_source_name(ref)
         tag_name = default_tag_name(ref, release_version, stamp)
         cloud_date = local_now.strftime("%Y-%m-%d")
-        cloud_category = str(schedule.get("cloud_category") or DEFAULT_SCHEDULE["cloud_category"]).strip("/")
+        cloud_category = self.require_package_cloud_category(schedule.get("cloud_category"))
         config_matrix = resolve_config_matrix(schedule)
         config_ref = config_matrix[0]["config_ref"] if config_matrix else self.resolve_config_ref(schedule)
         plan = {
@@ -808,7 +893,7 @@ class GitOpsApp:
             if not version:
                 raise ValueError("自动任务使用手动版本时必须填写版本号")
             return version
-        return software_yaml_version(target.client, ref)
+        return normalize_version_number(require_existing_version(parse_version_info(target.client.get_file_text(VERSION_INFO_PATH, ref))))
 
     def resolve_release_version_number(
         self,
@@ -823,7 +908,9 @@ class GitOpsApp:
         if simos_target is None:
             raise ValueError("发版任务需要启用 simos 仓库")
         software_yaml = software_yaml_text(simos_target.client, ref)
-        current_version = software_yaml_version_from_text(software_yaml)
+        current_version = normalize_version_number(
+            require_existing_version(parse_version_info(simos_target.client.get_file_text(VERSION_INFO_PATH, ref)))
+        )
         changed = changed_components_from_software_baseline(
             component_resolutions or [], software_yaml_component_commits(software_yaml)
         )
@@ -840,7 +927,7 @@ class GitOpsApp:
     @release_runs_locked
     def start_full_release_run(self, task: dict[str, Any], plan: dict[str, Any], trigger: str) -> dict[str, Any]:
         payload = {
-            "scope": "all",
+            "repository_ids": self.release_repository_ids(),
             "ref": plan["source_ref"],
             "tag_name": plan["tag_name"],
             "message": plan["message"],
@@ -851,6 +938,7 @@ class GitOpsApp:
             "auto_merge_version_mr": True,
             "component_resolutions": list(plan.get("component_resolutions") or []),
             "ota_target_envs": plan.get("ota_target_envs"),
+            "cloud_category": plan.get("cloud_category"),
         }
         if bool(plan.get("config_matrix_enabled", True)) and not plan.get("config_matrix"):
             result = {
@@ -935,7 +1023,7 @@ class GitOpsApp:
             "task": task,
             "plan": plan,
             "create_tag_payload": {
-                "scope": "all",
+                "repository_ids": self.release_repository_ids(),
                 "ref": plan.get("source_ref") or plan.get("ref"),
                 "tag_name": plan.get("tag_name"),
                 "message": plan.get("message"),
@@ -946,6 +1034,7 @@ class GitOpsApp:
                 "auto_merge_version_mr": True,
                 "component_resolutions": list(plan.get("component_resolutions") or []),
                 "ota_target_envs": list(plan.get("ota_target_envs") or []),
+                "cloud_category": plan.get("cloud_category", ""),
             },
         }
         pipeline = result.get("pipeline") if isinstance(result.get("pipeline"), dict) else {}
@@ -1385,8 +1474,8 @@ class GitOpsApp:
         base_version = normalize_optional_version(str(payload.get("base_version", ""))) if update_version else ""
         base_version_is_final = truthy(payload.get("base_version_is_final", payload.get("version_number_is_final", False))) if update_version else False
         requested_version_prefix = normalize_version_prefix(str(payload.get("version_prefix") or resolve_version_prefix(ref))) if update_version else ""
-        scope = str(payload.get("scope", "single")).strip() or "single"
-        if update_version and scope != "all":
+        selected_ids = payload.get("repository_ids")
+        if update_version and set(selected_ids if isinstance(selected_ids, list) else []) != set(self.release_repository_ids()):
             raise ValueError("打 Tag 前更新版本号只能在全部启用仓库范围使用")
         raw_tag_name = str(payload.get("tag_name", "")).strip()
         tag_name = require_ref_name(raw_tag_name or self.default_tag_name_for_request(payload, ref, update_version, base_version), "Tag 名称")
@@ -1442,7 +1531,11 @@ class GitOpsApp:
             return result
         ota_target_envs = normalize_optional_ota_target_envs(payload.get("ota_target_envs", payload.get("ota_target_env")))
         try:
-            result["pipeline"] = self.start_simos_pipeline(tag_name, ota_target_envs)
+            result["pipeline"] = self.start_simos_pipeline(
+                tag_name,
+                ota_target_envs,
+                self.require_package_cloud_category(payload.get("cloud_category")),
+            )
         except (ValueError, GitLabError) as exc:
             result.update(
                 {
@@ -1454,7 +1547,12 @@ class GitOpsApp:
             )
         return result
 
-    def start_simos_pipeline(self, tag_name: str, ota_target_envs: list[str] | None = None) -> dict[str, Any]:
+    def start_simos_pipeline(
+        self,
+        tag_name: str,
+        ota_target_envs: list[str] | None = None,
+        cloud_category: str | None = None,
+    ) -> dict[str, Any]:
         simos_target = self.optional_simos_target()
         if simos_target is None:
             raise ValueError("启动构建 Pipeline 需要启用 simos 仓库")
@@ -1462,33 +1560,20 @@ class GitOpsApp:
         if not callable(create_pipeline):
             # Older test doubles do not implement the GitLab Pipeline API.
             return {"status": "not_started", "message": "GitLab client does not support Pipeline API"}
-        variables = {"SIMOS_OTA_TARGET_ENVS": ",".join(ota_target_envs)} if ota_target_envs else None
-        return create_pipeline(tag_name, variables)
+        variables: dict[str, str] = {}
+        if ota_target_envs:
+            variables["SIMOS_OTA_TARGET_ENVS"] = ",".join(ota_target_envs)
+        if cloud_category:
+            variables["SIMOS_CLOUD_CATEGORY"] = cloud_category
+        return create_pipeline(tag_name, variables or None)
 
     @release_runs_locked
     def create_feature_package(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Create an isolated T package from a Feature source ref.
-
-        The source Feature branch is never updated. SimOS receives a temporary
-        build ref containing the resolved component pins and package version;
-        other component repositories receive the same Tag at their resolved
-        commits. Tag creation is intentionally separate from generic Tag admin
-        permission so a user cannot widen this operation to another ref.
-        """
-        ref = str(payload.get("ref") or "").strip()
-        if not ref.startswith("feature/") or len(ref) <= len("feature/"):
-            return self.feature_package_precheck_error("Feature 包来源必须是 feature/* 分支")
-        if str(payload.get("tag_name") or "").strip():
-            return self.feature_package_precheck_error("Feature 包 Tag 不能手动指定")
-        if str(payload.get("scope") or "all").strip() not in {"", "all"}:
-            return self.feature_package_precheck_error("Feature 包必须使用全部启用仓库")
-
-        raw_now = str(payload.get("now") or "").strip()
         try:
-            local_now = datetime.fromisoformat(raw_now) if raw_now else datetime.now().astimezone()
-            now_text = local_now.isoformat()
+            self.validate_feature_package_payload(payload)
+            ref = require_feature_package_ref(str(payload.get("ref") or ""))
             with FEATURE_PACKAGE_LOCK:
-                return self._create_feature_package_locked(ref, payload, local_now, now_text)
+                return self._start_feature_package(ref, payload)
         except (ValueError, GitLabError) as exc:
             return self.feature_package_precheck_error(str(exc))
 
@@ -1504,85 +1589,110 @@ class GitOpsApp:
         }
 
     def feature_package_preview(self, payload: dict[str, Any]) -> dict[str, Any]:
-        ref = str(payload.get("ref") or "").strip()
-        if not ref.startswith("feature/") or len(ref) <= len("feature/"):
-            return self.feature_package_precheck_error("Feature 包来源必须是 feature/* 分支")
         try:
-            local_now = datetime.fromisoformat(str(payload.get("now") or "")) if payload.get("now") else datetime.now().astimezone()
-            targets = self.targets({"scope": "all"})
+            self.validate_feature_package_payload(payload)
+            ref = require_feature_package_ref(str(payload.get("ref") or ""))
+            local_now = datetime.now(ZoneInfo("Asia/Shanghai"))
+            targets = self.feature_package_targets(payload)
             simos_target = next((target for target in targets if is_simos_repo(target.repo)), None)
             if simos_target is None:
                 raise ValueError("Feature 包需要启用 simos 仓库")
-            resolutions = self.resolve_full_release_components(ref, "release")
+            baseline_ref = normalize_optional_baseline_ref(payload.get("baseline_ref"))
+            resolutions = self.resolve_feature_package_components(ref, baseline_ref, [target.repo for target in targets])
             source_version = require_existing_version(
                 parse_version_info(simos_target.client.get_file_text(VERSION_INFO_PATH, ref))
             )
-            version_number = feature_package_version(
-                source_version,
-                simos_target.client.tag_names(),
-                local_now.isoformat(),
-                force_week_bump=truthy(payload.get("force_week_bump", False)),
-            )
-            package_version = apply_version_prefix(version_number, "T")
-            tag_name = default_tag_name(ref, package_version, local_now.strftime("%Y%m%d%H%M"))
+            package_version = feature_package_build_id(ref, local_now)
             return {
                 "ok": True,
                 "operation": "create_feature_package_preview",
                 "phase": "precheck",
                 "source_ref": ref,
                 "source_version": source_version,
-                "version_number": version_number,
                 "version": package_version,
-                "tag_name": tag_name,
+                "baseline_ref": baseline_ref,
+                "cloud_category": self.require_package_cloud_category(payload.get("cloud_category")),
                 "component_resolutions": resolutions,
             }
         except (ValueError, GitLabError) as exc:
             return self.feature_package_precheck_error(str(exc))
 
-    def _create_feature_package_locked(
+    def validate_feature_package_payload(self, payload: dict[str, Any]) -> None:
+        forbidden = {"tag_name", "now", "force_week_bump", "scope", "repository_id", "repo_id", "component_resolutions", "version", "version_number", "pipeline_variables"}
+        supplied = sorted(key for key in forbidden if key in payload)
+        if supplied:
+            raise ValueError(f"Feature 包不接受客户端参数：{', '.join(supplied)}")
+
+    def resolve_feature_package_components(
         self,
         ref: str,
-        payload: dict[str, Any],
-        local_now: datetime,
-        now_text: str,
-    ) -> dict[str, Any]:
-        targets = self.targets({"scope": "all"})
+        baseline_ref: str,
+        repositories: list[RepositoryConfig],
+    ) -> list[dict[str, str]]:
+        if baseline_ref:
+            return self.resolve_full_release_components(ref, baseline_ref, repositories)
+        validate_submodule_configs(repositories)
+        resolutions: list[dict[str, str]] = []
+        for repository in repositories:
+            target = self.target(repository.id)
+            target.client.project()
+            if ref not in set(target.client.branch_names()):
+                raise ValueError(f"{repository.id} 不存在 Feature 分支 {ref}；请填写基线分支或先创建同名 Feature 分支")
+            commit = target.client.branch(ref).get("commit") or {}
+            commit_id = str(commit.get("id") or commit.get("short_id") or "")
+            if not commit_id:
+                raise ValueError(f"{repository.id} 未读取到 {ref} 的 commit")
+            resolutions.append({
+                "repository_id": repository.id,
+                "repository_name": repository.name,
+                "component": version_component(repository),
+                "submodule_path": configured_submodule_path(repository),
+                "requested_ref": ref,
+                "resolved_ref": ref,
+                "resolution": "simos_source" if is_simos_repo(repository) else "requested_ref",
+                "commit_id": commit_id,
+            })
+        return resolutions
+
+    def feature_pipeline_target(self) -> tuple[OperationTarget, str]:
+        feature_config = self.config.get("feature_package_ci") or {}
+        if not isinstance(feature_config, dict):
+            raise ValueError("feature_package_ci 配置非法")
+        repo_id = str(feature_config.get("repository_id") or "").strip()
+        ref = require_ref_name(str(feature_config.get("ref") or "ci/feature-package"), "Feature CI 分支")
+        if not repo_id:
+            raise ValueError("缺少 feature_package_ci.repository_id 配置")
+        target = self.target(repo_id)
+        # This makes a missing/deleted protected CI ref a precheck failure instead
+        # of silently falling back to a default branch on a GitLab API call.
+        target.client.branch(ref)
+        return target, ref
+
+    def feature_context_key(self) -> bytes:
+        key = os.environ.get("GITOPS_FEATURE_CONTEXT_HMAC_KEY", "").strip()
+        if not key and os.environ.get("GITOPS_MODE", "gitlab").strip().lower() == "simulation":
+            key = "simulation-feature-package-key"
+        if not key:
+            raise ValueError("缺少 GITOPS_FEATURE_CONTEXT_HMAC_KEY，无法启动可信 Feature 包")
+        return key.encode("utf-8")
+
+    def _start_feature_package(self, ref: str, payload: dict[str, Any]) -> dict[str, Any]:
+        targets = self.feature_package_targets(payload)
         simos_target = next((target for target in targets if is_simos_repo(target.repo)), None)
         if simos_target is None:
             raise ValueError("Feature 包需要启用 simos 仓库")
-
-        fallback_ref = "release"
-        resolutions = self.resolve_full_release_components(ref, fallback_ref)
+        baseline_ref = normalize_optional_baseline_ref(payload.get("baseline_ref"))
+        cloud_category = self.require_package_cloud_category(payload.get("cloud_category"))
+        resolutions = self.resolve_feature_package_components(ref, baseline_ref, [target.repo for target in targets])
         resolution_by_repo = {item["repository_id"]: item for item in resolutions}
         simos_resolution = resolution_by_repo.get(simos_target.repo.id)
         if simos_resolution is None:
             raise ValueError("未解析到 simos Feature 来源")
-
+        local_now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        package_version = allocate_feature_package_build_id(ref, local_now, load_feature_package_runs())
         version_text = simos_target.client.get_file_text(VERSION_INFO_PATH, ref)
         fields = parse_version_info(version_text)
         source_version = require_existing_version(fields)
-        version_number = feature_package_version(
-            source_version,
-            simos_target.client.tag_names(),
-            now_text,
-            force_week_bump=truthy(payload.get("force_week_bump", False)),
-        )
-        package_version = apply_version_prefix(version_number, "T")
-        stamp = local_now.strftime("%Y%m%d%H%M")
-        tag_name = default_tag_name(ref, package_version, stamp)
-        build_branch = feature_package_build_branch(tag_name)
-
-        for target in targets:
-            branch_names = set(target.client.branch_names())
-            tag_names = set(target.client.tag_names())
-            resolution = resolution_by_repo.get(target.repo.id)
-            if resolution is None:
-                raise ValueError(f"未解析到仓库来源：{target.repo.id}")
-            if tag_name in tag_names:
-                raise ValueError(f"Tag 已存在：{tag_name}")
-            if target.repo.id == simos_target.repo.id and build_branch in branch_names:
-                raise ValueError(f"临时构建分支已存在：{build_branch}")
-
         component_refs = {
             item["component"]: {
                 "ref": item["resolved_ref"],
@@ -1591,85 +1701,153 @@ class GitOpsApp:
             }
             for item in resolutions
         }
-        changed_components = list(component_refs)
-        next_version, next_version_info = render_version_info_full(
+        _, generated_version_info = render_version_info_full(
             fields,
             component_refs,
             local_now.strftime("%Y-%m-%d %H:%M:%S"),
-            changed_components,
-            requested_version_prefix="T",
-            forced_version=package_version,
         )
-        actions = [
-            {"action": "update", "file_path": VERSION_INFO_PATH, "content": next_version_info},
+        next_version = package_version
+        next_version_info = re.sub(r"^Version:.*$", f"Version:{package_version}", generated_version_info, count=1, flags=re.MULTILINE)
+        run_id = new_feature_package_run_id()
+        ci_target, ci_ref = self.feature_pipeline_target()
+        feature_config = self.config.get("feature_package_ci") or {}
+        registry_repo_id = str(feature_config.get("registry_repository_id") or "").strip()
+        registry_target = self.target(registry_repo_id)
+        if not is_simos_repo(registry_target.repo):
+            raise ValueError("feature_package_ci.registry_repository_id 必须指向 simos 仓库")
+        signed_components = [
             {
-                "action": "update",
-                "file_path": SOFTWARE_YAML_PATH,
-                "content": render_software_yaml(next_version, component_refs, local_now.strftime("%Y-%m-%d %H:%M:%S")),
-            },
-        ]
-        message = f"Create Feature package {tag_name} from {ref}"
-
-        try:
-            if isinstance(simos_target.client, GitLabClient) and shutil.which("git"):
-                commit = self.commit_version_update_with_git(
-                    simos_target,
-                    {"ref": ref, "actions": actions, "component_refs": component_refs},
-                    build_branch,
-                    message,
-                )
-            else:
-                simos_target.client.create_branch(build_branch, ref)
-                commit = simos_target.client.create_commit(build_branch, message, actions)
-            simos_commit_id = str(commit.get("id") or commit.get("short_id") or "")
-            if not simos_commit_id:
-                raise ValueError("临时构建分支提交成功但未返回 commit id")
-
-            results: list[dict[str, Any]] = []
-            for target in targets:
-                resolution = resolution_by_repo[target.repo.id]
-                target_ref = simos_commit_id if target.repo.id == simos_target.repo.id else resolution["commit_id"]
-                tag = target.client.create_tag(tag_name, target_ref, message)
-                results.append(
-                    {
-                        "repository": target.repo.public_dict(self.token_loaded(target.repo)),
-                        "ok": True,
-                        "result": {
-                            "tag": tag,
-                            "ref": target_ref,
-                            "resolved_ref": resolution["resolved_ref"],
-                            "resolution": resolution["resolution"],
-                        },
-                    }
-                )
-            pipeline = self.start_simos_pipeline(tag_name)
-        except (ValueError, GitLabError) as exc:
-            return {
-                "ok": False,
-                "operation": "create_feature_package",
-                "phase": "execute",
-                "error": str(exc),
-                "source_ref": ref,
-                "version": package_version,
-                "version_number": version_number,
-                "tag_name": tag_name,
-                "build_branch": build_branch,
-                "component_resolutions": resolutions,
-                "results": [],
+                "repo": item["repository_id"],
+                "project": self.store.get(item["repository_id"]).project,
+                "submodule_path": item["submodule_path"],
+                "ref": item["resolved_ref"],
+                "sha": item["commit_id"],
+                "component": item["component"],
             }
+            for item in resolutions
+        ]
+        context = {
+            "schema": 1,
+            "run_id": run_id,
+            "expires_at": (local_now + timedelta(minutes=15)).isoformat(),
+            "build_id": package_version,
+            "operator": str(payload.get("_actor") or ""),
+            "source": {"repository_id": simos_target.repo.id, "project": simos_target.repo.project, "ref": ref, "sha": simos_resolution["commit_id"]},
+            "baseline_ref": baseline_ref,
+            "cloud_category": cloud_category,
+            "components": signed_components,
+            "registry": {"repository_id": registry_target.repo.id, "project": registry_target.repo.project},
+            "metadata": {
+                "version_info": next_version_info,
+                "software_yaml": render_software_yaml(next_version, component_refs, local_now.strftime("%Y-%m-%d %H:%M:%S")),
+            },
+        }
+        context_text = json.dumps(context, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        context_b64 = base64.urlsafe_b64encode(context_text.encode("utf-8")).decode("ascii")
+        signature = hmac.new(self.feature_context_key(), context_b64.encode("ascii"), hashlib.sha256).hexdigest()
+        run = {
+            "id": run_id,
+            "status": "queued",
+            "operation": "create_feature_package",
+            "operator": str(payload.get("_actor") or ""),
+            "version": package_version,
+            "source_version": source_version,
+            "source_ref": ref,
+            "source_sha": simos_resolution["commit_id"],
+            "repository_ids": [target.repo.id for target in targets],
+            "baseline_ref": baseline_ref,
+            "cloud_category": cloud_category,
+            "component_resolutions": resolutions,
+            "registry_project": registry_target.repo.project,
+            "ci_project": ci_target.repo.project,
+            "ci_ref": ci_ref,
+            "started_at": local_now.isoformat(),
+            "updated_at": local_now.isoformat(),
+            "finished_at": "",
+        }
+        append_feature_package_run(run)
+        try:
+            pipeline = ci_target.client.create_pipeline(ci_ref, {
+                "GITOPS_FEATURE_PACKAGE": "1",
+                "GITOPS_FEATURE_CONTEXT_B64": context_b64,
+                "GITOPS_FEATURE_CONTEXT_HMAC": signature,
+            })
+        except Exception as exc:
+            failed = {**run, "status": "failed", "updated_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(), "finished_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(), "error": str(exc)}
+            replace_feature_package_run(failed)
+            return {"ok": False, "operation": "create_feature_package", "phase": "pipeline", "error": str(exc), "run": failed}
+        run.update({"pipeline_id": pipeline.get("id") or "", "pipeline_url": pipeline.get("web_url") or "", "pipeline": pipeline})
+        replace_feature_package_run(run)
         return {
             "ok": True,
             "operation": "create_feature_package",
-            "phase": "execute",
+            "phase": "pipeline",
+            "run": run,
             "source_ref": ref,
             "version": package_version,
-            "version_number": version_number,
-            "tag_name": tag_name,
-            "build_branch": build_branch,
             "component_resolutions": resolutions,
             "pipeline": pipeline,
-            "results": results,
         }
+
+    def refresh_feature_package_runs(self) -> None:
+        """Pull final trusted-pipeline status and its small signed result artifact.
+
+        The Workbench never guesses publication success from a build artifact. A
+        successful pipeline without `feature-package-result.json` remains visible
+        as a failed publication record, which prevents false success in the UI.
+        """
+        terminal = {"success", "failed", "canceled", "cancelled"}
+        now = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
+        for run in load_feature_package_runs():
+            if str(run.get("status") or "") in terminal or not run.get("pipeline_id"):
+                continue
+            try:
+                target = self.target(str(self.config.get("feature_package_ci", {}).get("repository_id") or ""))
+                pipelines = getattr(target.client, "pipelines", None)
+                if not callable(pipelines):
+                    continue
+                pipeline = next((item for item in pipelines(ref=str(run.get("ci_ref") or "")) if str(item.get("id")) == str(run["pipeline_id"])), None)
+                if not pipeline:
+                    continue
+                pipeline_status = str(pipeline.get("status") or "").lower()
+                updated = {**run, "pipeline": pipeline, "updated_at": now}
+                if pipeline_status in {"created", "pending", "running", "preparing", "waiting_for_resource"}:
+                    updated["status"] = pipeline_status
+                elif pipeline_status in {"failed", "canceled", "cancelled", "skipped"}:
+                    updated.update({"status": "failed", "finished_at": now, "error": f"可信 Feature Pipeline 状态：{pipeline_status}"})
+                elif pipeline_status == "success":
+                    result = self.feature_pipeline_result(target, run["pipeline_id"])
+                    if result is None:
+                        updated.update({"status": "failed", "finished_at": now, "error": "可信 Feature Pipeline 未生成 feature-package-result.json"})
+                    else:
+                        updated.update({
+                            "status": "success" if result.get("status") == "success" else "failed",
+                            "finished_at": now,
+                            "registry": result.get("registry") or {},
+                            "nextcloud": result.get("nextcloud") or {},
+                            "result": result,
+                            "error": str(result.get("error") or result.get("message") or "") if result.get("status") != "success" else "",
+                        })
+                else:
+                    updated["status"] = pipeline_status or "queued"
+                replace_feature_package_run(updated)
+            except Exception as exc:
+                # Transient GitLab reads must not convert a queued build to failed.
+                replace_feature_package_run({**run, "updated_at": now, "last_poll_error": str(exc)})
+
+    @staticmethod
+    def feature_pipeline_result(target: OperationTarget, pipeline_id: int | str) -> dict[str, Any] | None:
+        jobs = getattr(target.client, "pipeline_jobs", None)
+        artifact = getattr(target.client, "job_artifact_file_text", None)
+        if not callable(jobs) or not callable(artifact):
+            return None
+        for job in jobs(pipeline_id):
+            if str(job.get("name") or "") != "feature_publish_nextcloud":
+                continue
+            text = artifact(job.get("id"), "feature-package-result.json")
+            result = json.loads(text)
+            return result if isinstance(result, dict) else None
+        return None
 
     def delete_tags(self, payload: dict[str, Any]) -> dict[str, Any]:
         tag_names = parse_tag_names(payload.get("tags", ""))
@@ -2205,16 +2383,6 @@ class GitOpsApp:
     @staticmethod
     def target_for_tag_version(targets: list[OperationTarget], payload: dict[str, Any]) -> OperationTarget | None:
         simos_target = next((target for target in targets if is_simos_repo(target.repo)), None)
-        scope = str(payload.get("scope", "single")).strip() or "single"
-        if scope == "all" and simos_target is not None:
-            return simos_target
-
-        repository_id = str(payload.get("repository_id", "")).strip()
-        if repository_id:
-            for target in targets:
-                if target.repo.id == repository_id:
-                    return target
-
         return simos_target or (targets[0] if targets else None)
 
     def optional_simos_target(self) -> OperationTarget | None:
@@ -2275,17 +2443,39 @@ class GitOpsApp:
         return {"ok": overall_ok, "operation": operation, "phase": "execute", "precheck": precheck_results, "results": results}
 
     def release_repositories(self) -> list[RepositoryConfig]:
-        return [repo for repo in self.store.enabled() if not is_config_repo(repo)]
+        ci_repo_id = str(self.config.get("feature_package_ci", {}).get("repository_id") or "")
+        return [repo for repo in self.store.enabled() if not is_config_repo(repo) and repo.id != ci_repo_id]
+
+    def release_repository_ids(self) -> list[str]:
+        return [repo.id for repo in self.release_repositories()]
 
     def targets(self, payload: dict[str, Any]) -> list[OperationTarget]:
-        scope = str(payload.get("scope", "single")).strip() or "single"
-        if scope == "all":
-            repos = self.release_repositories()
-            if not repos:
-                raise ValueError("没有启用的仓库")
-            return [self.target(repo.id) for repo in repos]
-        repo_id = str(payload.get("repository_id") or payload.get("repo_id") or "").strip()
-        return [self.target(repo_id)]
+        if any(key in payload for key in ("scope", "repository_id", "repo_id")):
+            raise ValueError("写操作必须显式提交 repository_ids，旧 scope/repository_id 参数已废弃")
+        raw_ids = payload.get("repository_ids")
+        if not isinstance(raw_ids, list):
+            raise ValueError("repository_ids 必须是非空数组")
+        repo_ids = [str(item).strip() for item in raw_ids]
+        if not repo_ids or any(not item for item in repo_ids):
+            raise ValueError("至少选择一个仓库")
+        if len(repo_ids) != len(set(repo_ids)):
+            raise ValueError("repository_ids 不能重复")
+        targets: list[OperationTarget] = []
+        for repo_id in repo_ids:
+            repo = self.store.get(repo_id)
+            if not repo.enabled:
+                raise ValueError(f"仓库未启用：{repo_id}")
+            if is_config_repo(repo) or repo.id == str(self.config.get("feature_package_ci", {}).get("repository_id") or ""):
+                raise ValueError(f"不能作为业务写入目标：{repo_id}")
+            targets.append(OperationTarget(repo=repo, client=self.client_for(repo)))
+        return targets
+
+    def feature_package_targets(self, payload: dict[str, Any]) -> list[OperationTarget]:
+        targets = self.targets(payload)
+        if not any(is_simos_repo(target.repo) for target in targets):
+            raise ValueError("Feature 包必须选择 simos 仓库")
+        validate_submodule_configs([target.repo for target in targets])
+        return targets
 
     def target(self, repo_id: str) -> OperationTarget:
         if not repo_id:
@@ -2505,6 +2695,41 @@ def resolve_weekly_version_policy(tag_names: list[str], computed_version_number:
     }
 
 
+def require_feature_package_ref(value: str) -> str:
+    ref = require_ref_name(value, "Feature 包来源")
+    if not ref.startswith("feature/") or len(ref) <= len("feature/"):
+        raise ValueError("Feature 包来源必须是 feature/* 分支")
+    feature_description(ref)
+    return ref
+
+
+def feature_description(ref: str) -> str:
+    tail = ref.split("/", 1)[1] if "/" in ref else ""
+    description = tail.rsplit("_", 1)[-1].strip()
+    if not description or description == tail:
+        raise ValueError("Feature 分支必须包含最后一个 _ 后的功能描述")
+    if not re.fullmatch(r"[A-Za-z0-9.-]+", description):
+        raise ValueError("Feature 功能描述只能包含字母、数字、点和横线")
+    return description
+
+
+def feature_package_build_id(ref: str, now: datetime) -> str:
+    return f"T{now.astimezone(ZoneInfo('Asia/Shanghai')).strftime('%Y%m%d%H%M%S')}_{feature_description(ref)}"
+
+
+def allocate_feature_package_build_id(ref: str, now: datetime, runs: list[dict[str, Any]]) -> str:
+    candidate = now.astimezone(ZoneInfo("Asia/Shanghai"))
+    used = {str(item.get("version") or "") for item in runs}
+    while feature_package_build_id(ref, candidate) in used:
+        candidate += timedelta(seconds=1)
+    return feature_package_build_id(ref, candidate)
+
+
+def normalize_optional_baseline_ref(value: Any) -> str:
+    raw = str(value or "").strip()
+    return require_ref_name(raw, "基线分支") if raw else ""
+
+
 def feature_package_version(
     source_version: str,
     tag_names: list[str],
@@ -2534,17 +2759,6 @@ def feature_package_version(
     if force_week_bump:
         current[2] += 1
     return format_four_part_version(current, width)
-
-
-def feature_package_build_branch(tag_name: str) -> str:
-    safe = []
-    for ch in tag_name:
-        if "A" <= ch <= "Z" or "a" <= ch <= "z" or "0" <= ch <= "9" or ch in {".", "_", "-"}:
-            safe.append(ch)
-        else:
-            safe.append("-")
-    name = "".join(safe).strip(".-_") or datetime.now().strftime("%Y%m%d%H%M%S")
-    return f"automation/feature-package/{name}"
 
 
 def versions_from_tags_in_week(tag_names: list[str], local_now: datetime) -> list[tuple[int, int, int, int]]:
@@ -2581,9 +2795,7 @@ def resolve_version_prefix(ref: str, task: dict[str, Any] | None = None) -> str:
     mode = str(task.get("version_prefix_mode") or "auto")
     if mode == "manual":
         return normalize_version_prefix(str(task.get("manual_version_prefix") or "V"))
-    if ref == "release":
-        return "F"
-    if ref == "fix" or ref.startswith("bugfix/"):
+    if ref == "release" or ref == "fix" or ref.startswith("bugfix/"):
         return "V"
     return "V"
 
@@ -3109,16 +3321,23 @@ def normalize_release_task(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("version_prefix_mode 只能是 auto 或 manual")
     task["manual_version_prefix"] = normalize_version_prefix(str(task.get("manual_version_prefix") or "V"))
     task["force_week_bump"] = truthy(task.get("force_week_bump", False))
-    task["cloud_category"] = str(task.get("cloud_category") or DEFAULT_SCHEDULE["cloud_category"]).strip("/")
-    if not task["cloud_category"] or ".." in task["cloud_category"] or task["cloud_category"].startswith("/"):
-        raise ValueError("云盘分类目录非法")
+    task["cloud_category"] = normalize_cloud_category(task.get("cloud_category") or DEFAULT_SCHEDULE["cloud_category"])
     task["ota_target_envs"] = normalize_ota_target_envs(task.get("ota_target_envs", task.get("ota_target_env")))
     task.pop("ota_target_env", None)
     task["execution_type"] = "full_release"
     return task
 
 
-def normalize_ota_target_envs(value: Any, default: tuple[str, ...] = ("test",)) -> list[str]:
+def normalize_cloud_category(value: Any) -> str:
+    category = str(value or "").strip().strip("/")
+    if not category or ".." in category or category.startswith("/"):
+        raise ValueError("云盘分类目录非法")
+    if any(not part or part in {".", ".."} for part in category.split("/")):
+        raise ValueError("云盘分类目录非法")
+    return category
+
+
+def normalize_ota_target_envs(value: Any, default: tuple[str, ...] = ()) -> list[str]:
     if value is None:
         candidates = list(default)
     elif isinstance(value, str):
@@ -3128,7 +3347,7 @@ def normalize_ota_target_envs(value: Any, default: tuple[str, ...] = ("test",)) 
     else:
         raise ValueError("OTA 上传环境格式非法")
     if not candidates:
-        raise ValueError("至少选择一个 OTA 上传环境")
+        return []
     invalid = [item for item in candidates if item.lower() not in OTA_TARGET_ENVIRONMENTS]
     if invalid:
         raise ValueError("OTA 上传环境只能是 dev、test 或 prod")
@@ -3228,7 +3447,38 @@ def load_release_runs() -> list[dict[str, Any]]:
             runs = [item for item in items if isinstance(item, dict)]
             save_release_runs(runs)
             return runs
-        return []
+    return []
+
+
+def load_feature_package_runs() -> list[dict[str, Any]]:
+    with FEATURE_PACKAGE_RUNS_LOCK:
+        try:
+            raw = json.loads(FEATURE_PACKAGE_RUNS_PATH.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return []
+        return raw if isinstance(raw, list) else []
+
+
+def save_feature_package_runs(runs: list[dict[str, Any]]) -> None:
+    with FEATURE_PACKAGE_RUNS_LOCK:
+        FEATURE_PACKAGE_RUNS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temporary = FEATURE_PACKAGE_RUNS_PATH.with_suffix(".tmp")
+        temporary.write_text(json.dumps(runs, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(FEATURE_PACKAGE_RUNS_PATH)
+
+
+def append_feature_package_run(run: dict[str, Any]) -> None:
+    with FEATURE_PACKAGE_RUNS_LOCK:
+        runs = [item for item in load_feature_package_runs() if item.get("id") != run.get("id")]
+        save_feature_package_runs(runs + [run])
+
+
+def replace_feature_package_run(run: dict[str, Any]) -> None:
+    append_feature_package_run(run)
+
+
+def new_feature_package_run_id() -> str:
+    return f"feature-{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y%m%d%H%M%S%f')}"
 
 
 def save_release_runs(runs: list[dict[str, Any]]) -> None:
@@ -3388,7 +3638,7 @@ def build_app(config_path: str | None) -> tuple[GitOpsApp, dict[str, Any]]:
     load_dotenv(ROOT / ".env.local")
     config = load_json_config(config_path)
     store = RepositoryStore(REPOSITORIES_PATH, default_repositories(config))
-    return GitOpsApp(store, AuthManager.from_environment()), config
+    return GitOpsApp(store, AuthManager.from_environment(), config), config
 
 
 def make_handler(app: GitOpsApp):
@@ -3410,12 +3660,16 @@ def make_handler(app: GitOpsApp):
                 "/api/project": ("view", lambda: app.project(query.get("repository_id", ""))),
                 "/api/branches": ("view", lambda: app.branches(query.get("repository_id", ""), query.get("search", ""))),
                 "/api/tags": ("view", lambda: app.tags(query.get("repository_id", ""), query.get("search", ""))),
-                "/api/common-refs": ("view", app.common_refs),
+                "/api/common-refs": (
+                    "view",
+                    lambda: app.common_refs(parse_repository_ids_query(query.get("repository_ids", ""))),
+                ),
                 "/api/resident-packages": ("view", lambda: app.resident_package(query.get("tag", ""))),
                 "/api/schedules": ("view", app.schedules),
                 "/api/release-tasks": ("view", app.release_tasks),
                 "/api/release-task-previews": ("view", app.release_task_previews),
                 "/api/release-runs": ("view", lambda: {"ok": True, "runs": load_release_runs()}),
+                "/api/feature-package/runs": ("view", app.feature_package_runs),
                 "/api/release-runs/manual-preview": (
                     "create_tag",
                     lambda: app.manual_release_preview(
@@ -3435,11 +3689,15 @@ def make_handler(app: GitOpsApp):
                     lambda: app.feature_package_preview(
                         {
                             "ref": query.get("ref", ""),
-                            "now": query.get("now", ""),
-                            "force_week_bump": truthy(query.get("force_week_bump", "false")),
+                            "baseline_ref": query.get("baseline_ref", ""),
+                            "cloud_category": query.get("cloud_category", ""),
+                            "repository_ids": parse_repository_ids_query(query.get("repository_ids", "")),
                         }
                     ),
                 )
+            if path.startswith("/api/feature-package/runs/"):
+                run_id = path.rsplit("/", 1)[-1]
+                routes[path] = ("view", lambda run_id=run_id: app.feature_package_run(run_id))
             schedule_route = match_schedule_path(path)
             if schedule_route and schedule_route[1] == "runs":
                 routes[path] = ("view", lambda schedule_id=schedule_route[0]: app.schedule_runs(schedule_id))
@@ -3473,7 +3731,10 @@ def make_handler(app: GitOpsApp):
                 "/api/repositories": ("admin", lambda: app.add_repository(payload)),
                 "/api/release/create": ("create_release", lambda: app.create_release(payload)),
                 "/api/feature/create": ("create_feature", lambda: app.create_feature(payload)),
-                "/api/feature-package/create": ("create_feature_package", lambda: app.create_feature_package(payload)),
+                "/api/feature-package/create": (
+                    "create_feature_package",
+                    lambda: app.create_feature_package({**payload, "_actor": (self.current_session() or {}).get("username", "")}),
+                ),
                 "/api/bugfix/create": ("create_bugfix", lambda: app.create_bugfix(payload)),
                 "/api/tags/create": ("create_tag", lambda: app.create_tag(payload)),
                 "/api/tags/delete": ("create_tag", lambda: app.delete_tags(payload)),
@@ -3629,6 +3890,13 @@ def match_repository_path(path: str) -> str:
     if len(parts) == 3 and parts[0] == "api" and parts[1] == "repositories":
         return parts[2]
     return ""
+
+
+def parse_repository_ids_query(value: str) -> list[str] | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 def match_repo_get(path: str) -> tuple[str, str] | None:
