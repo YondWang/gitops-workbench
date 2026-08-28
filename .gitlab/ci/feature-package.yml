@@ -70,7 +70,9 @@ feature_build:
 feature_publish_registry:
   extends: .feature_package_rules
   stage: operate
-  tags: ["simos-feature-publisher"]
+  # Reuse the currently assigned protected publishing Runner. It is kept
+  # separate from the non-privileged Feature build Runner.
+  tags: ["gitops-feature-publisher"]
   image: docker.m.daocloud.io/python:3.12-alpine
   environment:
     name: feature-package-registry
@@ -93,7 +95,7 @@ feature_publish_registry:
 feature_publish_nextcloud:
   extends: .feature_package_rules
   stage: operate
-  tags: ["simos-feature-publisher"]
+  tags: ["gitops-feature-publisher"]
   image: docker.m.daocloud.io/python:3.12-alpine
   environment:
     name: feature-package-nextcloud
