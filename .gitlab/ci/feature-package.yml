@@ -10,9 +10,13 @@
 feature_context_validate:
   extends: .feature_package_rules
   stage: operate
+  # All trusted scripts are checked out from the protected Workbench ref.
+  # Do not run this untagged: an old OS/simos Shell Runner may otherwise pick
+  # it up and execute without the CI repository checkout.
+  tags: ["simos-feature-build"]
   image: docker.m.daocloud.io/python:3.12-alpine
   variables:
-    GIT_STRATEGY: none
+    GIT_STRATEGY: fetch
   script:
     - python3 .gitlab/scripts/feature-package-validate.py
   artifacts:
@@ -23,9 +27,10 @@ feature_context_validate:
 feature_prepare:
   extends: .feature_package_rules
   stage: operate
+  tags: ["simos-feature-build"]
   image: docker.m.daocloud.io/alpine/git:latest
   variables:
-    GIT_STRATEGY: none
+    GIT_STRATEGY: fetch
   needs:
     - job: feature_context_validate
       artifacts: true
@@ -44,13 +49,13 @@ feature_build:
   stage: operate
   # This tag MUST be configured as a non-privileged container executor. The
   # guard in the script fails closed when it is still the old shell executor.
-  tags: ["simos-cloud-publisher-222"]
+  tags: ["simos-feature-build"]
   # This protected variable names the maintained build image. GitLab expands
   # simple CI variables here; Bash-style ${VAR:-default} is not valid YAML CI
   # variable interpolation on all supported GitLab versions.
   image: "$GITOPS_FEATURE_BUILD_IMAGE"
   variables:
-    GIT_STRATEGY: none
+    GIT_STRATEGY: fetch
   needs:
     - job: feature_prepare
       artifacts: true
@@ -70,7 +75,7 @@ feature_publish_registry:
   environment:
     name: feature-package-registry
   variables:
-    GIT_STRATEGY: none
+    GIT_STRATEGY: fetch
   needs:
     - job: feature_build
       artifacts: true
@@ -93,7 +98,7 @@ feature_publish_nextcloud:
   environment:
     name: feature-package-nextcloud
   variables:
-    GIT_STRATEGY: none
+    GIT_STRATEGY: fetch
   needs:
     - job: feature_publish_registry
       artifacts: true
