@@ -134,7 +134,12 @@ variables:
 
 .gitops_base:
   stage: operate
-  when: manual
+  # The button_* jobs are legacy GitLab Web-operation entry points. A signed
+  # Feature API pipeline must contain only the trusted package jobs below.
+  rules:
+    - if: '$GITOPS_FEATURE_PACKAGE == "1"'
+      when: never
+    - when: manual
   allow_failure: false
   before_script:
     - set -eu
