@@ -227,6 +227,8 @@ class FeaturePackageTest(unittest.TestCase):
         self.assertEqual(ci.count('tags: ["gitops-feature-publisher"]'), 2)
         self.assertNotIn("GIT_STRATEGY: none", ci)
         self.assertEqual(ci.count("GIT_STRATEGY: fetch"), 5)
+        self.assertEqual(ci.count('image: "$GITOPS_FEATURE_BUILD_IMAGE"'), 4)
+        self.assertNotIn("apk add", ci)
         self.assertNotIn("stage: upload", ci)
         self.assertNotIn("SIMOS_OTA", ci)
         prepare = (server.ROOT.parent / ".gitlab" / "scripts" / "feature-package-prepare.sh").read_text(encoding="utf-8")

@@ -28,14 +28,15 @@ feature_prepare:
   extends: .feature_package_rules
   stage: operate
   tags: ["simos-feature-build"]
-  image: docker.m.daocloud.io/alpine/git:latest
+  # The maintained SimOS build image already contains Bash, Git, Python and
+  # curl. Avoid apk at job runtime: the K8s Runner cannot reliably reach APK
+  # indexes after the Pod starts.
+  image: "$GITOPS_FEATURE_BUILD_IMAGE"
   variables:
     GIT_STRATEGY: fetch
   needs:
     - job: feature_context_validate
       artifacts: true
-  before_script:
-    - apk add --no-cache python3
   script:
     - bash .gitlab/scripts/feature-package-prepare.sh feature-context.json feature-source
   artifacts:
@@ -73,7 +74,7 @@ feature_publish_registry:
   # Reuse the currently assigned protected publishing Runner. It is kept
   # separate from the non-privileged Feature build Runner.
   tags: ["gitops-feature-publisher"]
-  image: docker.m.daocloud.io/python:3.12-alpine
+  image: "$GITOPS_FEATURE_BUILD_IMAGE"
   environment:
     name: feature-package-registry
   variables:
@@ -81,8 +82,6 @@ feature_publish_registry:
   needs:
     - job: feature_build
       artifacts: true
-  before_script:
-    - apk add --no-cache bash curl
   script:
     - bash .gitlab/scripts/feature-package-publish-registry.sh feature-context.json feature-output feature-publish
   artifacts:
@@ -96,7 +95,7 @@ feature_publish_nextcloud:
   extends: .feature_package_rules
   stage: operate
   tags: ["gitops-feature-publisher"]
-  image: docker.m.daocloud.io/python:3.12-alpine
+  image: "$GITOPS_FEATURE_BUILD_IMAGE"
   environment:
     name: feature-package-nextcloud
   variables:
@@ -104,8 +103,6 @@ feature_publish_nextcloud:
   needs:
     - job: feature_publish_registry
       artifacts: true
-  before_script:
-    - apk add --no-cache bash curl
   script:
     - bash .gitlab/scripts/feature-package-publish-nextcloud.sh feature-context.json feature-publish feature-package-result.json
   artifacts:
