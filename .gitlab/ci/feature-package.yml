@@ -24,27 +24,6 @@ feature_context_validate:
     paths:
       - feature-context.json
 
-feature_prepare:
-  extends: .feature_package_rules
-  stage: operate
-  tags: ["simos-feature-build"]
-  # The maintained SimOS build image already contains Bash, Git, Python and
-  # curl. Avoid apk at job runtime: the K8s Runner cannot reliably reach APK
-  # indexes after the Pod starts.
-  image: "$GITOPS_FEATURE_BUILD_IMAGE"
-  variables:
-    GIT_STRATEGY: fetch
-  needs:
-    - job: feature_context_validate
-      artifacts: true
-  script:
-    - bash .gitlab/scripts/feature-package-prepare.sh feature-context.json feature-source
-  artifacts:
-    expire_in: 1 day
-    paths:
-      - feature-context.json
-      - feature-source/
-
 feature_build:
   extends: .feature_package_rules
   stage: operate
@@ -58,9 +37,13 @@ feature_build:
   variables:
     GIT_STRATEGY: fetch
   needs:
-    - job: feature_prepare
+    - job: feature_context_validate
       artifacts: true
   script:
+    # Keep source checkout and compilation in one isolated Job. Passing the
+    # complete SimOS tree through GitLab artifacts exceeds the coordinator's
+    # size limit and is unnecessary because the signed context fixes every SHA.
+    - bash .gitlab/scripts/feature-package-prepare.sh feature-context.json feature-source
     - bash .gitlab/scripts/feature-package-build.sh feature-source feature-output
   artifacts:
     expire_in: 1 day
