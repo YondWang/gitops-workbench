@@ -1642,9 +1642,19 @@ class GitOpsApp:
         baseline_ref: str,
         repositories: list[RepositoryConfig],
     ) -> list[dict[str, str]]:
+        simos_repository = next((repository for repository in repositories if is_simos_repo(repository)), None)
+        if simos_repository is None:
+            raise ValueError("Feature 包需要启用 simos 仓库")
+        # The selected SimOS commit is the source of truth for submodule
+        # directory names. Repository IDs are not paths: mapengine, PnC and
+        # localization demonstrate why deriving src/<repository-id> is wrong.
+        feature_paths = feature_submodule_paths(self.target(simos_repository.id).client, ref, repositories)
         if baseline_ref:
-            return self.resolve_full_release_components(ref, baseline_ref, repositories)
-        validate_submodule_configs(repositories)
+            resolutions = self.resolve_full_release_components(ref, baseline_ref, repositories)
+            for item in resolutions:
+                if item["repository_id"] in feature_paths:
+                    item["submodule_path"] = feature_paths[item["repository_id"]]
+            return resolutions
         resolutions: list[dict[str, str]] = []
         for repository in repositories:
             target = self.target(repository.id)
@@ -1659,7 +1669,7 @@ class GitOpsApp:
                 "repository_id": repository.id,
                 "repository_name": repository.name,
                 "component": version_component(repository),
-                "submodule_path": configured_submodule_path(repository),
+                "submodule_path": feature_paths.get(repository.id, ""),
                 "requested_ref": ref,
                 "resolved_ref": ref,
                 "resolution": "simos_source" if is_simos_repo(repository) else "requested_ref",
@@ -3130,6 +3140,62 @@ def validate_submodule_configs(repositories: list[RepositoryConfig]) -> None:
 
 def configured_submodule_path(repository: RepositoryConfig) -> str:
     return str(repository.submodule_path or f"src/{repository.id}").strip().strip("/")
+
+
+def git_project_from_remote_url(remote_url: str) -> str:
+    """Return `group/project` from either GitLab HTTPS or SSH remote URLs."""
+    remote_url = str(remote_url or "").strip()
+    parsed = urlparse(remote_url)
+    if parsed.scheme:
+        path = parsed.path
+    elif re.match(r"^[^/@:]+@[^:]+:", remote_url):
+        path = remote_url.partition(":")[2]
+    else:
+        path = remote_url
+    return path.strip().strip("/").removesuffix(".git")
+
+
+def simos_submodule_paths(gitmodules_text: str) -> dict[str, str]:
+    """Parse authoritative project-to-path mappings from a SimOS .gitmodules file."""
+    result: dict[str, str] = {}
+    current: dict[str, str] = {}
+
+    def save_current() -> None:
+        path = current.get("path", "").strip().strip("/")
+        project = git_project_from_remote_url(current.get("url", ""))
+        if path and project:
+            if not path.startswith("src/") or ".." in path:
+                raise ValueError(f"SimOS .gitmodules 中的子模块路径非法：{path}")
+            if project in result and result[project] != path:
+                raise ValueError(f"SimOS .gitmodules 中的项目路径重复：{project}")
+            result[project] = path
+
+    for raw_line in gitmodules_text.splitlines():
+        line = raw_line.strip()
+        if re.fullmatch(r'\[submodule\s+"[^"]+"\]', line):
+            save_current()
+            current = {}
+            continue
+        match = re.fullmatch(r"(path|url)\s*=\s*(.+)", line)
+        if match:
+            current[match.group(1)] = match.group(2).strip()
+    save_current()
+    return result
+
+
+def feature_submodule_paths(simos_client: Any, source_ref: str, repositories: list[RepositoryConfig]) -> dict[str, str]:
+    paths_by_project = simos_submodule_paths(simos_client.get_file_text(".gitmodules", source_ref))
+    result: dict[str, str] = {}
+    for repository in repositories:
+        if is_simos_repo(repository):
+            continue
+        path = paths_by_project.get(repository.project.strip("/"))
+        if not path:
+            raise ValueError(
+                f"{repository.id} 不在 SimOS 来源分支 {source_ref} 的 .gitmodules 中，无法冻结其子模块路径"
+            )
+        result[repository.id] = path
+    return result
 
 
 def software_yaml_version(client: Any, ref: str) -> str:

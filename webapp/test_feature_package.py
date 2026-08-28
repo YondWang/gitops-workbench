@@ -32,6 +32,11 @@ business_branch:release
 Date:2026-07-02 10:00:00
 '''
 
+GITMODULES = '''[submodule "src/business"]
+    path = src/business
+    url = ssh://git@www.chancee-shanghai.cn:22222/group/business.git
+'''
+
 
 class FeatureStore:
     def __init__(self, repositories): self.repositories = repositories
@@ -56,6 +61,7 @@ class FeatureClient:
         return {"name": name, "commit": {"id": self.branch_map[name], "parent_ids": []}}
     def get_file_text(self, file_path, ref):
         self.calls.append(("get_file_text", file_path, ref))
+        if self.repo_id == "simos" and file_path == ".gitmodules" and ref == "feature/release_login": return GITMODULES
         if self.repo_id == "simos" and file_path == server.VERSION_INFO_PATH and ref == "feature/release_login": return VERSION_INFO
         raise server.GitLabError("missing file", status=404, payload={})
     def create_pipeline(self, ref, variables=None):
@@ -111,6 +117,23 @@ class FeaturePackageTest(unittest.TestCase):
         self.assertIn("create_feature", auth.ROLE_PERMISSIONS["user"])
         self.assertIn("create_feature_package", auth.ROLE_PERMISSIONS["user"])
         self.assertNotIn("create_tag", auth.ROLE_PERMISSIONS["user"])
+
+    def test_feature_submodule_paths_come_from_simos_gitmodules(self):
+        paths = server.simos_submodule_paths('''[submodule "src/mapengine"]
+            path = src/mapengine
+            url = ssh://git@www.chancee-shanghai.cn:22222/mapengine/mapengine.git
+        [submodule "src/pnc"]
+            path = src/pnc
+            url = https://www.chancee-shanghai.cn:9900/pnc/pnc.git
+        [submodule "src/localization"]
+            path = src/localization
+            url = git@www.chancee-shanghai.cn:slam/localization.git
+        ''')
+        self.assertEqual(paths, {
+            "mapengine/mapengine": "src/mapengine",
+            "pnc/pnc": "src/pnc",
+            "slam/localization": "src/localization",
+        })
 
     def test_existing_repository_store_is_migrated_with_internal_ci_target(self):
         config = {**server.DEFAULT_CONFIG}
