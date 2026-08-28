@@ -224,7 +224,7 @@ class FeaturePackageTest(unittest.TestCase):
         self.assertNotIn("release-note", ci)
         self.assertNotIn('simos-cloud-publisher-222', ci)
         self.assertEqual(ci.count('tags: ["simos-feature-build"]'), 3)
-        self.assertEqual(ci.count('tags: ["simos-feature-publisher"]'), 2)
+        self.assertEqual(ci.count('tags: ["gitops-feature-publisher"]'), 2)
         self.assertNotIn("GIT_STRATEGY: none", ci)
         self.assertEqual(ci.count("GIT_STRATEGY: fetch"), 5)
         self.assertNotIn("stage: upload", ci)
