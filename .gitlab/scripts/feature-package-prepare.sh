@@ -4,18 +4,33 @@ context_path=${1:?context JSON required}
 workspace=${2:?workspace required}
 rm -rf "$workspace"
 python3 - "$context_path" "$workspace" <<'PY'
-import json, subprocess, sys
+import json, os, subprocess, sys
 from pathlib import Path
+from urllib.parse import quote
 
 context = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 root = Path(sys.argv[2])
 source = context["source"]
-base = ("%s://gitlab-ci-token:%s@%s/" % (
-    __import__("os").environ.get("CI_SERVER_PROTOCOL", "https"),
-    __import__("os").environ["CI_JOB_TOKEN"],
-    __import__("os").environ["CI_SERVER_HOST"],
-))
+server_url = os.environ.get("CI_SERVER_URL", "").rstrip("/")
+if not server_url:
+    raise SystemExit("CI_SERVER_URL is required to clone the frozen Feature source")
+server_host = os.environ.get("CI_SERVER_HOST", "").strip()
+if not server_host:
+    raise SystemExit("CI_SERVER_HOST is required to rewrite Feature submodule URLs")
+job_token = quote(os.environ["CI_JOB_TOKEN"], safe="")
+base = f"{server_url.split('://', 1)[0]}://gitlab-ci-token:{job_token}@{server_url.split('://', 1)[1]}/"
 def run(*args, cwd=None): subprocess.run(args, cwd=cwd, check=True)
+
+# SimOS records SSH submodules, while this isolated K8s Job must fetch them
+# over the GitLab HTTPS endpoint. CI_SERVER_URL retains the non-default :9900
+# port; CI_SERVER_HOST alone does not.
+for old_url in (
+    f"https://{server_host}/",
+    f"http://{server_host}/",
+    f"ssh://git@{server_host}:22222/",
+    f"git@{server_host}:",
+):
+    run("git", "config", "--global", "--add", f"url.{base}.insteadOf", old_url)
 run("git", "clone", "--no-checkout", base + source["project"] + ".git", str(root))
 run("git", "checkout", "--detach", source["sha"], cwd=root)
 if subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip() != source["sha"]:
