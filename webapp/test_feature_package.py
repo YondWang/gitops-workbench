@@ -167,6 +167,16 @@ class FeaturePackageTest(unittest.TestCase):
         variables = call[2]
         self.assertEqual(set(variables), {"GITOPS_FEATURE_PACKAGE", "GITOPS_FEATURE_CONTEXT_B64", "GITOPS_FEATURE_CONTEXT_HMAC"})
         context = json.loads(base64.urlsafe_b64decode(variables["GITOPS_FEATURE_CONTEXT_B64"]).decode())
+        expected_config_source = {
+            "mode": "formal_matrix",
+            "project": "OS/config",
+            "variants": [
+                {"ref": "SIMBOT_R6_A", "label": "360"},
+                {"ref": "SIMBOT_R6_B", "label": "360s"},
+            ],
+        }
+        self.assertEqual(context["schema"], 2)
+        self.assertEqual(context["config_source"], expected_config_source)
         self.assertEqual(context["operator"], "user")
         self.assertEqual(context["source"]["sha"], "simos-feature-abcdef")
         self.assertEqual({item["repo"] for item in context["components"]}, {"simos", "business"})
@@ -174,7 +184,20 @@ class FeaturePackageTest(unittest.TestCase):
         self.assertIn(result["version"], context["metadata"]["software_yaml"])
         for repo_id in ("simos", "business"):
                 self.assertFalse(any(call[0] in {"create_branch", "create_commit", "create_tag", "create_pipeline"} for call in clients[repo_id].calls))
-        self.assertEqual(app.feature_package_runs()["runs"][0]["operator"], "user")
+        persisted_run = app.feature_package_runs()["runs"][0]
+        self.assertEqual(persisted_run["operator"], "user")
+        self.assertEqual(persisted_run["config_source"], expected_config_source)
+        self.assertEqual(result["run"]["config_source"], expected_config_source)
+
+    def test_rejects_client_controlled_config_fields_without_creating_pipeline(self):
+        for field in ("config_source", "config_ref", "config_sha", "SIMOS_CONFIG_REF", "pipeline_variables"):
+            app, clients = make_feature_app()
+
+            result = app.create_feature_package(self.package_payload(**{field: "forged"}))
+
+            self.assertFalse(result["ok"])
+            self.assertIn(field, result["error"])
+            self.assertFalse(clients["gitops-workbench"].created_pipelines)
 
     def test_feature_pipeline_never_receives_ota_variables_for_any_allowed_actor(self):
         for actor in ("user", "admin"):

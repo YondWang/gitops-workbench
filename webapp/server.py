@@ -49,6 +49,10 @@ SCHEDULE_RUNS_PATH = DATA_ROOT / "schedule-runs.json"
 RELEASE_TASKS_PATH = Path(os.environ.get("GITOPS_RELEASE_TASKS_PATH", str(DATA_ROOT / "release_tasks.json")))
 RELEASE_RUNS_PATH = Path(os.environ.get("GITOPS_RELEASE_RUNS_PATH", str(DATA_ROOT / "release_runs.json")))
 FEATURE_PACKAGE_RUNS_PATH = Path(os.environ.get("GITOPS_FEATURE_PACKAGE_RUNS_PATH", str(DATA_ROOT / "feature_package_runs.json")))
+FORMAL_FEATURE_CONFIG_VARIANTS = (
+    {"ref": "SIMBOT_R6_A", "label": "360"},
+    {"ref": "SIMBOT_R6_B", "label": "360s"},
+)
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "gitlab": {
@@ -142,6 +146,14 @@ VERSION_MERGE_MAX_ATTEMPTS = 6
 RELEASE_RUNS_LOCK = threading.RLock()
 FEATURE_PACKAGE_LOCK = threading.RLock()
 FEATURE_PACKAGE_RUNS_LOCK = threading.RLock()
+
+
+def formal_feature_config_source() -> dict[str, Any]:
+    return {
+        "mode": "formal_matrix",
+        "project": "OS/config",
+        "variants": [dict(item) for item in FORMAL_FEATURE_CONFIG_VARIANTS],
+    }
 
 
 def release_runs_locked(method: Callable[..., Any]) -> Callable[..., Any]:
@@ -1631,7 +1643,7 @@ class GitOpsApp:
             return self.feature_package_precheck_error(str(exc))
 
     def validate_feature_package_payload(self, payload: dict[str, Any]) -> None:
-        forbidden = {"tag_name", "now", "force_week_bump", "scope", "repository_id", "repo_id", "component_resolutions", "version", "version_number", "pipeline_variables"}
+        forbidden = {"tag_name", "now", "force_week_bump", "scope", "repository_id", "repo_id", "component_resolutions", "version", "version_number", "config_source", "config_ref", "config_sha", "SIMOS_CONFIG_REF", "pipeline_variables"}
         supplied = sorted(key for key in forbidden if key in payload)
         if supplied:
             raise ValueError(f"Feature 包不接受客户端参数：{', '.join(supplied)}")
@@ -1749,8 +1761,9 @@ class GitOpsApp:
             }
             for item in resolutions
         ]
+        config_source = formal_feature_config_source()
         context = {
-            "schema": 1,
+            "schema": 2,
             "run_id": run_id,
             "expires_at": (local_now + timedelta(minutes=15)).isoformat(),
             "build_id": package_version,
@@ -1758,6 +1771,7 @@ class GitOpsApp:
             "source": {"repository_id": simos_target.repo.id, "project": simos_target.repo.project, "ref": ref, "sha": simos_resolution["commit_id"]},
             "baseline_ref": baseline_ref,
             "cloud_category": cloud_category,
+            "config_source": config_source,
             "components": signed_components,
             "registry": {"repository_id": registry_target.repo.id, "project": registry_target.repo.project},
             "metadata": {
@@ -1780,6 +1794,7 @@ class GitOpsApp:
             "repository_ids": [target.repo.id for target in targets],
             "baseline_ref": baseline_ref,
             "cloud_category": cloud_category,
+            "config_source": config_source,
             "component_resolutions": resolutions,
             "registry_project": registry_target.repo.project,
             "ci_project": ci_target.repo.project,
