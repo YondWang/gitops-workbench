@@ -10,3 +10,6 @@ webapp/data/version-settings.json
 
 # Local visual brainstorming sessions
 .superpowers/
+
+# Local linked worktrees used for isolated implementation sessions
+.worktrees/
