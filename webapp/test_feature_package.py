@@ -250,7 +250,7 @@ class FeaturePackageTest(unittest.TestCase):
         self.assertEqual([item["repo"] for item in context["components"]], ["simos"])
         self.assertEqual(only_simos["run"]["repository_ids"], ["simos"])
 
-    def test_collision_allocation_and_ui_ci_contract(self):
+    def test_static_contract_for_trusted_feature_pipeline(self):
         now = server.datetime(2026, 8, 27, 15, 30, 45, tzinfo=server.ZoneInfo("Asia/Shanghai"))
         first = server.allocate_feature_package_build_id("feature/release_login", now, [])
         self.assertEqual(first, "T20260827153045_login")
@@ -276,14 +276,37 @@ class FeaturePackageTest(unittest.TestCase):
         self.assertIn("if: '$GITOPS_FEATURE_PACKAGE == \"1\"'", root_ci)
         self.assertIn("when: never", root_ci)
         self.assertIn("- when: manual", root_ci)
+        self.assertIn("stages:\n  - operate\n  - feature_validate\n  - feature_prepare\n  - feature_build\n  - feature_publish", root_ci)
+        self.assertIn(".gitops_base:\n  stage: operate", root_ci)
+        self.assertIn("feature_build_resident:", ci)
+        self.assertIn("feature_build_deb:", ci)
+        self.assertNotIn("feature_build:\n", ci)
+        for config_ref, config_label in (("SIMBOT_R6_A", "360"), ("SIMBOT_R6_B", "360s")):
+            self.assertEqual(ci.count(f'SIMOS_MATRIX_CONFIG_REF: "{config_ref}"'), 2)
+            self.assertEqual(ci.count(f'SIMOS_MATRIX_CONFIG_LABEL: "{config_label}"'), 2)
+        registry_needs = ci.split("feature_publish_registry:", 1)[1].split("feature_publish_nextcloud:", 1)[0]
+        self.assertIn("- job: feature_build_resident\n      artifacts: true", registry_needs)
+        self.assertIn("- job: feature_build_deb\n      artifacts: true", registry_needs)
+        for job, stage in (
+            ("feature_context_validate", "feature_validate"),
+            ("feature_prepare", "feature_prepare"),
+            ("feature_build_resident", "feature_build"),
+            ("feature_build_deb", "feature_build"),
+            ("feature_publish_registry", "feature_publish"),
+            ("feature_publish_nextcloud", "feature_publish"),
+        ):
+            self.assertIn(f"{job}:\n  extends: .feature_package_rules\n  stage: {stage}", ci)
+        self.assertNotIn("button_", ci)
         self.assertNotIn("upload-ota", ci)
         self.assertNotIn("release-note", ci)
+        self.assertNotIn("OTA", ci)
+        self.assertNotIn("stage: upload", ci)
         self.assertNotIn('simos-cloud-publisher-222', ci)
-        self.assertEqual(ci.count('tags: ["simos-feature-build"]'), 3)
+        self.assertEqual(ci.count('tags: ["simos-feature-build"]'), 4)
         self.assertEqual(ci.count('tags: ["gitops-feature-publisher"]'), 2)
         self.assertNotIn("GIT_STRATEGY: none", ci)
-        self.assertEqual(ci.count("GIT_STRATEGY: fetch"), 5)
-        self.assertEqual(ci.count('image: "$GITOPS_FEATURE_BUILD_IMAGE"'), 4)
+        self.assertEqual(ci.count("GIT_STRATEGY: fetch"), 6)
+        self.assertEqual(ci.count('image: "$GITOPS_FEATURE_BUILD_IMAGE"'), 5)
         self.assertNotIn("apk add", ci)
         self.assertNotIn("stage: upload", ci)
         self.assertNotIn("SIMOS_OTA", ci)

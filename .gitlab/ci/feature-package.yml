@@ -9,7 +9,7 @@
 
 feature_context_validate:
   extends: .feature_package_rules
-  stage: operate
+  stage: feature_validate
   # All trusted scripts are checked out from the protected Workbench ref.
   # Do not run this untagged: an old OS/simos Shell Runner may otherwise pick
   # it up and execute without the CI repository checkout.
@@ -26,7 +26,7 @@ feature_context_validate:
 
 feature_prepare:
   extends: .feature_package_rules
-  stage: operate
+  stage: feature_prepare
   tags: ["simos-feature-build"]
   # The maintained SimOS build image already contains Bash, Git, Python and
   # curl. Avoid apk at job runtime: the K8s Runner cannot reliably reach APK
@@ -45,9 +45,9 @@ feature_prepare:
       - feature-context.json
       - feature-source/
 
-feature_build:
+feature_build_resident:
   extends: .feature_package_rules
-  stage: operate
+  stage: feature_build
   # This tag MUST be configured as a non-privileged container executor. The
   # guard in the script fails closed when it is still the old shell executor.
   tags: ["simos-feature-build"]
@@ -60,8 +60,43 @@ feature_build:
   needs:
     - job: feature_prepare
       artifacts: true
+  parallel:
+    matrix:
+      - SIMOS_MATRIX_CONFIG_REF: "SIMBOT_R6_A"
+        SIMOS_MATRIX_CONFIG_LABEL: "360"
+      - SIMOS_MATRIX_CONFIG_REF: "SIMBOT_R6_B"
+        SIMOS_MATRIX_CONFIG_LABEL: "360s"
   script:
-    - bash .gitlab/scripts/feature-package-build.sh feature-source feature-output
+    - bash .gitlab/scripts/feature-package-build.sh resident feature-source feature-output
+  artifacts:
+    expire_in: 1 day
+    paths:
+      - feature-context.json
+      - feature-output/
+
+feature_build_deb:
+  extends: .feature_package_rules
+  stage: feature_build
+  # This tag MUST be configured as a non-privileged container executor. The
+  # guard in the script fails closed when it is still the old shell executor.
+  tags: ["simos-feature-build"]
+  # This protected variable names the maintained build image. GitLab expands
+  # simple CI variables here; Bash-style ${VAR:-default} is not valid YAML CI
+  # variable interpolation on all supported GitLab versions.
+  image: "$GITOPS_FEATURE_BUILD_IMAGE"
+  variables:
+    GIT_STRATEGY: fetch
+  needs:
+    - job: feature_prepare
+      artifacts: true
+  parallel:
+    matrix:
+      - SIMOS_MATRIX_CONFIG_REF: "SIMBOT_R6_A"
+        SIMOS_MATRIX_CONFIG_LABEL: "360"
+      - SIMOS_MATRIX_CONFIG_REF: "SIMBOT_R6_B"
+        SIMOS_MATRIX_CONFIG_LABEL: "360s"
+  script:
+    - bash .gitlab/scripts/feature-package-build.sh deb feature-source feature-output
   artifacts:
     expire_in: 1 day
     paths:
@@ -70,7 +105,7 @@ feature_build:
 
 feature_publish_registry:
   extends: .feature_package_rules
-  stage: operate
+  stage: feature_publish
   # Reuse the currently assigned protected publishing Runner. It is kept
   # separate from the non-privileged Feature build Runner.
   tags: ["gitops-feature-publisher"]
@@ -80,7 +115,9 @@ feature_publish_registry:
   variables:
     GIT_STRATEGY: fetch
   needs:
-    - job: feature_build
+    - job: feature_build_resident
+      artifacts: true
+    - job: feature_build_deb
       artifacts: true
   script:
     - bash .gitlab/scripts/feature-package-publish-registry.sh feature-context.json feature-output feature-publish
@@ -93,7 +130,7 @@ feature_publish_registry:
 
 feature_publish_nextcloud:
   extends: .feature_package_rules
-  stage: operate
+  stage: feature_publish
   tags: ["gitops-feature-publisher"]
   image: "$GITOPS_FEATURE_BUILD_IMAGE"
   environment:
