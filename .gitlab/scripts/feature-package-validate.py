@@ -9,6 +9,15 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+FORMAL_CONFIG_SOURCE = {
+    "mode": "formal_matrix",
+    "project": "OS/config",
+    "variants": [
+        {"ref": "SIMBOT_R6_A", "label": "360"},
+        {"ref": "SIMBOT_R6_B", "label": "360s"},
+    ],
+}
+
 
 def fail(message):
     raise SystemExit(f"feature context rejected: {message}")
@@ -30,8 +39,10 @@ try:
     context = json.loads(base64.urlsafe_b64decode(encoded.encode("ascii")).decode("utf-8"))
 except Exception as exc:
     fail(f"context decode failed: {exc}")
-if not isinstance(context, dict) or context.get("schema") != 1:
+if not isinstance(context, dict) or context.get("schema") != 2:
     fail("unsupported schema")
+if context.get("config_source") != FORMAL_CONFIG_SOURCE:
+    fail("invalid config_source; only formal_matrix is supported")
 try:
     expires = datetime.fromisoformat(str(context["expires_at"])).astimezone(timezone.utc)
 except Exception:

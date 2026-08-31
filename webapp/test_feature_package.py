@@ -327,7 +327,7 @@ class FeaturePackageTest(unittest.TestCase):
     def test_validator_rejects_missing_tampered_and_expired_contexts(self):
         script = server.ROOT.parent / ".gitlab" / "scripts" / "feature-package-validate.py"
         context = {
-            "schema": 1,
+            "schema": 2,
             "run_id": "feature-test",
             "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
             "build_id": "T20260827153045_login",
@@ -335,23 +335,73 @@ class FeaturePackageTest(unittest.TestCase):
             "cloud_category": "车机/Feature测试包",
             "components": [{"repo": "simos", "project": "OS/simos", "submodule_path": "", "ref": "feature/release_login", "sha": "a" * 40}],
             "metadata": {"version_info": "Version:T20260827153045_login\n", "software_yaml": "version: T20260827153045_login\n"},
+            "config_source": {
+                "mode": "formal_matrix",
+                "project": "OS/config",
+                "variants": [
+                    {"ref": "SIMBOT_R6_A", "label": "360"},
+                    {"ref": "SIMBOT_R6_B", "label": "360s"},
+                ],
+            },
         }
         encoded = base64.urlsafe_b64encode(json.dumps(context).encode()).decode()
         signature = hmac.new(b"test-feature-key", encoded.encode(), hashlib.sha256).hexdigest()
         environment = {**os.environ, "GITOPS_FEATURE_PACKAGE": "1", "CI_PIPELINE_SOURCE": "api", "CI_COMMIT_REF_NAME": "ci/feature-package", "GITOPS_FEATURE_CONTEXT_HMAC_KEY": "test-feature-key", "GITOPS_FEATURE_CLOUD_CATEGORIES": "车机/Feature测试包", "GITOPS_FEATURE_CONTEXT_B64": encoded}
+        output = Path(self.tmpdir.name) / "feature-context.json"
 
-        valid = subprocess.run([sys.executable, str(script)], cwd=self.tmpdir.name, env={**environment, "GITOPS_FEATURE_CONTEXT_HMAC": signature}, capture_output=True, text=True)
+        def invoke(candidate, signature_override=None):
+            output.unlink(missing_ok=True)
+            encoded = base64.urlsafe_b64encode(json.dumps(candidate).encode()).decode()
+            signature = hmac.new(b"test-feature-key", encoded.encode(), hashlib.sha256).hexdigest()
+            return subprocess.run(
+                [sys.executable, str(script)],
+                cwd=self.tmpdir.name,
+                env={
+                    **environment,
+                    "GITOPS_FEATURE_CONTEXT_B64": encoded,
+                    "GITOPS_FEATURE_CONTEXT_HMAC": signature if signature_override is None else signature_override(signature),
+                },
+                capture_output=True,
+                text=True,
+            )
+
+        valid = invoke(context)
+        output.unlink(missing_ok=True)
         missing = subprocess.run([sys.executable, str(script)], cwd=self.tmpdir.name, env=environment, capture_output=True, text=True)
-        tampered = subprocess.run([sys.executable, str(script)], cwd=self.tmpdir.name, env={**environment, "GITOPS_FEATURE_CONTEXT_HMAC": "0" * len(signature)}, capture_output=True, text=True)
+        tampered = invoke(context, lambda value: "0" * len(value))
         expired_context = {**context, "expires_at": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()}
-        expired_encoded = base64.urlsafe_b64encode(json.dumps(expired_context).encode()).decode()
-        expired_signature = hmac.new(b"test-feature-key", expired_encoded.encode(), hashlib.sha256).hexdigest()
-        expired = subprocess.run([sys.executable, str(script)], cwd=self.tmpdir.name, env={**environment, "GITOPS_FEATURE_CONTEXT_B64": expired_encoded, "GITOPS_FEATURE_CONTEXT_HMAC": expired_signature}, capture_output=True, text=True)
+        expired = invoke(expired_context)
+        schema_1 = invoke({**context, "schema": 1})
+        future_schema = invoke({**context, "schema": 3})
+        invalid_mode = invoke({**context, "config_source": {**context["config_source"], "mode": "shared_branch_snapshot"}})
+        unknown_mode = invoke({**context, "config_source": {**context["config_source"], "mode": "unrecognized"}})
+        invalid_project = invoke({**context, "config_source": {**context["config_source"], "project": "OS/other"}})
+        invalid_order = invoke({**context, "config_source": {**context["config_source"], "variants": list(reversed(context["config_source"]["variants"]))}})
+        duplicate_variants = invoke({**context, "config_source": {**context["config_source"], "variants": [
+            {"ref": "SIMBOT_R6_A", "label": "360"},
+            {"ref": "SIMBOT_R6_A", "label": "360"},
+        ]}})
+        missing_variant = invoke({**context, "config_source": {**context["config_source"], "variants": [
+            {"ref": "SIMBOT_R6_A", "label": "360"},
+        ]}})
+        invalid_label = invoke({**context, "config_source": {**context["config_source"], "variants": [
+            {"ref": "SIMBOT_R6_A", "label": "bad"},
+            {"ref": "SIMBOT_R6_B", "label": "360s"},
+        ]}})
+        extra_policy_key = invoke({**context, "config_source": {**context["config_source"], "ref": "SIMBOT_R6_A"}})
 
         self.assertEqual(valid.returncode, 0, valid.stderr)
         self.assertNotEqual(missing.returncode, 0); self.assertIn("signature context", missing.stderr)
         self.assertNotEqual(tampered.returncode, 0); self.assertIn("HMAC mismatch", tampered.stderr)
         self.assertNotEqual(expired.returncode, 0); self.assertIn("context expired", expired.stderr)
+        self.assertNotEqual(schema_1.returncode, 0)
+        self.assertIn("unsupported schema", schema_1.stderr)
+        self.assertNotEqual(future_schema.returncode, 0)
+        self.assertIn("unsupported schema", future_schema.stderr)
+        for result in (invalid_mode, unknown_mode, invalid_project, invalid_order, duplicate_variants, missing_variant, invalid_label, extra_policy_key):
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("config_source", result.stderr)
+        self.assertFalse(output.exists())
 
     def test_user_route_is_allowed_and_generic_tag_route_is_not(self):
         app, _ = make_feature_app(); app.create_feature_package = lambda payload: {"ok": True}  # type: ignore[method-assign]
