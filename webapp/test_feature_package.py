@@ -6,6 +6,7 @@ import hmac
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -249,6 +250,221 @@ class FeaturePackageTest(unittest.TestCase):
         context = json.loads(base64.urlsafe_b64decode(variables["GITOPS_FEATURE_CONTEXT_B64"]).decode())
         self.assertEqual([item["repo"] for item in context["components"]], ["simos"])
         self.assertEqual(only_simos["run"]["repository_ids"], ["simos"])
+
+    def test_feature_build_wrapper_uses_formal_entrypoints(self):
+        wrapper = server.ROOT.parent / ".gitlab" / "scripts" / "feature-package-build.sh"
+        wrapper_text = wrapper.read_text(encoding="utf-8")
+        self.assertIn('CI_PROJECT_DIR="$source_dir"', wrapper_text)
+        self.assertIn('CI_COMMIT_TAG="$build_id"', wrapper_text)
+        self.assertIn('ci/resident/ci-build-resident.sh', wrapper_text)
+        self.assertIn('ci/deb/ci-build-debs.sh', wrapper_text)
+        for setting in (
+            'SIMOS_PACKAGE_REGISTRY_UPLOAD_ENABLED=false',
+            'SIMOS_PACKAGE_REGISTRY_UPLOAD_REQUIRED=false',
+            'SIMOS_DEB_PACKAGE_REGISTRY_UPLOAD_ENABLED=false',
+            'SIMOS_DEB_PACKAGE_REGISTRY_UPLOAD_REQUIRED=false',
+        ):
+            self.assertIn(setting, wrapper_text)
+        self.assertNotIn("build_all_debs.sh", wrapper_text)
+        self.assertNotIn('find "$source_dir"', wrapper_text)
+
+        workspace = Path(self.tmpdir.name) / "build-wrapper"
+        source = workspace / "feature-source"
+        output = workspace / "feature-output"
+        source_argument = Path("feature-source")
+        output_argument = Path("feature-output")
+        resident_script = source / "ci" / "resident" / "ci-build-resident.sh"
+        deb_script = source / "ci" / "deb" / "ci-build-debs.sh"
+        legacy_script = source / "build_all_debs.sh"
+        resident_script.parent.mkdir(parents=True)
+        deb_script.parent.mkdir(parents=True)
+        context = {
+            "schema": 2,
+            "build_id": "T20260831183045_login",
+            "config_source": {
+                "mode": "formal_matrix",
+                "project": "OS/config",
+                "variants": [
+                    {"ref": "SIMBOT_R6_A", "label": "360"},
+                    {"ref": "SIMBOT_R6_B", "label": "360s"},
+                ],
+            },
+        }
+        (workspace / "feature-context.json").write_text(json.dumps(context), encoding="utf-8")
+        resident_script.write_text(r'''#!/usr/bin/env bash
+set -euo pipefail
+python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+keys = (
+    "CI_PROJECT_DIR", "CI_COMMIT_TAG", "SIMOS_MATRIX_CONFIG_REF",
+    "SIMOS_MATRIX_CONFIG_LABEL", "SIMOS_PACKAGE_REGISTRY_NAME",
+    "SIMOS_PACKAGE_REGISTRY_UPLOAD_ENABLED", "SIMOS_PACKAGE_REGISTRY_UPLOAD_REQUIRED",
+    "SIMOS_BUILD_IMAGE",
+)
+Path(os.environ["CI_PROJECT_DIR"], "resident-invocation.json").write_text(
+    json.dumps({key: os.environ.get(key) for key in keys}), encoding="utf-8"
+)
+PY
+mkdir -p "$CI_PROJECT_DIR/resident-packages/360/nested" "$CI_PROJECT_DIR/resident-package-info"
+printf 'resident' > "$CI_PROJECT_DIR/resident-packages/360/nested/resident.tar.gz"
+if [[ "${FAKE_SKIP_MANIFEST:-false}" != true ]]; then
+  printf '{"status":"skipped","tag":"%s","config_ref":"%s","files":[]}\n' "$CI_COMMIT_TAG" "$SIMOS_MATRIX_CONFIG_REF" > "$CI_PROJECT_DIR/package-registry-result.json"
+fi
+printf '{}' > "$CI_PROJECT_DIR/resident-package-info/build-info.json"
+printf '{}' > "$CI_PROJECT_DIR/build-info.json"
+printf 'sha256  resident-packages/360/nested/resident.tar.gz\n' > "$CI_PROJECT_DIR/checksums.txt"
+printf 'md5  resident-packages/360/nested/resident.tar.gz\n' > "$CI_PROJECT_DIR/checksum.md5"
+printf 'SIMOS_CONFIG_REF=%s\n' "$SIMOS_MATRIX_CONFIG_REF" > "$CI_PROJECT_DIR/config-build-info.env"
+printf 'must not be copied' > "$CI_PROJECT_DIR/unlisted-output.zip"
+''', encoding="utf-8")
+        deb_script.write_text(r'''#!/usr/bin/env bash
+set -euo pipefail
+python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+keys = (
+    "CI_PROJECT_DIR", "CI_COMMIT_TAG", "SIMOS_MATRIX_CONFIG_REF",
+    "SIMOS_MATRIX_CONFIG_LABEL", "SIMOS_DEB_PACKAGE_REGISTRY_NAME",
+    "SIMOS_DEB_PACKAGE_REGISTRY_UPLOAD_ENABLED", "SIMOS_DEB_PACKAGE_REGISTRY_UPLOAD_REQUIRED",
+    "SIMOS_DEB_BUILD_IMAGE", "SIMOS_DEB_BUILD_MODE", "SIMOS_DEB_BUILD_JOBS",
+)
+Path(os.environ["CI_PROJECT_DIR"], "deb-invocation.json").write_text(
+    json.dumps({key: os.environ.get(key) for key in keys}), encoding="utf-8"
+)
+PY
+mkdir -p "$CI_PROJECT_DIR/deb-packages/360/nested" "$CI_PROJECT_DIR/deb-package-info"
+printf 'deb' > "$CI_PROJECT_DIR/deb-packages/360/nested/app.deb"
+if [[ "${FAKE_SKIP_MANIFEST:-false}" != true ]]; then
+  printf '{"status":"skipped","tag":"%s","config_ref":"%s","files":[]}\n' "$CI_COMMIT_TAG" "$SIMOS_MATRIX_CONFIG_REF" > "$CI_PROJECT_DIR/deb-package-registry-result.json"
+fi
+printf '{}' > "$CI_PROJECT_DIR/deb-package-info/build-info.json"
+printf 'SIMOS_CONFIG_REF=%s\n' "$SIMOS_MATRIX_CONFIG_REF" > "$CI_PROJECT_DIR/config-build-info.env"
+printf 'vehicle' > "$CI_PROJECT_DIR/vehicle.info"
+printf 'must not be copied' > "$CI_PROJECT_DIR/unlisted-output.deb"
+''', encoding="utf-8")
+        legacy_script.write_text(r'''#!/usr/bin/env bash
+set -euo pipefail
+touch "$PWD/build-all-invoked"
+''', encoding="utf-8")
+
+        def invoke(*arguments, config_ref="SIMBOT_R6_A", config_label="360", omit_manifest=False):
+            command = ["bash", str(wrapper), *map(str, arguments)]
+            environment = {
+                **os.environ,
+                "KUBERNETES_SERVICE_HOST": "test",
+                "SIMOS_MATRIX_CONFIG_REF": config_ref,
+                "SIMOS_MATRIX_CONFIG_LABEL": config_label,
+                "SIMOS_BUILD_IMAGE": "resident-image:test",
+                "SIMOS_DEB_BUILD_IMAGE": "deb-image:test",
+                "SIMOS_DEB_BUILD_MODE": "all",
+                "SIMOS_DEB_BUILD_JOBS": "16",
+                "FAKE_SKIP_MANIFEST": "true" if omit_manifest else "false",
+            }
+            for blocked in (
+                "GITOPS_FEATURE_REGISTRY_TOKEN",
+                "GITOPS_FEATURE_NEXTCLOUD_PASSWORD",
+                "SIMOS_OTA_SECRET_KEY",
+                "SIMOS_OTA_APP_KEY",
+            ):
+                environment.pop(blocked, None)
+            if Path("/var/run/docker.sock").is_socket():
+                bubblewrap = shutil.which("bwrap")
+                if not bubblewrap:
+                    self.skipTest("bwrap is required to isolate the host Docker socket")
+                command = [
+                    bubblewrap,
+                    "--ro-bind", "/", "/",
+                    "--dev", "/dev",
+                    "--proc", "/proc",
+                    "--bind", str(workspace), str(workspace),
+                    "--tmpfs", "/run",
+                    "--chdir", str(workspace),
+                    *command,
+                ]
+            return subprocess.run(command, cwd=workspace, env=environment, capture_output=True, text=True)
+
+        too_few = invoke("resident", source_argument)
+        too_many = invoke("resident", source_argument, output_argument, "extra")
+        invalid_kind = invoke("all", source_argument, output_argument)
+        for result in (too_few, too_many, invalid_kind):
+            self.assertNotEqual(result.returncode, 0, result)
+        self.assertFalse((source / "resident-invocation.json").exists())
+        self.assertFalse((source / "deb-invocation.json").exists())
+
+        resident = invoke("resident", source_argument, output_argument)
+        self.assertEqual(resident.returncode, 0, resident.stderr)
+        resident_environment = json.loads((source / "resident-invocation.json").read_text(encoding="utf-8"))
+        self.assertEqual(resident_environment, {
+            "CI_PROJECT_DIR": str(source),
+            "CI_COMMIT_TAG": context["build_id"],
+            "SIMOS_MATRIX_CONFIG_REF": "SIMBOT_R6_A",
+            "SIMOS_MATRIX_CONFIG_LABEL": "360",
+            "SIMOS_PACKAGE_REGISTRY_NAME": "simos-resident",
+            "SIMOS_PACKAGE_REGISTRY_UPLOAD_ENABLED": "false",
+            "SIMOS_PACKAGE_REGISTRY_UPLOAD_REQUIRED": "false",
+            "SIMOS_BUILD_IMAGE": "resident-image:test",
+        })
+        self.assertTrue((output / "resident" / "360" / "resident-packages" / "360" / "nested" / "resident.tar.gz").is_file())
+        self.assertTrue((output / "resident" / "360" / "package-registry-result.json").is_file())
+        for relative_path in (
+            "resident-package-info/build-info.json",
+            "build-info.json",
+            "checksums.txt",
+            "checksum.md5",
+            "config-build-info.env",
+        ):
+            self.assertTrue((output / "resident" / "360" / relative_path).is_file(), relative_path)
+        self.assertFalse((output / "resident.tar.gz").exists())
+        self.assertFalse(any(output.rglob("unlisted-output.zip")))
+        self.assertFalse((source / "build-all-invoked").exists())
+        self.assertFalse((source / "deb-invocation.json").exists())
+
+        deb = invoke("deb", source_argument, output_argument)
+        self.assertEqual(deb.returncode, 0, deb.stderr)
+        deb_environment = json.loads((source / "deb-invocation.json").read_text(encoding="utf-8"))
+        self.assertEqual(deb_environment, {
+            "CI_PROJECT_DIR": str(source),
+            "CI_COMMIT_TAG": context["build_id"],
+            "SIMOS_MATRIX_CONFIG_REF": "SIMBOT_R6_A",
+            "SIMOS_MATRIX_CONFIG_LABEL": "360",
+            "SIMOS_DEB_PACKAGE_REGISTRY_NAME": "simos-debs",
+            "SIMOS_DEB_PACKAGE_REGISTRY_UPLOAD_ENABLED": "false",
+            "SIMOS_DEB_PACKAGE_REGISTRY_UPLOAD_REQUIRED": "false",
+            "SIMOS_DEB_BUILD_IMAGE": "deb-image:test",
+            "SIMOS_DEB_BUILD_MODE": "all",
+            "SIMOS_DEB_BUILD_JOBS": "16",
+        })
+        self.assertTrue((output / "deb" / "360" / "deb-packages" / "360" / "nested" / "app.deb").is_file())
+        self.assertTrue((output / "deb" / "360" / "deb-package-registry-result.json").is_file())
+        for relative_path in (
+            "deb-package-info/build-info.json",
+            "config-build-info.env",
+            "vehicle.info",
+        ):
+            self.assertTrue((output / "deb" / "360" / relative_path).is_file(), relative_path)
+        self.assertFalse((output / "app.deb").exists())
+        self.assertFalse(any(output.rglob("unlisted-output.deb")))
+        self.assertEqual({path.name for path in output.iterdir()}, {"resident", "deb"})
+        self.assertEqual([path.name for path in (output / "resident").iterdir()], ["360"])
+        self.assertEqual([path.name for path in (output / "deb").iterdir()], ["360"])
+        self.assertFalse((source / "build-all-invoked").exists())
+
+        (source / "resident-invocation.json").unlink()
+        (source / "deb-invocation.json").unlink()
+        mismatch = invoke("resident", source_argument, output_argument, config_ref="SIMBOT_R6_A", config_label="360s")
+        self.assertNotEqual(mismatch.returncode, 0, mismatch)
+        self.assertIn("matrix pair", mismatch.stderr)
+        self.assertFalse((source / "resident-invocation.json").exists())
+        self.assertFalse((source / "deb-invocation.json").exists())
+        self.assertFalse((source / "build-all-invoked").exists())
+
+        (source / "package-registry-result.json").unlink()
+        missing_manifest = invoke("resident", source_argument, output_argument, omit_manifest=True)
+        self.assertNotEqual(missing_manifest.returncode, 0, missing_manifest)
+        self.assertIn("formal resident manifest is missing", missing_manifest.stderr)
 
     def test_static_contract_for_trusted_feature_pipeline(self):
         now = server.datetime(2026, 8, 27, 15, 30, 45, tzinfo=server.ZoneInfo("Asia/Shanghai"))
