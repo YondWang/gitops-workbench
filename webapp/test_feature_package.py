@@ -799,6 +799,29 @@ touch "$PWD/build-all-invoked"
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n"
             "printf '%s\\n' \"$*\" >> \"$FAKE_CURL_LOG\"\n"
+            "config=''\n"
+            "for ((index = 1; index <= $#; index++)); do\n"
+            "  if [[ \"${!index}\" == \"--config\" ]]; then next=$((index + 1)); config=\"${!next}\"; fi\n"
+            "done\n"
+            "if [[ -n \"$config\" ]]; then\n"
+            "  contents=$(<\"$config\")\n"
+            "  if grep -q '^request = \"MKCOL\"$' \"$config\"; then\n"
+            "    printf 'mkcol\\n' >> \"$FAKE_CURL_ACTION_LOG\"\n"
+            "    if [[ \"${FAKE_CURL_FAILURE:-}\" == \"mkcol\" ]]; then printf 'feature-publisher' >&2; printf '500'; exit 0; fi\n"
+            "    printf '%s' \"${FAKE_MKCOL_STATUS:-201}\"; exit 0\n"
+            "  fi\n"
+            "  if [[ \"$contents\" == *'upload-file = '* ]]; then\n"
+            "    printf 'put\\n' >> \"$FAKE_CURL_ACTION_LOG\"\n"
+            "    if [[ \"${FAKE_CURL_FAILURE:-}\" == \"put\" ]]; then printf 'protected-password' >&2; exit 22; fi\n"
+            "    printf '201'; exit 0\n"
+            "  fi\n"
+            "  printf 'download\\n' >> \"$FAKE_CURL_ACTION_LOG\"\n"
+            "  if [[ \"${FAKE_CURL_FAILURE:-}\" == \"download\" ]]; then printf 'read-only-job-token' >&2; exit 22; fi\n"
+            "  if [[ \"${FAKE_CURL_FAILURE:-}\" == \"redirect\" ]]; then printf '302'; exit 0; fi\n"
+            "  output=$(sed -n 's#^output = \\\"\\(.*\\)\\\"$#\\1#p' \"$config\")\n"
+            "  printf '%s' \"${FAKE_DOWNLOAD_CONTENT:-downloaded}\" > \"$output\"\n"
+            "  printf '200'; exit 0\n"
+            "fi\n"
             "if [[ \" $* \" == *\" -X MKCOL \"* ]]; then printf '201'; exit 0; fi\n"
             "for ((index = 1; index <= $#; index++)); do\n"
             "  if [[ \"${!index}\" == \"--output\" ]]; then next=$((index + 1)); printf 'downloaded' > \"${!next}\"; fi\n"
@@ -848,12 +871,14 @@ touch "$PWD/build-all-invoked"
                 "files": files,
             }
 
-        def invoke(name, result):
+        def invoke(name, result, **extra_environment):
             publish = workspace / f"publish-{name}"
             publish.mkdir(parents=True, exist_ok=True)
             (publish / "registry-result.json").write_text(json.dumps(result), encoding="utf-8")
             curl_log = workspace / f"curl-{name}.log"
             curl_log.unlink(missing_ok=True)
+            action_log = workspace / f"curl-{name}.actions"
+            action_log.unlink(missing_ok=True)
             output = workspace / f"feature-package-result-{name}.json"
             output.unlink(missing_ok=True)
             completed = subprocess.run(
@@ -863,27 +888,34 @@ touch "$PWD/build-all-invoked"
                     **os.environ,
                     "PATH": f"{fake_bin}:{os.environ['PATH']}",
                     "FAKE_CURL_LOG": str(curl_log),
+                    "FAKE_CURL_ACTION_LOG": str(action_log),
                     "CI_JOB_TOKEN": "read-only-job-token",
+                    "CI_API_V4_URL": "https://gitlab.test/api/v4",
+                    "GITOPS_FEATURE_SIMOS_PROJECT_ID": "20",
                     "GITOPS_FEATURE_NEXTCLOUD_URL": "https://nextcloud.test",
                     "GITOPS_FEATURE_NEXTCLOUD_USER": "feature-publisher",
                     "GITOPS_FEATURE_NEXTCLOUD_PASSWORD": "protected-password",
+                    **extra_environment,
                 },
                 capture_output=True,
                 text=True,
             )
-            return completed, curl_log, output
+            return completed, curl_log, action_log, output
 
         valid_files = [entry("resident", "360", "resident.tar.gz"), entry("deb", "360", "app.deb")]
-        success, curl_log, output = invoke("valid", registry_result(files=valid_files))
+        success, curl_log, action_log, output = invoke("valid", registry_result(files=valid_files))
         self.assertEqual(success.returncode, 0, success.stderr)
         calls = curl_log.read_text(encoding="utf-8")
-        self.assertIn("-X MKCOL https://nextcloud.test/remote.php/dav/files/feature-publisher/", calls)
-        mkcols = [line for line in calls.splitlines() if "-X MKCOL" in line]
-        self.assertTrue(any(line.endswith("/T20260831183045_login/resident") for line in mkcols))
-        self.assertTrue(any(line.endswith("/T20260831183045_login/resident/360") for line in mkcols))
-        self.assertTrue(any(line.endswith("/T20260831183045_login/deb/360") for line in mkcols))
-        self.assertIn("/resident/360/resident.tar.gz", calls)
-        self.assertIn("/deb/360/app.deb", calls)
+        self.assertTrue(calls.strip())
+        self.assertTrue(all(line.startswith("--config ") for line in calls.splitlines()))
+        self.assertNotIn("--location", calls)
+        self.assertNotIn("read-only-job-token", calls)
+        self.assertNotIn("feature-publisher", calls)
+        self.assertNotIn("protected-password", calls)
+        actions = action_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(actions[:2], ["download", "download"])
+        self.assertGreaterEqual(actions.count("mkcol"), 7)
+        self.assertEqual(actions.count("put"), 2)
         result = json.loads(output.read_text(encoding="utf-8"))
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["build_id"], context["build_id"])
@@ -900,10 +932,48 @@ touch "$PWD/build-all-invoked"
             ("empty-segment", "resident//resident.tar.gz"),
         ):
             invalid_files = [dict(valid_files[0], nextcloud_path=invalid_path), valid_files[1]]
-            rejected, invalid_log, invalid_output = invoke(name, registry_result(files=invalid_files))
+            rejected, invalid_log, _invalid_actions, invalid_output = invoke(name, registry_result(files=invalid_files))
             self.assertNotEqual(rejected.returncode, 0, rejected)
             self.assertFalse(invalid_log.exists() and invalid_log.read_text(encoding="utf-8").strip(), rejected.stderr)
             self.assertFalse(invalid_output.exists())
+
+        def assert_rejected_before_curl(name, mutate):
+            invalid_files = [dict(item) for item in valid_files]
+            mutate(invalid_files)
+            rejected, invalid_log, _invalid_actions, invalid_output = invoke(name, registry_result(files=invalid_files))
+            self.assertNotEqual(rejected.returncode, 0, rejected)
+            self.assertFalse(invalid_log.exists() and invalid_log.read_text(encoding="utf-8").strip(), rejected.stderr)
+            self.assertFalse(invalid_output.exists())
+
+        assert_rejected_before_curl("wrong-registry-host", lambda items: items[0].update(registry_url=items[0]["registry_url"].replace("gitlab.test", "attacker.test")))
+        assert_rejected_before_curl("wrong-registry-project", lambda items: items[0].update(registry_url=items[0]["registry_url"].replace("/projects/20/", "/projects/99/")))
+        assert_rejected_before_curl("wrong-registry-package", lambda items: items[0].update(registry_url=items[0]["registry_url"].replace("simos-resident", "simos-debs")))
+        assert_rejected_before_curl("wrong-registry-version", lambda items: items[0].update(registry_url=items[0]["registry_url"].replace(context["build_id"], "T20260831183046_login")))
+
+        redirected, redirect_log, redirect_actions, redirect_output = invoke("redirect", registry_result(files=valid_files), FAKE_CURL_FAILURE="redirect")
+        self.assertNotEqual(redirected.returncode, 0, redirected)
+        self.assertEqual(redirect_actions.read_text(encoding="utf-8").splitlines(), ["download"])
+        self.assertNotIn("mkcol", redirect_actions.read_text(encoding="utf-8"))
+        self.assertFalse(redirect_output.exists())
+
+        corrupt, _corrupt_log, corrupt_actions, corrupt_output = invoke("corrupt-download", registry_result(files=valid_files), FAKE_DOWNLOAD_CONTENT="corrupt")
+        self.assertNotEqual(corrupt.returncode, 0, corrupt)
+        self.assertEqual(corrupt_actions.read_text(encoding="utf-8").splitlines(), ["download"])
+        self.assertFalse(corrupt_output.exists())
+
+        existing, _existing_log, _existing_actions, existing_output = invoke("existing-directories", registry_result(files=valid_files), FAKE_MKCOL_STATUS="405")
+        self.assertEqual(existing.returncode, 0, existing.stderr)
+        self.assertTrue(existing_output.exists())
+
+        for failure in ("download", "mkcol", "put"):
+            failed, failed_log, _failed_actions, failed_output = invoke(f"failure-{failure}", registry_result(files=valid_files), FAKE_CURL_FAILURE=failure)
+            combined = failed.stdout + failed.stderr + (failed_log.read_text(encoding="utf-8") if failed_log.exists() else "")
+            self.assertNotEqual(failed.returncode, 0, combined)
+            self.assertNotIn("read-only-job-token", combined)
+            self.assertNotIn("feature-publisher", combined)
+            self.assertNotIn("protected-password", combined)
+            self.assertFalse(failed_output.exists())
+            self.assertFalse(list(workspace.glob(".feature-package-nextcloud-*")))
 
     def test_static_contract_for_trusted_feature_pipeline(self):
         now = server.datetime(2026, 8, 27, 15, 30, 45, tzinfo=server.ZoneInfo("Asia/Shanghai"))

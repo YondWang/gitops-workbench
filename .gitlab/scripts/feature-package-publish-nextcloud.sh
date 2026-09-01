@@ -5,6 +5,8 @@ context_path=${1:?context required}
 publish_dir=${2:?registry result directory required}
 result_path=${3:?result required}
 : "${CI_JOB_TOKEN:?CI_JOB_TOKEN is required}"
+: "${CI_API_V4_URL:?CI_API_V4_URL is required}"
+: "${GITOPS_FEATURE_SIMOS_PROJECT_ID:?GITOPS_FEATURE_SIMOS_PROJECT_ID is required}"
 : "${GITOPS_FEATURE_NEXTCLOUD_URL:?protected Nextcloud endpoint is required}"
 : "${GITOPS_FEATURE_NEXTCLOUD_USER:?protected Nextcloud account is required}"
 : "${GITOPS_FEATURE_NEXTCLOUD_PASSWORD:?protected Nextcloud password is required}"
@@ -28,6 +30,7 @@ context_path, registry_path, result_path = map(Path, sys.argv[1:])
 BUILD_ID_PATTERN = re.compile(r"T\d{14}_[A-Za-z0-9.-]+$")
 MD5_PATTERN = re.compile(r"[0-9a-f]{32}$")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}$")
+PROJECT_ID_PATTERN = re.compile(r"[1-9][0-9]*$")
 ITEM_KEYS = {
     "package_name", "registry_file", "registry_url", "local_path", "label",
     "kind", "size", "md5", "sha256", "nextcloud_path",
@@ -85,6 +88,18 @@ def validate_url(value: object, description: str) -> str:
     return value
 
 
+def protected_text(value: object, description: str) -> str:
+    if not isinstance(value, str) or not value or any(char in "\x00\r\n" for char in value):
+        reject(f"invalid protected {description}")
+    return value
+
+
+def nextcloud_user(value: object) -> str:
+    if not isinstance(value, str) or not value or "/" in value or "\\" in value or any(char in "\x00\r\n\t" for char in value):
+        reject("invalid protected Nextcloud account")
+    return value
+
+
 def digest(path: Path) -> tuple[int, str, str]:
     sha256 = hashlib.sha256()
     md5 = hashlib.md5()
@@ -118,6 +133,10 @@ for variant in variants:
 registry_target = context.get("registry")
 if not isinstance(registry_target, dict) or not isinstance(registry_target.get("project"), str) or not registry_target["project"]:
     reject("Feature context has an invalid Registry target")
+gitlab_api = validate_url(os.environ["CI_API_V4_URL"], "GitLab API endpoint").rstrip("/")
+project_id = os.environ["GITOPS_FEATURE_SIMOS_PROJECT_ID"]
+if not PROJECT_ID_PATTERN.fullmatch(project_id):
+    reject("invalid protected SimOS project id")
 
 registry = load_object(registry_path, "Registry result")
 if registry.get("build_id") != build_id:
@@ -153,8 +172,12 @@ for position, item in enumerate(files):
     if local_parts[:2] != (kind, label):
         reject(f"Registry result file #{position} local_path does not match its kind and label")
     registry_url = validate_url(item["registry_url"], f"Registry result file #{position} registry_url")
-    if not registry_url.rstrip("/").endswith("/" + quote(registry_file, safe="")):
-        reject(f"Registry result file #{position} registry_url does not match registry_file")
+    expected_registry_url = (
+        f"{gitlab_api}/projects/{project_id}/packages/generic/"
+        f"{quote(PACKAGE_NAMES[kind], safe='')}/{quote(build_id, safe='')}/{quote(registry_file, safe='')}"
+    )
+    if registry_url != expected_registry_url:
+        reject(f"Registry result file #{position} registry_url is not the protected Generic Package endpoint")
     size, md5, sha256 = item["size"], item["md5"], item["sha256"]
     if not isinstance(size, int) or isinstance(size, bool) or size < 0:
         reject(f"Registry result file #{position} has an invalid size")
@@ -165,7 +188,14 @@ for position, item in enumerate(files):
     if nextcloud_parts in targets:
         reject(f"Registry result has a duplicate Nextcloud path: {item['nextcloud_path']}")
     targets.add(nextcloud_parts)
-    plan.append({**item, "registry_file": registry_file, "nextcloud_parts": nextcloud_parts})
+    plan.append({
+        **item,
+        "registry_file": registry_file,
+        # Route only to the protected endpoint constructed above, even though
+        # the inter-job artifact was required to match it exactly.
+        "registry_url": expected_registry_url,
+        "nextcloud_parts": nextcloud_parts,
+    })
 
 for path in targets:
     for other in targets:
@@ -173,8 +203,10 @@ for path in targets:
             reject(f"Registry result has a file/directory path conflict: {'/'.join(path)}")
 
 endpoint = validate_url(os.environ["GITOPS_FEATURE_NEXTCLOUD_URL"], "Nextcloud endpoint").rstrip("/")
-user = safe_leaf(os.environ["GITOPS_FEATURE_NEXTCLOUD_USER"], "Nextcloud user")
-auth = f"{user}:{os.environ['GITOPS_FEATURE_NEXTCLOUD_PASSWORD']}"
+user = nextcloud_user(os.environ["GITOPS_FEATURE_NEXTCLOUD_USER"])
+password = protected_text(os.environ["GITOPS_FEATURE_NEXTCLOUD_PASSWORD"], "Nextcloud password")
+job_token = protected_text(os.environ["CI_JOB_TOKEN"], "Job Token")
+auth = f"{user}:{password}"
 base = endpoint + "/remote.php/dav/files/" + quote(user, safe="")
 directory_parts = (*cloud_parts, build_id)
 
@@ -183,13 +215,35 @@ def webdav_url(parts: tuple[str, ...]) -> str:
     return base + "/" + "/".join(quote(part, safe="") for part in parts)
 
 
-def mkcol(parts: tuple[str, ...]) -> None:
+def curl_value(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def write_curl_config(path: Path, *, url: str, options: list[tuple[str, str]], flags: tuple[str, ...]) -> Path:
+    lines = [f'url = "{curl_value(url)}"']
+    lines.extend(f'{name} = "{curl_value(value)}"' for name, value in options)
+    lines.extend(flags)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+    return path
+
+
+def run_curl(config_path: Path):
+    try:
+        return subprocess.run(["curl", "--config", str(config_path)], capture_output=True, text=True, check=False)
+    except OSError:
+        raise SystemExit("feature Nextcloud publication cannot execute curl") from None
+
+
+def mkcol(parts: tuple[str, ...], config_path: Path) -> None:
     # 201 means created; 405 means the directory was already present. Both are
     # successful, idempotent outcomes for a retryable Feature publication.
-    completed = subprocess.run([
-        "curl", "--silent", "--show-error", "--output", "/dev/null",
-        "--write-out", "%{http_code}", "-u", auth, "-X", "MKCOL", webdav_url(parts),
-    ], capture_output=True, text=True, check=False)
+    completed = run_curl(write_curl_config(
+        config_path,
+        url=webdav_url(parts),
+        options=[("user", auth), ("request", "MKCOL"), ("output", "/dev/null"), ("write-out", "%{http_code}")],
+        flags=("silent", "show-error"),
+    ))
     status = completed.stdout.strip()
     if completed.returncode != 0 or status not in {"201", "405"}:
         raise SystemExit(f"feature Nextcloud publication failed to create {'/'.join(parts)} (HTTP {status or 'unknown'})")
@@ -198,16 +252,22 @@ def mkcol(parts: tuple[str, ...]) -> None:
 result_path.parent.mkdir(parents=True, exist_ok=True)
 with tempfile.TemporaryDirectory(prefix=".feature-package-nextcloud-", dir=result_path.parent) as temporary:
     staging = Path(temporary)
+    staging.chmod(0o700)
+    registry_curl_config = staging / "registry-curl.conf"
+    webdav_curl_config = staging / "webdav-curl.conf"
     # Download and verify the entire trusted Registry plan before issuing a
     # single Nextcloud write. This prevents a later corrupt download from
     # leaving a partially published package layout.
     for index, item in enumerate(plan):
         local = staging / f"{index:04d}-{item['registry_file']}"
-        subprocess.run([
-            "curl", "--fail", "--silent", "--show-error", "--location",
-            "--header", f"JOB-TOKEN: {os.environ['CI_JOB_TOKEN']}",
-            "--output", str(local), item["registry_url"],
-        ], check=True)
+        completed = run_curl(write_curl_config(
+            registry_curl_config,
+            url=item["registry_url"],
+            options=[("header", f"JOB-TOKEN: {job_token}"), ("output", str(local)), ("write-out", "%{http_code}")],
+            flags=("fail", "silent", "show-error"),
+        ))
+        if completed.returncode != 0 or completed.stdout.strip() != "200":
+            raise SystemExit(f"feature Nextcloud publication failed to download Registry file: {item['registry_file']}")
         actual = digest(local)
         if actual != (item["size"], item["md5"], item["sha256"]):
             raise SystemExit(f"feature Nextcloud publication rejected downloaded Registry file: {item['registry_file']}")
@@ -219,12 +279,16 @@ with tempfile.TemporaryDirectory(prefix=".feature-package-nextcloud-", dir=resul
         for depth in range(1, len(full_path)):
             parent = full_path[:depth]
             if parent not in made_directories:
-                mkcol(parent)
+                mkcol(parent, webdav_curl_config)
                 made_directories.add(parent)
-        subprocess.run([
-            "curl", "--fail", "--silent", "--show-error", "-u", auth,
-            "-T", str(item["staged_path"]), webdav_url(full_path),
-        ], check=True)
+        completed = run_curl(write_curl_config(
+            webdav_curl_config,
+            url=webdav_url(full_path),
+            options=[("user", auth), ("upload-file", str(item["staged_path"])), ("write-out", "%{http_code}")],
+            flags=("fail", "silent", "show-error"),
+        ))
+        if completed.returncode != 0 or completed.stdout.strip() not in {"200", "201", "204"}:
+            raise SystemExit(f"feature Nextcloud publication failed to upload Registry file: {item['registry_file']}")
 
 published_files = [{key: value for key, value in item.items() if key not in {"nextcloud_parts", "staged_path"}} for item in plan]
 result = {
