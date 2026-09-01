@@ -286,7 +286,7 @@ bash "$CI_PROJECT_DIR/ci/resident/check-release-version.sh"
 printf '%s' "${CI_COMMIT_TAG-unset}" > "$CI_PROJECT_DIR/formal-entrypoint-tag.txt"
 mkdir -p "$CI_PROJECT_DIR/resident-packages" "$CI_PROJECT_DIR/resident-package-info"
 printf 'resident' > "$CI_PROJECT_DIR/resident-packages/resident.tar.gz"
-printf '{"status":"skipped","tag":"%s","files":[]}\n' "$CI_COMMIT_TAG" > "$CI_PROJECT_DIR/package-registry-result.json"
+printf '{"status":"skipped","files":[]}\n' > "$CI_PROJECT_DIR/package-registry-result.json"
 ''', encoding="utf-8")
 
         rejected = subprocess.run(
@@ -333,7 +333,7 @@ printf '{"status":"skipped","tag":"%s","files":[]}\n' "$CI_COMMIT_TAG" > "$CI_PR
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((source / "formal-entrypoint-tag.txt").read_text(encoding="utf-8"), "")
         manifest = json.loads((output / "resident" / "360" / "package-registry-result.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["tag"], "")
+        self.assertEqual(manifest.get("tag", ""), "")
 
     def test_feature_build_wrapper_uses_formal_entrypoints(self):
         wrapper = server.ROOT.parent / ".gitlab" / "scripts" / "feature-package-build.sh"
@@ -523,7 +523,11 @@ touch "$PWD/build-all-invoked"
             "SIMOS_DEB_BUILD_JOBS": "16",
         })
         self.assertTrue((output / "deb" / "360" / "deb-packages" / "360" / "nested" / "app.deb").is_file())
-        self.assertTrue((output / "deb" / "360" / "deb-package-registry-result.json").is_file())
+        deb_manifest_path = output / "deb" / "360" / "deb-package-registry-result.json"
+        self.assertTrue(deb_manifest_path.is_file())
+        deb_manifest = json.loads(deb_manifest_path.read_text(encoding="utf-8"))
+        self.assertIn("tag", deb_manifest)
+        self.assertEqual(deb_manifest["tag"], "")
         for relative_path in (
             "deb-package-info/build-info.json",
             "config-build-info.env",

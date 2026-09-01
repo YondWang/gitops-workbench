@@ -247,7 +247,7 @@ git commit -m "feat: schedule feature builds like formal simos CI"
 
 Add static assertions that the wrapper contains CI_PROJECT_DIR set to source_dir, clears CI_COMMIT_TAG for both formal child processes, contains both formal script paths, and contains both disabled source Registry-upload variables. Assert it contains neither build_all_debs.sh nor a whole-source find-and-copy command.
 
-Add a subprocess test using a temporary fake source tree whose resident/deb entrypoints write their environment to files and generate minimal formal manifests. Model the frozen resident release-tag gate and prove that it rejects the signed T build ID while the wrapper reaches the formal entrypoint with CI_COMMIT_TAG empty. With a valid feature-context.json, assert resident/360 invokes only the resident path, receives source_dir as CI_PROJECT_DIR, receives an empty CI_COMMIT_TAG, emits a manifest whose tag is empty, and creates only output/resident/360. With SIMBOT_R6_A plus 360s, assert nonzero status before a fake entrypoint runs.
+Add a subprocess test using a temporary fake source tree whose resident/deb entrypoints write their environment to files and generate minimal formal manifests. Model the frozen resident release-tag gate and prove that it rejects the signed T build ID while the wrapper reaches the formal entrypoint with CI_COMMIT_TAG empty. With a valid feature-context.json, assert resident/360 invokes only the resident path, receives source_dir as CI_PROJECT_DIR, receives an empty CI_COMMIT_TAG, emits the frozen resident manifest shape (whose top-level `tag` may be absent), satisfies `manifest.get("tag", "") == ""`, and creates only output/resident/360. With SIMBOT_R6_A plus 360s, assert nonzero status before a fake entrypoint runs.
 
 - [ ] **Step 2: Run the adapter test to verify failure**
 
@@ -298,7 +298,7 @@ git commit -m "feat: reuse frozen formal simos build entrypoints"
 
 Build a temporary output tree for all four kind/label combinations. Put a valid formal manifest and test package into each. Use a fake curl executable on PATH that appends invocations to a log. Assert success uploads 360 and 360s names to both simos-resident/T and simos-debs/T endpoints, and records nextcloud paths such as resident/360/resident.tar.gz.
 
-For missing kind/label output, a non-empty manifest tag, wrong Config pair, missing listed file, incorrect MD5/SHA-256, and an extra unlisted package file: assert nonzero exit and an empty curl log.
+For missing kind/label output, a non-empty manifest tag, wrong Config pair, missing listed file, incorrect MD5/SHA-256, and an extra unlisted package file: assert nonzero exit and an empty curl log. A non-empty tag is invalid for either kind; a missing resident `tag` is accepted because the frozen resident publisher omits it, while a missing deb `tag` is rejected because the frozen deb publisher always emits the key.
 
 - [ ] **Step 2: Run publisher test to verify failure**
 
@@ -308,9 +308,9 @@ Expected: FAIL because the current script scans one flat directory and publishes
 
 - [ ] **Step 3: Implement the manifest-only publisher**
 
-Replace the current directory scan with embedded Python that iterates exactly the signed Config variants and resident/deb kinds. Load package-registry-result.json or deb-package-registry-result.json from the exact variant directory. Require success or skipped status, an empty formal manifest tag, matching Config metadata, existing files, and exact size/MD5/SHA-256.
+Replace the current directory scan with embedded Python that iterates exactly the signed Config variants and resident/deb kinds. Load package-registry-result.json or deb-package-registry-result.json from the exact variant directory. Require success or skipped status, the kind-specific untagged manifest contract, matching Config metadata, existing files, and exact size/MD5/SHA-256.
 
-Require each formal manifest tag to be empty, then build an allow-list from its entries plus explicit formal metadata files copied by Task 4. Reject a package-pattern file that is present but unlisted. Only after all validation succeeds, upload via curl with CI_JOB_TOKEN to CI_API_V4_URL/projects/GITOPS_FEATURE_SIMOS_PROJECT_ID/packages/generic/package-name/build-id. Use the signed context build_id as the trusted Registry version, with manifest registry_file names and formal 360/360s prefixes. Write registry-result.json only after every upload completes.
+Reject a non-empty `tag` for either manifest kind. Accept a missing resident `tag`, but require the deb manifest to contain `tag` with the empty value. Then build an allow-list from each manifest's entries plus explicit formal metadata files copied by Task 4. Reject a package-pattern file that is present but unlisted. Only after all validation succeeds, upload via curl with CI_JOB_TOKEN to CI_API_V4_URL/projects/GITOPS_FEATURE_SIMOS_PROJECT_ID/packages/generic/package-name/build-id. Use the signed context `build_id` as the only trusted Registry version, with manifest registry_file names and formal 360/360s prefixes. Write registry-result.json only after every upload completes.
 
 - [ ] **Step 4: Run syntax and publisher tests**
 
