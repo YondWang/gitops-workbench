@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source_dir=${1:?source directory required}
-output_dir=${2:?output directory required}
-build_mode=${SIMOS_FEATURE_BUILD_MODE:-all}
+if [[ "$#" -ne 3 ]]; then
+  echo "usage: $0 <resident|deb> <source-dir> <output-dir>" >&2
+  exit 2
+fi
+kind=$1
+source_dir=$2
+output_dir=$3
 # A shell executor ignores `image:`. Fail closed until this Runner is changed
 # to a non-privileged container executor without host and Docker mounts.
 [[ -f /.dockerenv || -n "${KUBERNETES_SERVICE_HOST:-}" ]] || { echo "Feature build requires an isolated container executor" >&2; exit 1; }
@@ -10,44 +14,108 @@ build_mode=${SIMOS_FEATURE_BUILD_MODE:-all}
 for blocked in GITOPS_FEATURE_REGISTRY_TOKEN GITOPS_FEATURE_NEXTCLOUD_PASSWORD SIMOS_OTA_SECRET_KEY SIMOS_OTA_APP_KEY; do
   [[ -z "${!blocked:-}" ]] || { echo "unexpected credential in Feature build: $blocked" >&2; exit 1; }
 done
-case "$build_mode" in
-  all|rebuild|simos|business|localization|mapengine|perception|pnc) ;;
-  *)
-    echo "Unsupported SIMOS_FEATURE_BUILD_MODE: $build_mode" >&2
-    echo "Expected one of: all, rebuild, simos, business, localization, mapengine, perception, pnc" >&2
-    exit 2
-    ;;
+
+case "$kind" in
+  resident|deb) ;;
+  *) echo "unsupported Feature build kind: $kind" >&2; exit 2 ;;
 esac
-performance_file="$source_dir/ci/resident/build-performance.env"
-if [[ -f "$performance_file" ]]; then
-  # Reuse the same concurrency source as the SimOS resident CI. The Feature
-  # build image is non-privileged, so only the exported build limits are used.
-  # shellcheck disable=SC1090
-  source "$performance_file"
-fi
-build_jobs=${SIMOS_FEATURE_BUILD_JOBS:-${SIMOS_BUILD_JOBS:-4}}
-if [[ ! "$build_jobs" =~ ^[1-9][0-9]*$ ]]; then
-  echo "SIMOS_FEATURE_BUILD_JOBS must be a positive integer: $build_jobs" >&2
-  exit 2
-fi
-# build_all_debs.sh invokes dpkg-buildpackage directly, bypassing the newer
-# ci/deb parallelism cap. Patch the checked-out package rules for this Job so
-# every catkin_make invocation uses the resident CI concurrency limit.
-while IFS= read -r rules_path; do
-  sed -i -E "s|^LOGICAL_CORES=.*$|LOGICAL_CORES=${build_jobs}|" "$rules_path"
-done < <(find "$source_dir" -path '*/debian/rules' -type f -print)
-export SIMOS_BUILD_JOBS="$build_jobs" SIMOS_DEB_BUILD_JOBS="$build_jobs"
+matrix_ref=${SIMOS_MATRIX_CONFIG_REF:?SIMOS_MATRIX_CONFIG_REF is required}
+matrix_label=${SIMOS_MATRIX_CONFIG_LABEL:?SIMOS_MATRIX_CONFIG_LABEL is required}
+context_file=feature-context.json
+[[ -f "$context_file" ]] || { echo "validated feature-context.json is required" >&2; exit 1; }
+
+build_id="$(python3 - "$context_file" "$matrix_ref" "$matrix_label" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+expected_config_source = {
+    "mode": "formal_matrix",
+    "project": "OS/config",
+    "variants": [
+        {"ref": "SIMBOT_R6_A", "label": "360"},
+        {"ref": "SIMBOT_R6_B", "label": "360s"},
+    ],
+}
+
+try:
+    context = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except Exception as exc:
+    raise SystemExit(f"feature context rejected: {exc}")
+if not isinstance(context, dict) or context.get("schema") != 2:
+    raise SystemExit("feature context rejected: unsupported schema")
+if context.get("config_source") != expected_config_source:
+    raise SystemExit("feature context rejected: invalid formal_matrix policy")
+pair = {"ref": sys.argv[2], "label": sys.argv[3]}
+if pair not in expected_config_source["variants"]:
+    raise SystemExit("feature context rejected: matrix pair is not signed")
+build_id = str(context.get("build_id") or "")
+if not re.fullmatch(r"T\d{14}_[A-Za-z0-9.-]+", build_id):
+    raise SystemExit("feature context rejected: invalid Feature build id")
+print(build_id)
+PY
+)"
+
+[[ -d "$source_dir" ]] || { echo "Feature source directory is missing: $source_dir" >&2; exit 1; }
+source_dir="$(cd -- "$source_dir" && pwd -P)"
 mkdir -p "$output_dir"
-( cd "$source_dir" && bash ./build_all_debs.sh "$build_mode" )
-find "$source_dir" -type f \( -name '*.zip' -o -name '*.deb' -o -name '*.ddeb' -o -name '*.changes' -o -name '*.buildinfo' \) -print0 | xargs -0 -r -I{} cp -f {} "$output_dir/"
-# Reuse the resident CI's in-container build stage. Its Docker wrapper is
-# deliberately not used: this Feature Job already runs in the isolated build
-# container. The script creates the complete config-matrix directory layout.
-(
-  cd "$source_dir"
-  SIMOS_PROJECT_ROOT="$source_dir" bash ci/resident/container-build-resident.sh
-)
-[[ -d "$source_dir/resident-packages" ]] || { echo "Missing resident-packages output" >&2; exit 1; }
-rm -rf "$output_dir/resident-packages"
-cp -a "$source_dir/resident-packages" "$output_dir/resident-packages"
-find "$output_dir" -type f | grep -q . || { echo "Feature build produced no package artifact" >&2; exit 1; }
+output_dir="$(cd -- "$output_dir" && pwd -P)"
+variant_dir="$output_dir/$kind/$matrix_label"
+rm -rf -- "$variant_dir"
+mkdir -p "$variant_dir"
+
+if [[ "$kind" == "resident" ]]; then
+  set +e
+  CI_PROJECT_DIR="$source_dir" \
+  CI_COMMIT_TAG="" \
+  SIMOS_MATRIX_CONFIG_REF="$matrix_ref" \
+  SIMOS_MATRIX_CONFIG_LABEL="$matrix_label" \
+  SIMOS_PACKAGE_REGISTRY_NAME=simos-resident \
+  SIMOS_PACKAGE_REGISTRY_UPLOAD_ENABLED=false \
+  SIMOS_PACKAGE_REGISTRY_UPLOAD_REQUIRED=false \
+    bash "$source_dir/ci/resident/ci-build-resident.sh"
+  child_status=$?
+  set -e
+  outputs=(
+    resident-packages
+    resident-package-info
+    package-registry-result.json
+    build-info.json
+    checksums.txt
+    checksum.md5
+    config-build-info.env
+  )
+  manifest=package-registry-result.json
+else
+  set +e
+  CI_PROJECT_DIR="$source_dir" \
+  CI_COMMIT_TAG="" \
+  SIMOS_MATRIX_CONFIG_REF="$matrix_ref" \
+  SIMOS_MATRIX_CONFIG_LABEL="$matrix_label" \
+  SIMOS_DEB_PACKAGE_REGISTRY_NAME=simos-debs \
+  SIMOS_DEB_PACKAGE_REGISTRY_UPLOAD_ENABLED=false \
+  SIMOS_DEB_PACKAGE_REGISTRY_UPLOAD_REQUIRED=false \
+    bash "$source_dir/ci/deb/ci-build-debs.sh"
+  child_status=$?
+  set -e
+  outputs=(
+    deb-packages
+    deb-package-info
+    deb-package-registry-result.json
+    config-build-info.env
+    vehicle.info
+  )
+  manifest=deb-package-registry-result.json
+fi
+
+for output in "${outputs[@]}"; do
+  if [[ -e "$source_dir/$output" || -L "$source_dir/$output" ]]; then
+    cp -a -- "$source_dir/$output" "$variant_dir/"
+  fi
+done
+if [[ "$child_status" -ne 0 ]]; then
+  echo "formal $kind build failed; preserved available diagnostics in $variant_dir" >&2
+  exit "$child_status"
+fi
+[[ -f "$variant_dir/$manifest" ]] || { echo "formal $kind manifest is missing: $manifest" >&2; exit 1; }
