@@ -66,6 +66,7 @@ rm -rf -- "$variant_dir"
 mkdir -p "$variant_dir"
 
 if [[ "$kind" == "resident" ]]; then
+  set +e
   CI_PROJECT_DIR="$source_dir" \
   CI_COMMIT_TAG="" \
   SIMOS_MATRIX_CONFIG_REF="$matrix_ref" \
@@ -74,6 +75,8 @@ if [[ "$kind" == "resident" ]]; then
   SIMOS_PACKAGE_REGISTRY_UPLOAD_ENABLED=false \
   SIMOS_PACKAGE_REGISTRY_UPLOAD_REQUIRED=false \
     bash "$source_dir/ci/resident/ci-build-resident.sh"
+  child_status=$?
+  set -e
   outputs=(
     resident-packages
     resident-package-info
@@ -85,6 +88,7 @@ if [[ "$kind" == "resident" ]]; then
   )
   manifest=package-registry-result.json
 else
+  set +e
   CI_PROJECT_DIR="$source_dir" \
   CI_COMMIT_TAG="" \
   SIMOS_MATRIX_CONFIG_REF="$matrix_ref" \
@@ -93,6 +97,8 @@ else
   SIMOS_DEB_PACKAGE_REGISTRY_UPLOAD_ENABLED=false \
   SIMOS_DEB_PACKAGE_REGISTRY_UPLOAD_REQUIRED=false \
     bash "$source_dir/ci/deb/ci-build-debs.sh"
+  child_status=$?
+  set -e
   outputs=(
     deb-packages
     deb-package-info
@@ -108,4 +114,8 @@ for output in "${outputs[@]}"; do
     cp -a -- "$source_dir/$output" "$variant_dir/"
   fi
 done
+if [[ "$child_status" -ne 0 ]]; then
+  echo "formal $kind build failed; preserved available diagnostics in $variant_dir" >&2
+  exit "$child_status"
+fi
 [[ -f "$variant_dir/$manifest" ]] || { echo "formal $kind manifest is missing: $manifest" >&2; exit 1; }

@@ -343,6 +343,8 @@ printf '{"status":"skipped","files":[]}\n' > "$CI_PROJECT_DIR/package-registry-r
         self.assertNotIn('CI_COMMIT_TAG="$build_id"', wrapper_text)
         self.assertIn('ci/resident/ci-build-resident.sh', wrapper_text)
         self.assertIn('ci/deb/ci-build-debs.sh', wrapper_text)
+        self.assertIn('child_status=$?', wrapper_text)
+        self.assertIn('preserved available diagnostics', wrapper_text)
         for setting in (
             'SIMOS_PACKAGE_REGISTRY_UPLOAD_ENABLED=false',
             'SIMOS_PACKAGE_REGISTRY_UPLOAD_REQUIRED=false',
@@ -403,6 +405,7 @@ printf 'sha256  resident-packages/360/nested/resident.tar.gz\n' > "$CI_PROJECT_D
 printf 'md5  resident-packages/360/nested/resident.tar.gz\n' > "$CI_PROJECT_DIR/checksum.md5"
 printf 'SIMOS_CONFIG_REF=%s\n' "$SIMOS_MATRIX_CONFIG_REF" > "$CI_PROJECT_DIR/config-build-info.env"
 printf 'must not be copied' > "$CI_PROJECT_DIR/unlisted-output.zip"
+[[ "${FAKE_FAIL_AFTER_OUTPUT:-false}" != true ]] || exit 42
 ''', encoding="utf-8")
         deb_script.write_text(r'''#!/usr/bin/env bash
 set -euo pipefail
@@ -429,13 +432,14 @@ printf '{}' > "$CI_PROJECT_DIR/deb-package-info/build-info.json"
 printf 'SIMOS_CONFIG_REF=%s\n' "$SIMOS_MATRIX_CONFIG_REF" > "$CI_PROJECT_DIR/config-build-info.env"
 printf 'vehicle' > "$CI_PROJECT_DIR/vehicle.info"
 printf 'must not be copied' > "$CI_PROJECT_DIR/unlisted-output.deb"
+[[ "${FAKE_FAIL_AFTER_OUTPUT:-false}" != true ]] || exit 43
 ''', encoding="utf-8")
         legacy_script.write_text(r'''#!/usr/bin/env bash
 set -euo pipefail
 touch "$PWD/build-all-invoked"
 ''', encoding="utf-8")
 
-        def invoke(*arguments, config_ref="SIMBOT_R6_A", config_label="360", omit_manifest=False):
+        def invoke(*arguments, config_ref="SIMBOT_R6_A", config_label="360", omit_manifest=False, fail_after_output=False):
             command = ["bash", str(wrapper), *map(str, arguments)]
             environment = {
                 **os.environ,
@@ -447,6 +451,7 @@ touch "$PWD/build-all-invoked"
                 "SIMOS_DEB_BUILD_MODE": "all",
                 "SIMOS_DEB_BUILD_JOBS": "16",
                 "FAKE_SKIP_MANIFEST": "true" if omit_manifest else "false",
+                "FAKE_FAIL_AFTER_OUTPUT": "true" if fail_after_output else "false",
             }
             for blocked in (
                 "GITOPS_FEATURE_REGISTRY_TOKEN",
@@ -540,6 +545,32 @@ touch "$PWD/build-all-invoked"
         self.assertEqual([path.name for path in (output / "resident").iterdir()], ["360"])
         self.assertEqual([path.name for path in (output / "deb").iterdir()], ["360"])
         self.assertFalse((source / "build-all-invoked").exists())
+
+        failed_resident = invoke(
+            "resident",
+            source_argument,
+            output_argument,
+            fail_after_output=True,
+        )
+        self.assertEqual(failed_resident.returncode, 42, failed_resident.stderr)
+        self.assertIn("preserved available diagnostics", failed_resident.stderr)
+        self.assertTrue((output / "resident" / "360" / "package-registry-result.json").is_file())
+        self.assertTrue(
+            (output / "resident" / "360" / "resident-packages" / "360" / "nested" / "resident.tar.gz").is_file()
+        )
+
+        failed_deb = invoke(
+            "deb",
+            source_argument,
+            output_argument,
+            fail_after_output=True,
+        )
+        self.assertEqual(failed_deb.returncode, 43, failed_deb.stderr)
+        self.assertIn("preserved available diagnostics", failed_deb.stderr)
+        self.assertTrue((output / "deb" / "360" / "deb-package-registry-result.json").is_file())
+        self.assertTrue(
+            (output / "deb" / "360" / "deb-packages" / "360" / "nested" / "app.deb").is_file()
+        )
 
         (source / "resident-invocation.json").unlink()
         (source / "deb-invocation.json").unlink()
@@ -1033,6 +1064,9 @@ touch "$PWD/build-all-invoked"
         self.assertIn(".gitops_base:\n  stage: operate", root_ci)
         self.assertIn("feature_build_resident:", ci)
         self.assertIn("feature_build_deb:", ci)
+        for build_job in ("feature_build_resident:", "feature_build_deb:"):
+            build_section = ci.split(build_job, 1)[1].split("feature_publish_registry:", 1)[0]
+            self.assertIn("artifacts:\n    when: always", build_section)
         self.assertNotIn("feature_build:\n", ci)
         for config_ref, config_label in (("SIMBOT_R6_A", "360"), ("SIMBOT_R6_B", "360s")):
             self.assertEqual(ci.count(f'SIMOS_MATRIX_CONFIG_REF: "{config_ref}"'), 2)

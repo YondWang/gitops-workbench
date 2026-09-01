@@ -69,6 +69,7 @@ feature_build_resident:
   script:
     - bash .gitlab/scripts/feature-package-build.sh resident feature-source feature-output
   artifacts:
+    when: always
     expire_in: 1 day
     paths:
       - feature-context.json
@@ -98,6 +99,7 @@ feature_build_deb:
   script:
     - bash .gitlab/scripts/feature-package-build.sh deb feature-source feature-output
   artifacts:
+    when: always
     expire_in: 1 day
     paths:
       - feature-context.json
