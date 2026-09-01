@@ -1060,7 +1060,7 @@ touch "$PWD/build-all-invoked"
         self.assertIn("if: '$GITOPS_FEATURE_PACKAGE == \"1\"'", root_ci)
         self.assertIn("when: never", root_ci)
         self.assertIn("- when: manual", root_ci)
-        self.assertIn("stages:\n  - operate\n  - feature_validate\n  - feature_prepare\n  - feature_build\n  - feature_publish", root_ci)
+        self.assertIn("stages:\n  - operate\n  - feature_validate\n  - feature_build\n  - feature_publish", root_ci)
         self.assertIn(".gitops_base:\n  stage: operate", root_ci)
         self.assertIn("feature_build_resident:", ci)
         self.assertIn("feature_build_deb:", ci)
@@ -1074,9 +1074,9 @@ touch "$PWD/build-all-invoked"
         registry_needs = ci.split("feature_publish_registry:", 1)[1].split("feature_publish_nextcloud:", 1)[0]
         self.assertIn("- job: feature_build_resident\n      artifacts: true", registry_needs)
         self.assertIn("- job: feature_build_deb\n      artifacts: true", registry_needs)
+        self.assertNotIn("feature_prepare:\n", ci)
         for job, stage in (
             ("feature_context_validate", "feature_validate"),
-            ("feature_prepare", "feature_prepare"),
             ("feature_build_resident", "feature_build"),
             ("feature_build_deb", "feature_build"),
             ("feature_publish_registry", "feature_publish"),
@@ -1089,11 +1089,11 @@ touch "$PWD/build-all-invoked"
         self.assertNotIn("OTA", ci)
         self.assertNotIn("stage: upload", ci)
         self.assertNotIn('simos-cloud-publisher-222', ci)
-        self.assertEqual(ci.count('tags: ["simos-feature-build"]'), 4)
+        self.assertEqual(ci.count('tags: ["simos-feature-build"]'), 3)
         self.assertEqual(ci.count('tags: ["gitops-feature-publisher"]'), 2)
         self.assertNotIn("GIT_STRATEGY: none", ci)
-        self.assertEqual(ci.count("GIT_STRATEGY: fetch"), 6)
-        self.assertEqual(ci.count('image: "$GITOPS_FEATURE_BUILD_IMAGE"'), 5)
+        self.assertEqual(ci.count("GIT_STRATEGY: fetch"), 5)
+        self.assertEqual(ci.count('image: "$GITOPS_FEATURE_BUILD_IMAGE"'), 4)
         self.assertNotIn("apk add", ci)
         self.assertNotIn("stage: upload", ci)
         self.assertNotIn("SIMOS_OTA", ci)

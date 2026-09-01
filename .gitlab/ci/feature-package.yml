@@ -24,27 +24,6 @@ feature_context_validate:
     paths:
       - feature-context.json
 
-feature_prepare:
-  extends: .feature_package_rules
-  stage: feature_prepare
-  tags: ["simos-feature-build"]
-  # The maintained SimOS build image already contains Bash, Git, Python and
-  # curl. Avoid apk at job runtime: the K8s Runner cannot reliably reach APK
-  # indexes after the Pod starts.
-  image: "$GITOPS_FEATURE_BUILD_IMAGE"
-  variables:
-    GIT_STRATEGY: fetch
-  needs:
-    - job: feature_context_validate
-      artifacts: true
-  script:
-    - bash .gitlab/scripts/feature-package-prepare.sh feature-context.json feature-source
-  artifacts:
-    expire_in: 1 day
-    paths:
-      - feature-context.json
-      - feature-source/
-
 feature_build_resident:
   extends: .feature_package_rules
   stage: feature_build
@@ -58,7 +37,7 @@ feature_build_resident:
   variables:
     GIT_STRATEGY: fetch
   needs:
-    - job: feature_prepare
+    - job: feature_context_validate
       artifacts: true
   parallel:
     matrix:
@@ -67,6 +46,10 @@ feature_build_resident:
       - SIMOS_MATRIX_CONFIG_REF: "SIMBOT_R6_B"
         SIMOS_MATRIX_CONFIG_LABEL: "360s"
   script:
+    # Every matrix instance independently freezes the signed SimOS/component
+    # snapshot. Passing a whole source tree through artifacts exceeds the
+    # coordinator limit and would serialize these otherwise parallel builds.
+    - bash .gitlab/scripts/feature-package-prepare.sh feature-context.json feature-source
     - bash .gitlab/scripts/feature-package-build.sh resident feature-source feature-output
   artifacts:
     when: always
@@ -88,7 +71,7 @@ feature_build_deb:
   variables:
     GIT_STRATEGY: fetch
   needs:
-    - job: feature_prepare
+    - job: feature_context_validate
       artifacts: true
   parallel:
     matrix:
@@ -97,6 +80,7 @@ feature_build_deb:
       - SIMOS_MATRIX_CONFIG_REF: "SIMBOT_R6_B"
         SIMOS_MATRIX_CONFIG_LABEL: "360s"
   script:
+    - bash .gitlab/scripts/feature-package-prepare.sh feature-context.json feature-source
     - bash .gitlab/scripts/feature-package-build.sh deb feature-source feature-output
   artifacts:
     when: always
