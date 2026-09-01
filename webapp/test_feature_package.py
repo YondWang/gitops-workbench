@@ -251,11 +251,96 @@ class FeaturePackageTest(unittest.TestCase):
         self.assertEqual([item["repo"] for item in context["components"]], ["simos"])
         self.assertEqual(only_simos["run"]["repository_ids"], ["simos"])
 
+    def test_feature_build_wrapper_clears_t_id_before_formal_release_gate(self):
+        wrapper = server.ROOT.parent / ".gitlab" / "scripts" / "feature-package-build.sh"
+        workspace = Path(self.tmpdir.name) / "release-tag-gate"
+        source = workspace / "feature-source"
+        output = workspace / "feature-output"
+        gate = source / "ci" / "resident" / "check-release-version.sh"
+        entrypoint = source / "ci" / "resident" / "ci-build-resident.sh"
+        gate.parent.mkdir(parents=True)
+        (workspace / "feature-context.json").write_text(json.dumps({
+            "schema": 2,
+            "build_id": "T20260831183045_login",
+            "config_source": {
+                "mode": "formal_matrix",
+                "project": "OS/config",
+                "variants": [
+                    {"ref": "SIMBOT_R6_A", "label": "360"},
+                    {"ref": "SIMBOT_R6_B", "label": "360s"},
+                ],
+            },
+        }), encoding="utf-8")
+        gate.write_text(r'''#!/usr/bin/env bash
+set -Eeuo pipefail
+tag=${CI_COMMIT_TAG:-}
+[[ -n "$tag" ]] || exit 0
+if [[ ! "$tag" =~ _([VvFfTt]?[0-9]+([.][0-9]+)+)_[0-9]{12}$ ]]; then
+  echo "cannot infer release version from tag: $tag" >&2
+  exit 12
+fi
+''', encoding="utf-8")
+        entrypoint.write_text(r'''#!/usr/bin/env bash
+set -euo pipefail
+bash "$CI_PROJECT_DIR/ci/resident/check-release-version.sh"
+printf '%s' "${CI_COMMIT_TAG-unset}" > "$CI_PROJECT_DIR/formal-entrypoint-tag.txt"
+mkdir -p "$CI_PROJECT_DIR/resident-packages" "$CI_PROJECT_DIR/resident-package-info"
+printf 'resident' > "$CI_PROJECT_DIR/resident-packages/resident.tar.gz"
+printf '{"status":"skipped","tag":"%s","files":[]}\n' "$CI_COMMIT_TAG" > "$CI_PROJECT_DIR/package-registry-result.json"
+''', encoding="utf-8")
+
+        rejected = subprocess.run(
+            ["bash", str(gate)],
+            env={**os.environ, "CI_COMMIT_TAG": "T20260831183045_login"},
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(rejected.returncode, 12, rejected)
+        self.assertIn("cannot infer release version", rejected.stderr)
+
+        command = ["bash", str(wrapper), "resident", "feature-source", "feature-output"]
+        environment = {
+            **os.environ,
+            "KUBERNETES_SERVICE_HOST": "test",
+            "CI_COMMIT_TAG": "formal_parent_tag_must_not_leak",
+            "SIMOS_MATRIX_CONFIG_REF": "SIMBOT_R6_A",
+            "SIMOS_MATRIX_CONFIG_LABEL": "360",
+        }
+        for blocked in (
+            "GITOPS_FEATURE_REGISTRY_TOKEN",
+            "GITOPS_FEATURE_NEXTCLOUD_PASSWORD",
+            "SIMOS_OTA_SECRET_KEY",
+            "SIMOS_OTA_APP_KEY",
+        ):
+            environment.pop(blocked, None)
+        if Path("/var/run/docker.sock").is_socket():
+            bubblewrap = shutil.which("bwrap")
+            if not bubblewrap:
+                self.skipTest("bwrap is required to isolate the host Docker socket")
+            command = [
+                bubblewrap,
+                "--ro-bind", "/", "/",
+                "--dev", "/dev",
+                "--proc", "/proc",
+                "--bind", str(workspace), str(workspace),
+                "--tmpfs", "/run",
+                "--chdir", str(workspace),
+                *command,
+            ]
+
+        result = subprocess.run(command, cwd=workspace, env=environment, capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((source / "formal-entrypoint-tag.txt").read_text(encoding="utf-8"), "")
+        manifest = json.loads((output / "resident" / "360" / "package-registry-result.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["tag"], "")
+
     def test_feature_build_wrapper_uses_formal_entrypoints(self):
         wrapper = server.ROOT.parent / ".gitlab" / "scripts" / "feature-package-build.sh"
         wrapper_text = wrapper.read_text(encoding="utf-8")
         self.assertIn('CI_PROJECT_DIR="$source_dir"', wrapper_text)
-        self.assertIn('CI_COMMIT_TAG="$build_id"', wrapper_text)
+        self.assertEqual(wrapper_text.count('CI_COMMIT_TAG=""'), 2)
+        self.assertNotIn('CI_COMMIT_TAG="$build_id"', wrapper_text)
         self.assertIn('ci/resident/ci-build-resident.sh', wrapper_text)
         self.assertIn('ci/deb/ci-build-debs.sh', wrapper_text)
         for setting in (
@@ -399,7 +484,7 @@ touch "$PWD/build-all-invoked"
         resident_environment = json.loads((source / "resident-invocation.json").read_text(encoding="utf-8"))
         self.assertEqual(resident_environment, {
             "CI_PROJECT_DIR": str(source),
-            "CI_COMMIT_TAG": context["build_id"],
+            "CI_COMMIT_TAG": "",
             "SIMOS_MATRIX_CONFIG_REF": "SIMBOT_R6_A",
             "SIMOS_MATRIX_CONFIG_LABEL": "360",
             "SIMOS_PACKAGE_REGISTRY_NAME": "simos-resident",
@@ -427,7 +512,7 @@ touch "$PWD/build-all-invoked"
         deb_environment = json.loads((source / "deb-invocation.json").read_text(encoding="utf-8"))
         self.assertEqual(deb_environment, {
             "CI_PROJECT_DIR": str(source),
-            "CI_COMMIT_TAG": context["build_id"],
+            "CI_COMMIT_TAG": "",
             "SIMOS_MATRIX_CONFIG_REF": "SIMBOT_R6_A",
             "SIMOS_MATRIX_CONFIG_LABEL": "360",
             "SIMOS_DEB_PACKAGE_REGISTRY_NAME": "simos-debs",

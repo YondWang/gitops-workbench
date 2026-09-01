@@ -106,7 +106,7 @@ Feature build wrapper 只负责隔离检查、环境适配与正式脚本调度�
 2. 从已验证的 `feature-context.json` 确认 Job 的 Config ref/label 属于签名 `formal_matrix`。
 3. 以 `CI_PROJECT_DIR=feature-source` 运行冻结源码的正式入口。若不覆盖，正式脚本会错误地把 Workbench Checkout 当作项目根目录。
 4. 使用与正式 CI 相同的构建变量：`SIMOS_BUILD_IMAGE`、`SIMOS_DEB_BUILD_IMAGE`、`SIMOS_DEB_BUILD_MODE=all`、`SIMOS_DEB_BUILD_JOBS=16`。这些均由受保护 CI 配置维护。
-5. 仅对正式脚本子进程把 `CI_COMMIT_TAG` 设置为 Feature `build_id`，以生成正确的 Feature manifest；这不创建 Git Tag。
+5. 仅对正式脚本子进程显式清空 `CI_COMMIT_TAG`，以无 Tag 模式生成 formal manifest，其 `tag` 字段必须为空。冻结的 resident 入口会调用 `check-release-version.sh`；Feature `TyyyyMMddHHmmss_description` 不是其接受的正式发布 Tag。Feature `build_id` 仍保留在签名上下文、运行记录、可信 Registry 路径/版本和最终结果中，不绑定为正式构建子进程的 Tag。
 6. 设置 resident/deb 的 `*_PACKAGE_REGISTRY_UPLOAD_ENABLED=false` 与 `*_PACKAGE_REGISTRY_UPLOAD_REQUIRED=false`。这样正式脚本完整生成“已收集、未上传”的 manifest，但构建 Job 不持有写入凭据。
 7. 将输出分别保存到确定路径，例如 `feature-output/resident/360/` 与 `feature-output/deb/360/`。不得平铺文件，避免 `360` 和 `360s` 的同名 sidecar 相互覆盖。
 
@@ -121,7 +121,7 @@ OS/simos / simos-resident / TyyyyMMddHHmmss_description
 OS/simos / simos-debs     / TyyyyMMddHHmmss_description
 ```
 
-可信 Registry 发布在任何外部写入前校验四个 build artifacts：每个签名 Config variant 都必须有 resident 与 deb 输出；正式 manifest 的 tag、Config ref/label 与签名一致；每个 manifest 文件必须存在并满足大小、MD5、SHA-256；拒绝未列入 manifest 的包文件，不从目录扫描推断上传内容。
+可信 Registry 发布在任何外部写入前校验四个 build artifacts：每个签名 Config variant 都必须有 resident 与 deb 输出；正式 manifest 的 tag 必须为空，Config ref/label 必须与签名一致；每个 manifest 文件必须存在并满足大小、MD5、SHA-256；拒绝未列入 manifest 的包文件，不从目录扫描推断上传内容。可信发布器单独使用签名上下文中的 Feature `build_id` 作为 Generic Package version。
 
 发布集合遵循正式 manifest：resident 的 `resident.tar.gz`、`resident.md5`、`simos.config`、`deploy.sh`、`remote_run.sh`、`checksum.md5`、`checksums.txt`、`build-info.json` 和 manifest，以及 deb 的 `.deb`、`.ddeb`、`.changes`、`.buildinfo`、`resident_*.tar.gz`、`simos_*.zip`、`config.yaml` 和 metadata。命名保持正式 `360-`、`360s-` 前缀。
 

@@ -4,7 +4,7 @@
 
 **Goal:** Make trusted Feature packages execute frozen SimOS formal resident/deb entrypoints with the same four-way Config scheduling, then publish only manifest-verified output through protected Workbench jobs.
 
-**Architecture:** The Workbench backend signs a schema-2 context that contains a fixed formal_matrix Config policy and the frozen SimOS/component snapshot. Feature prepare materializes that snapshot. Two double-entry GitLab matrices invoke the formal SimOS scripts with CI_PROJECT_DIR set to feature-source. Their source-owned Registry writes are disabled; a protected Workbench publisher verifies every manifest and publishes simos-resident and simos-debs under the T build ID.
+**Architecture:** The Workbench backend signs a schema-2 context that contains a fixed formal_matrix Config policy and the frozen SimOS/component snapshot. Feature prepare materializes that snapshot. Two double-entry GitLab matrices invoke the formal SimOS scripts with CI_PROJECT_DIR set to feature-source and CI_COMMIT_TAG explicitly empty because the Feature T build ID is not a formal SimOS release tag. Their source-owned Registry writes are disabled; a protected Workbench publisher verifies every untagged manifest and publishes simos-resident and simos-debs under the signed T build ID.
 
 **Tech Stack:** Python 3 standard library, Bash, GitLab CI YAML, existing SimOS CI scripts, unittest.
 
@@ -245,9 +245,9 @@ git commit -m "feat: schedule feature builds like formal simos CI"
 
 - [ ] **Step 1: Write failing adapter tests**
 
-Add static assertions that the wrapper contains CI_PROJECT_DIR set to source_dir, CI_COMMIT_TAG set to build_id, both formal script paths, and both disabled source Registry-upload variables. Assert it contains neither build_all_debs.sh nor a whole-source find-and-copy command.
+Add static assertions that the wrapper contains CI_PROJECT_DIR set to source_dir, clears CI_COMMIT_TAG for both formal child processes, contains both formal script paths, and contains both disabled source Registry-upload variables. Assert it contains neither build_all_debs.sh nor a whole-source find-and-copy command.
 
-Add a subprocess test using a temporary fake source tree whose resident/deb entrypoints write their environment to files and generate minimal formal manifests. With a valid feature-context.json, assert resident/360 invokes only the resident path, receives source_dir as CI_PROJECT_DIR, receives the T build ID as CI_COMMIT_TAG, and creates only output/resident/360. With SIMBOT_R6_A plus 360s, assert nonzero status before a fake entrypoint runs.
+Add a subprocess test using a temporary fake source tree whose resident/deb entrypoints write their environment to files and generate minimal formal manifests. Model the frozen resident release-tag gate and prove that it rejects the signed T build ID while the wrapper reaches the formal entrypoint with CI_COMMIT_TAG empty. With a valid feature-context.json, assert resident/360 invokes only the resident path, receives source_dir as CI_PROJECT_DIR, receives an empty CI_COMMIT_TAG, emits a manifest whose tag is empty, and creates only output/resident/360. With SIMBOT_R6_A plus 360s, assert nonzero status before a fake entrypoint runs.
 
 - [ ] **Step 2: Run the adapter test to verify failure**
 
@@ -259,7 +259,7 @@ Expected: FAIL because the wrapper accepts two arguments and calls build_all_deb
 
 The wrapper first keeps the existing container, Docker socket, and blocked credential guards. It then parses feature-context.json with embedded Python, requiring schema 2, exact formal_matrix, and a matching matrix pair. It accepts resident or deb only.
 
-For each Job, set variant_dir to output_dir/kind/SIMOS_MATRIX_CONFIG_LABEL. Remove only that exact directory. Run one frozen entrypoint with child-only environment variables: CI_PROJECT_DIR=source_dir, CI_COMMIT_TAG=build_id, current matrix ref/label, matching package name, upload-enabled false, and upload-required false. Inherit the remaining protected formal build environment.
+For each Job, set variant_dir to output_dir/kind/SIMOS_MATRIX_CONFIG_LABEL. Remove only that exact directory. Run one frozen entrypoint with child-only environment variables: CI_PROJECT_DIR=source_dir, CI_COMMIT_TAG empty, current matrix ref/label, matching package name, upload-enabled false, and upload-required false. Inherit the remaining protected formal build environment. Keep the validated signed build_id in Feature context for trusted Registry path/version and final publication metadata; do not bind it to the formal child tag.
 
 After the formal script returns, copy exact named outputs with cp -a. Resident copies resident-packages, resident-package-info, package-registry-result.json, build-info.json, checksums.txt, checksum.md5, and config-build-info.env if present. Deb copies deb-packages, deb-package-info, deb-package-registry-result.json, config-build-info.env, and vehicle.info if present. Fail if the expected manifest is absent in variant_dir.
 
@@ -298,7 +298,7 @@ git commit -m "feat: reuse frozen formal simos build entrypoints"
 
 Build a temporary output tree for all four kind/label combinations. Put a valid formal manifest and test package into each. Use a fake curl executable on PATH that appends invocations to a log. Assert success uploads 360 and 360s names to both simos-resident/T and simos-debs/T endpoints, and records nextcloud paths such as resident/360/resident.tar.gz.
 
-For missing kind/label output, wrong manifest tag, wrong Config pair, missing listed file, incorrect MD5/SHA-256, and an extra unlisted package file: assert nonzero exit and an empty curl log.
+For missing kind/label output, a non-empty manifest tag, wrong Config pair, missing listed file, incorrect MD5/SHA-256, and an extra unlisted package file: assert nonzero exit and an empty curl log.
 
 - [ ] **Step 2: Run publisher test to verify failure**
 
@@ -308,9 +308,9 @@ Expected: FAIL because the current script scans one flat directory and publishes
 
 - [ ] **Step 3: Implement the manifest-only publisher**
 
-Replace the current directory scan with embedded Python that iterates exactly the signed Config variants and resident/deb kinds. Load package-registry-result.json or deb-package-registry-result.json from the exact variant directory. Require success or skipped status, Feature tag equality, matching Config metadata, existing files, and exact size/MD5/SHA-256.
+Replace the current directory scan with embedded Python that iterates exactly the signed Config variants and resident/deb kinds. Load package-registry-result.json or deb-package-registry-result.json from the exact variant directory. Require success or skipped status, an empty formal manifest tag, matching Config metadata, existing files, and exact size/MD5/SHA-256.
 
-Build an allow-list from formal manifest entries plus explicit formal metadata files copied by Task 4. Reject a package-pattern file that is present but unlisted. Only after all validation succeeds, upload via curl with CI_JOB_TOKEN to CI_API_V4_URL/projects/GITOPS_FEATURE_SIMOS_PROJECT_ID/packages/generic/package-name/build-id. Use manifest registry_file names and formal 360/360s prefixes. Write registry-result.json only after every upload completes.
+Require each formal manifest tag to be empty, then build an allow-list from its entries plus explicit formal metadata files copied by Task 4. Reject a package-pattern file that is present but unlisted. Only after all validation succeeds, upload via curl with CI_JOB_TOKEN to CI_API_V4_URL/projects/GITOPS_FEATURE_SIMOS_PROJECT_ID/packages/generic/package-name/build-id. Use the signed context build_id as the trusted Registry version, with manifest registry_file names and formal 360/360s prefixes. Write registry-result.json only after every upload completes.
 
 - [ ] **Step 4: Run syntax and publisher tests**
 

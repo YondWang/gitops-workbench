@@ -67,7 +67,7 @@ mkdir -p "$variant_dir"
 
 if [[ "$kind" == "resident" ]]; then
   CI_PROJECT_DIR="$source_dir" \
-  CI_COMMIT_TAG="$build_id" \
+  CI_COMMIT_TAG="" \
   SIMOS_MATRIX_CONFIG_REF="$matrix_ref" \
   SIMOS_MATRIX_CONFIG_LABEL="$matrix_label" \
   SIMOS_PACKAGE_REGISTRY_NAME=simos-resident \
@@ -86,7 +86,7 @@ if [[ "$kind" == "resident" ]]; then
   manifest=package-registry-result.json
 else
   CI_PROJECT_DIR="$source_dir" \
-  CI_COMMIT_TAG="$build_id" \
+  CI_COMMIT_TAG="" \
   SIMOS_MATRIX_CONFIG_REF="$matrix_ref" \
   SIMOS_MATRIX_CONFIG_LABEL="$matrix_label" \
   SIMOS_DEB_PACKAGE_REGISTRY_NAME=simos-debs \
