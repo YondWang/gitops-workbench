@@ -555,6 +555,196 @@ touch "$PWD/build-all-invoked"
         self.assertNotEqual(missing_manifest.returncode, 0, missing_manifest)
         self.assertIn("formal resident manifest is missing", missing_manifest.stderr)
 
+    def test_feature_registry_publisher_validates_formal_manifests(self):
+        """The publisher must complete all manifest checks before its first curl."""
+        script = server.ROOT.parent / ".gitlab" / "scripts" / "feature-package-publish-registry.sh"
+        workspace = Path(self.tmpdir.name) / "registry-publisher"
+        fake_bin = workspace / "bin"
+        fake_curl = fake_bin / "curl"
+        fake_bin.mkdir(parents=True)
+        fake_curl.write_text(
+            "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$*\" >> \"$FAKE_CURL_LOG\"\n",
+            encoding="utf-8",
+        )
+        fake_curl.chmod(0o755)
+        context = {
+            "schema": 2,
+            "build_id": "T20260831183045_login",
+            "registry": {"project": "OS/simos"},
+            "config_source": {
+                "mode": "formal_matrix",
+                "project": "OS/config",
+                "variants": [
+                    {"ref": "SIMBOT_R6_A", "label": "360"},
+                    {"ref": "SIMBOT_R6_B", "label": "360s"},
+                ],
+            },
+        }
+
+        def digest(path):
+            data = path.read_bytes()
+            return len(data), hashlib.md5(data).hexdigest(), hashlib.sha256(data).hexdigest()
+
+        def write(path, contents):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(contents)
+            return path
+
+        def build_output(name):
+            root = workspace / name
+            for config_ref, label in (("SIMBOT_R6_A", "360"), ("SIMBOT_R6_B", "360s")):
+                resident = root / "resident" / label
+                resident_files = {
+                    "resident": write(resident / "resident-packages" / label / "resident.tar.gz", f"resident-{label}".encode()),
+                    "resident_md5": write(resident / "resident-packages" / label / "resident.md5", f"md5-{label}".encode()),
+                    "simos_config": write(resident / "resident-packages" / label / "simos.config", f"config-{label}".encode()),
+                    "deploy_sh": write(resident / "resident-packages" / label / "deploy.sh", b"#!/bin/sh\n"),
+                    "remote_run_sh": write(resident / "resident-packages" / label / "remote_run.sh", b"#!/bin/sh\n"),
+                    "checksum_md5": write(resident / "resident-packages" / label / "checksum.md5", f"checksum-{label}".encode()),
+                }
+                for relative in (
+                    "build-info.json",
+                    "checksums.txt",
+                    "checksum.md5",
+                    "config-build-info.env",
+                    "resident-package-info/build-info.json",
+                    "resident-package-info/checksums.txt",
+                    "resident-package-info/artifact-path.txt",
+                    "resident-package-info/package-registry-result.json",
+                ):
+                    write(resident / relative, f"metadata-{label}-{relative}".encode())
+                size, md5, sha256 = digest(resident_files["resident"])
+                resident_files["resident_md5"].write_text(f"{md5}  resident.tar.gz\n", encoding="utf-8")
+                resident_manifest = {
+                    "status": "skipped",
+                    "config_ref": config_ref,
+                    "config_variants": [{
+                        "label": label,
+                        "config_ref": config_ref,
+                        "artifact_path": f"resident-packages/{label}/resident.tar.gz",
+                        "size": size,
+                        "md5": md5,
+                        "sha256": sha256,
+                        "registry_files": {key: f"{label}-{path.name}" for key, path in resident_files.items()},
+                    }],
+                }
+                (resident / "package-registry-result.json").write_text(json.dumps(resident_manifest), encoding="utf-8")
+
+                deb = root / "deb" / label
+                deb_file = write(deb / "deb-packages" / label / "app.deb", f"deb-{label}".encode())
+                size, md5, sha256 = digest(deb_file)
+                deb_entry = {
+                    "file": "app.deb",
+                    "registry_file": f"{label}-app.deb",
+                    "size": size,
+                    "md5": md5,
+                    "sha256": sha256,
+                    "label": label,
+                    "config_ref": config_ref,
+                }
+                deb_variant_entry = {key: value for key, value in deb_entry.items() if key not in {"label", "config_ref"}}
+                for relative in (
+                    "config-build-info.env",
+                    "vehicle.info",
+                    "deb-package-info/build-info.json",
+                    "deb-package-info/deb-package-registry-result.json",
+                ):
+                    write(deb / relative, f"metadata-{label}-{relative}".encode())
+                deb_manifest = {
+                    "status": "skipped",
+                    "tag": "",
+                    "config_ref": config_ref,
+                    "config_variants": [{"label": label, "config_ref": config_ref, "files": [deb_variant_entry]}],
+                    "files": [deb_entry],
+                }
+                (deb / "deb-package-registry-result.json").write_text(json.dumps(deb_manifest), encoding="utf-8")
+            return root
+
+        context_path = workspace / "feature-context.json"
+        context_path.write_text(json.dumps(context), encoding="utf-8")
+
+        def invoke(output, name):
+            publish = workspace / f"publish-{name}"
+            curl_log = workspace / f"curl-{name}.log"
+            curl_log.unlink(missing_ok=True)
+            result = subprocess.run(
+                ["bash", str(script), str(context_path), str(output), str(publish)],
+                cwd=workspace,
+                env={
+                    **os.environ,
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "FAKE_CURL_LOG": str(curl_log),
+                    "CI_API_V4_URL": "https://gitlab.test/api/v4",
+                    "GITOPS_FEATURE_SIMOS_PROJECT_ID": "20",
+                    "CI_JOB_TOKEN": "publisher-token",
+                },
+                capture_output=True,
+                text=True,
+            )
+            return result, curl_log, publish
+
+        output = build_output("valid-output")
+        success, curl_log, publish = invoke(output, "success")
+        self.assertEqual(success.returncode, 0, success.stderr)
+        self.assertTrue(curl_log.exists(), "valid formal artifacts must be uploaded")
+        uploads = curl_log.read_text(encoding="utf-8")
+        self.assertIn("/simos-resident/T20260831183045_login/360-resident.tar.gz", uploads)
+        self.assertIn("/simos-resident/T20260831183045_login/360s-resident.tar.gz", uploads)
+        self.assertIn("/simos-debs/T20260831183045_login/360-app.deb", uploads)
+        self.assertIn("/simos-debs/T20260831183045_login/360s-app.deb", uploads)
+        result = json.loads((publish / "registry-result.json").read_text(encoding="utf-8"))
+        self.assertEqual(result["build_id"], context["build_id"])
+        self.assertEqual(result["project"], "OS/simos")
+        self.assertEqual({item["package_name"] for item in result["files"]}, {"simos-resident", "simos-debs"})
+        self.assertIn("resident/360/resident.tar.gz", {item["nextcloud_path"] for item in result["files"]})
+        self.assertIn("deb/360/app.deb", {item["nextcloud_path"] for item in result["files"]})
+        for item in result["files"]:
+            self.assertEqual(set(item), {"package_name", "registry_file", "registry_url", "local_path", "label", "kind", "size", "md5", "sha256", "nextcloud_path"})
+
+        def assert_rejected(name, mutate):
+            invalid = build_output(f"invalid-{name}")
+            mutate(invalid)
+            rejected, invalid_log, invalid_publish = invoke(invalid, name)
+            self.assertNotEqual(rejected.returncode, 0, rejected)
+            self.assertFalse(invalid_log.exists() and invalid_log.read_text(encoding="utf-8").strip(), rejected.stderr)
+            self.assertFalse((invalid_publish / "registry-result.json").exists())
+
+        assert_rejected("missing-output", lambda root: shutil.rmtree(root / "resident" / "360"))
+
+        def nonempty_tag(root):
+            path = root / "resident" / "360" / "package-registry-result.json"
+            data = json.loads(path.read_text(encoding="utf-8")); data["tag"] = "release_V3.2.1.001_202608311830"; path.write_text(json.dumps(data), encoding="utf-8")
+        assert_rejected("nonempty-tag", nonempty_tag)
+
+        def nonempty_deb_tag(root):
+            path = root / "deb" / "360" / "deb-package-registry-result.json"
+            data = json.loads(path.read_text(encoding="utf-8")); data["tag"] = "release_V3.2.1.001_202608311830"; path.write_text(json.dumps(data), encoding="utf-8")
+        assert_rejected("nonempty-deb-tag", nonempty_deb_tag)
+
+        def wrong_config_pair(root):
+            path = root / "deb" / "360" / "deb-package-registry-result.json"
+            data = json.loads(path.read_text(encoding="utf-8")); data["config_ref"] = "wrong"; data["config_variants"][0]["config_ref"] = "wrong"; data["files"][0]["config_ref"] = "wrong"; path.write_text(json.dumps(data), encoding="utf-8")
+        assert_rejected("wrong-config-pair", wrong_config_pair)
+
+        assert_rejected("missing-listed-file", lambda root: (root / "deb" / "360" / "deb-packages" / "360" / "app.deb").unlink())
+
+        def wrong_checksum(root):
+            path = root / "deb" / "360" / "deb-package-registry-result.json"
+            data = json.loads(path.read_text(encoding="utf-8")); data["files"][0]["sha256"] = "0" * 64; path.write_text(json.dumps(data), encoding="utf-8")
+        assert_rejected("wrong-checksum", wrong_checksum)
+
+        def wrong_md5(root):
+            path = root / "deb" / "360" / "deb-package-registry-result.json"
+            data = json.loads(path.read_text(encoding="utf-8")); data["files"][0]["md5"] = "0" * 32; path.write_text(json.dumps(data), encoding="utf-8")
+        assert_rejected("wrong-md5", wrong_md5)
+
+        assert_rejected("unlisted-package", lambda root: write(root / "deb" / "360" / "deb-packages" / "360" / "unlisted.deb", b"unlisted"))
+
+        def missing_deb_tag(root):
+            path = root / "deb" / "360" / "deb-package-registry-result.json"
+            data = json.loads(path.read_text(encoding="utf-8")); data.pop("tag"); path.write_text(json.dumps(data), encoding="utf-8")
+        assert_rejected("missing-deb-tag", missing_deb_tag)
+
     def test_static_contract_for_trusted_feature_pipeline(self):
         now = server.datetime(2026, 8, 27, 15, 30, 45, tzinfo=server.ZoneInfo("Asia/Shanghai"))
         first = server.allocate_feature_package_build_id("feature/release_login", now, [])
