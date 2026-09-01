@@ -1181,7 +1181,8 @@ touch "$PWD/build-all-invoked"
         tampered = invoke(context, lambda value: "0" * len(value))
         expired_context = {**context, "expires_at": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()}
         expired = invoke(expired_context)
-        schema_1 = invoke({**context, "schema": 1})
+        legacy_schema_1 = invoke({key: value for key, value in context.items() if key != "config_source"} | {"schema": 1})
+        legacy_context = json.loads(output.read_text(encoding="utf-8"))
         future_schema = invoke({**context, "schema": 3})
         invalid_mode = invoke({**context, "config_source": {**context["config_source"], "mode": "shared_branch_snapshot"}})
         unknown_mode = invoke({**context, "config_source": {**context["config_source"], "mode": "unrecognized"}})
@@ -1204,8 +1205,9 @@ touch "$PWD/build-all-invoked"
         self.assertNotEqual(missing.returncode, 0); self.assertIn("signature context", missing.stderr)
         self.assertNotEqual(tampered.returncode, 0); self.assertIn("HMAC mismatch", tampered.stderr)
         self.assertNotEqual(expired.returncode, 0); self.assertIn("context expired", expired.stderr)
-        self.assertNotEqual(schema_1.returncode, 0)
-        self.assertIn("unsupported schema", schema_1.stderr)
+        self.assertEqual(legacy_schema_1.returncode, 0, legacy_schema_1.stderr)
+        self.assertEqual(legacy_context["schema"], 2)
+        self.assertEqual(legacy_context["config_source"], context["config_source"])
         self.assertNotEqual(future_schema.returncode, 0)
         self.assertIn("unsupported schema", future_schema.stderr)
         for result in (invalid_mode, unknown_mode, invalid_project, invalid_order, duplicate_variants, missing_variant, invalid_label, extra_policy_key):

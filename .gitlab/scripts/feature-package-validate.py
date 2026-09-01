@@ -39,8 +39,15 @@ try:
     context = json.loads(base64.urlsafe_b64decode(encoded.encode("ascii")).decode("utf-8"))
 except Exception as exc:
     fail(f"context decode failed: {exc}")
-if not isinstance(context, dict) or context.get("schema") != 2:
+if not isinstance(context, dict) or context.get("schema") not in {1, 2}:
     fail("unsupported schema")
+if context.get("schema") == 1:
+    # Workbench services deployed before the formal-matrix transition sign a
+    # schema-1 context without config_source. Its signed code/component
+    # snapshot stays authoritative; this protected CI supplies the one fixed
+    # formal matrix and upgrades the artifact used by subsequent jobs.
+    context["schema"] = 2
+    context["config_source"] = FORMAL_CONFIG_SOURCE
 if context.get("config_source") != FORMAL_CONFIG_SOURCE:
     fail("invalid config_source; only formal_matrix is supported")
 try:
