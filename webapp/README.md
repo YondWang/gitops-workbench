@@ -48,6 +48,28 @@ WebApp 会在发版计划生成时记录每个仓库实际使用的来源分支�
 
 Feature 测试包规则：来源必须为 `feature/*`；服务端只读取该分支的远端 `version.info`，并按 Asia/Shanghai 服务端时钟生成 `TyyyyMMddHHmmss_功能描述`，例如 `T20260827153045_login`。Feature 包不创建 SimOS 或业务仓库的远端构建分支、提交、Tag、MR，也不调用 OTA。服务端冻结 SimOS 与组件 SHA，在签名上下文中提交到受保护的 `software_hmi_app/gitops-control@ci/feature-package`；可信 CI 仅在临时工作区写入 `version.info` 和 `software.yaml`，构建后发布 OS/simos Generic Package Registry 与选定 Nextcloud 分类。空“基线分支”要求每个启用组件都有同名 Feature 分支；填写基线后仅缺失组件可从该基线解析，SimOS 仍必须存在该 Feature 分支。`GITOPS_FEATURE_CONTEXT_HMAC_KEY` 必须同时作为 Workbench 服务配置和 Workbench GitLab 的 masked/protected CI 变量，`GITOPS_FEATURE_BUILD_IMAGE` 必须是同一受保护 CI 配置中的受维护构建镜像；编译 Runner 必须是无 Docker socket、无发布凭据的非特权容器执行器。
 
+## 可信 Feature 打包流水线
+
+可信 Feature Pipeline 只包含上下文校验、源码准备、构建、Registry 发布和 Nextcloud 发布，没有 `button_*` 手工操作、Tag、MR、release note 或 OTA Job。构建严格复用冻结的 SimOS 正式入口，按当前正式调度生成四个构建实例：
+
+- resident / `SIMBOT_R6_A` / `360`
+- resident / `SIMBOT_R6_B` / `360s`
+- deb / `SIMBOT_R6_A` / `360`
+- deb / `SIMBOT_R6_B` / `360s`
+
+Feature 的 `T...` build ID 只写入临时元数据、签名上下文、构建记录和发布路径，不作为正式构建子进程的 Git Tag。可信 Registry 发布器只接受这四个构建实例生成并验证过的 manifest，分别发布到以下两个 Generic Package：
+
+```text
+OS/simos / simos-resident / TyyyyMMddHHmmss_功能描述
+OS/simos / simos-debs     / TyyyyMMddHHmmss_功能描述
+```
+
+Nextcloud 发布器只下载该受信 Registry 清单中的精确 URL，并保留 `云盘分类/T.../resident/360/...`、`云盘分类/T.../deb/360/...` 等变体目录；不扫描 Feature 工作目录，也不执行 Feature 源码中的发布脚本。所有 Registry 清单和路径会在第一次网络请求前验证，下载内容通过记录的大小、MD5 和 SHA-256 再校验后才写入 Nextcloud。
+
+GitLab 管理员必须将 `ci/feature-package` 设为受保护分支，并在 Workbench 项目受保护环境中维护以下变量：`GITOPS_FEATURE_CONTEXT_HMAC_KEY`（与 Workbench 服务端一致）、`GITOPS_FEATURE_BUILD_IMAGE`、`GITOPS_FEATURE_SIMOS_PROJECT_ID`、`GITOPS_FEATURE_NEXTCLOUD_URL`、`GITOPS_FEATURE_NEXTCLOUD_USER`、`GITOPS_FEATURE_NEXTCLOUD_PASSWORD`。其中 HMAC Key、Nextcloud 账号和密码必须 masked/protected；`gitops-feature-publisher` Runner 只能分配给受保护的发布 Job 并持有 Registry/Nextcloud 权限。`simos-feature-build` 必须是无 Docker socket、无发布凭据的非特权容器 Runner，且其 Job Token 仅需读取 OS/simos、选中子模块与 OS/config 的权限。
+
+当前 Config 策略只有与 SimOS 正式 CI 相同的 `formal_matrix`（`SIMBOT_R6_A/360` 与 `SIMBOT_R6_B/360s`）。`shared_branch_snapshot` 仅保留在设计文档中，尚不可提交、不可运行；启用它需要单独评审并实现完整的 Config SHA 冻结、准备和验证流程。
+
 版本号按精确 SimOS 来源分支独立维护：`fix`、`release`、`feature/ABC` 与 `feature/XYZ` 的版本文件和版本兜底值互不共享。
 
 ## 迁移说明
@@ -88,7 +110,7 @@ GITOPS_RELEASE_RUN_POLL_SECONDS=10
 
 ## OTA 云平台注册
 
-完整发版、定时完整发版和“已有 Tag 重跑”仅对管理员开放。页面可多选 OTA 环境 `dev`、`test`、`prod`，也可完全不选；Workbench 只在有选择时将环境合成为 GitLab Pipeline variable `SIMOS_OTA_TARGET_ENVS`（例如 `dev,test`）。空选仍会构建并发布 Registry/Nextcloud 包，但三个按环境拆分的 OTA 上传 Job 都不会被创建，因此流水线不会出现 `upload` 阶段。新建定时任务默认不注册 OTA，已有任务保留其保存的环境。每次运行使用的环境会记录在运行列表中。Feature 测试包不接受也不传递该变量，其可信 CI 固定只有 `operate` 阶段，不会创建任何 OTA 上传 Job。
+完整发版、定时完整发版和“已有 Tag 重跑”仅对管理员开放。页面可多选 OTA 环境 `dev`、`test`、`prod`，也可完全不选；Workbench 只在有选择时将环境合成为 GitLab Pipeline variable `SIMOS_OTA_TARGET_ENVS`（例如 `dev,test`）。空选仍会构建并发布 Registry/Nextcloud 包，但三个按环境拆分的 OTA 上传 Job 都不会被创建，因此流水线不会出现 `upload` 阶段。新建定时任务默认不注册 OTA，已有任务保留其保存的环境。每次运行使用的环境会记录在运行列表中。Feature 测试包不接受也不传递该变量；其可信 CI 只有校验、准备、构建和发布阶段，不会创建任何 OTA 上传 Job。
 
 SimOS 的 `.gitlab-ci.yml` 仅接受 Workbench 创建的 API Tag pipeline，直接在 GitLab 或命令行创建 Tag 只会创建 Tag，不会启动 CI。GitLab Token 必须拥有创建 pipeline 的 `api` 权限。
 

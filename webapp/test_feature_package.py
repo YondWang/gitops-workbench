@@ -788,6 +788,123 @@ touch "$PWD/build-all-invoked"
             data = json.loads(path.read_text(encoding="utf-8")); data.pop("tag"); path.write_text(json.dumps(data), encoding="utf-8")
         assert_rejected("missing-deb-tag", missing_deb_tag)
 
+    def test_feature_nextcloud_publisher_preserves_variant_layout(self):
+        """Only the verified Registry plan may drive nested Nextcloud writes."""
+        script = server.ROOT.parent / ".gitlab" / "scripts" / "feature-package-publish-nextcloud.sh"
+        workspace = Path(self.tmpdir.name) / "nextcloud-publisher"
+        fake_bin = workspace / "bin"
+        fake_curl = fake_bin / "curl"
+        fake_bin.mkdir(parents=True)
+        fake_curl.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "printf '%s\\n' \"$*\" >> \"$FAKE_CURL_LOG\"\n"
+            "if [[ \" $* \" == *\" -X MKCOL \"* ]]; then printf '201'; exit 0; fi\n"
+            "for ((index = 1; index <= $#; index++)); do\n"
+            "  if [[ \"${!index}\" == \"--output\" ]]; then next=$((index + 1)); printf 'downloaded' > \"${!next}\"; fi\n"
+            "done\n",
+            encoding="utf-8",
+        )
+        fake_curl.chmod(0o755)
+        context = {
+            "schema": 2,
+            "build_id": "T20260831183045_login",
+            "cloud_category": "车机/Feature测试包",
+            "registry": {"project": "OS/simos"},
+            "config_source": {
+                "mode": "formal_matrix",
+                "project": "OS/config",
+                "variants": [
+                    {"ref": "SIMBOT_R6_A", "label": "360"},
+                    {"ref": "SIMBOT_R6_B", "label": "360s"},
+                ],
+            },
+        }
+        context_path = workspace / "feature-context.json"
+        context_path.write_text(json.dumps(context), encoding="utf-8")
+
+        def entry(kind, label, name):
+            contents = b"downloaded"
+            package_name = "simos-resident" if kind == "resident" else "simos-debs"
+            return {
+                "package_name": package_name,
+                "registry_file": f"{label}-{name}",
+                "registry_url": f"https://gitlab.test/api/v4/projects/20/packages/generic/{package_name}/{context['build_id']}/{label}-{name}",
+                "local_path": f"{kind}/{label}/{name}",
+                "label": label,
+                "kind": kind,
+                "size": len(contents),
+                "md5": hashlib.md5(contents).hexdigest(),
+                "sha256": hashlib.sha256(contents).hexdigest(),
+                "nextcloud_path": f"{kind}/{label}/{name}",
+            }
+
+        def registry_result(*, files):
+            return {
+                "build_id": context["build_id"],
+                "project": "OS/simos",
+                "resident": {"package_name": "simos-resident", "package_version": context["build_id"]},
+                "deb": {"package_name": "simos-debs", "package_version": context["build_id"]},
+                "files": files,
+            }
+
+        def invoke(name, result):
+            publish = workspace / f"publish-{name}"
+            publish.mkdir(parents=True, exist_ok=True)
+            (publish / "registry-result.json").write_text(json.dumps(result), encoding="utf-8")
+            curl_log = workspace / f"curl-{name}.log"
+            curl_log.unlink(missing_ok=True)
+            output = workspace / f"feature-package-result-{name}.json"
+            output.unlink(missing_ok=True)
+            completed = subprocess.run(
+                ["bash", str(script), str(context_path), str(publish), str(output)],
+                cwd=workspace,
+                env={
+                    **os.environ,
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "FAKE_CURL_LOG": str(curl_log),
+                    "CI_JOB_TOKEN": "read-only-job-token",
+                    "GITOPS_FEATURE_NEXTCLOUD_URL": "https://nextcloud.test",
+                    "GITOPS_FEATURE_NEXTCLOUD_USER": "feature-publisher",
+                    "GITOPS_FEATURE_NEXTCLOUD_PASSWORD": "protected-password",
+                },
+                capture_output=True,
+                text=True,
+            )
+            return completed, curl_log, output
+
+        valid_files = [entry("resident", "360", "resident.tar.gz"), entry("deb", "360", "app.deb")]
+        success, curl_log, output = invoke("valid", registry_result(files=valid_files))
+        self.assertEqual(success.returncode, 0, success.stderr)
+        calls = curl_log.read_text(encoding="utf-8")
+        self.assertIn("-X MKCOL https://nextcloud.test/remote.php/dav/files/feature-publisher/", calls)
+        mkcols = [line for line in calls.splitlines() if "-X MKCOL" in line]
+        self.assertTrue(any(line.endswith("/T20260831183045_login/resident") for line in mkcols))
+        self.assertTrue(any(line.endswith("/T20260831183045_login/resident/360") for line in mkcols))
+        self.assertTrue(any(line.endswith("/T20260831183045_login/deb/360") for line in mkcols))
+        self.assertIn("/resident/360/resident.tar.gz", calls)
+        self.assertIn("/deb/360/app.deb", calls)
+        result = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["build_id"], context["build_id"])
+        self.assertEqual(result["config_source"], context["config_source"])
+        self.assertEqual(result["nextcloud"]["cloud_dir"], "车机/Feature测试包/T20260831183045_login")
+        self.assertEqual({item["nextcloud_path"] for item in result["nextcloud"]["files"]}, {
+            "resident/360/resident.tar.gz", "deb/360/app.deb",
+        })
+        self.assertNotIn("protected-password", output.read_text(encoding="utf-8"))
+
+        for name, invalid_path in (
+            ("dotdot", "resident/../resident.tar.gz"),
+            ("leading-slash", "/resident/360/resident.tar.gz"),
+            ("empty-segment", "resident//resident.tar.gz"),
+        ):
+            invalid_files = [dict(valid_files[0], nextcloud_path=invalid_path), valid_files[1]]
+            rejected, invalid_log, invalid_output = invoke(name, registry_result(files=invalid_files))
+            self.assertNotEqual(rejected.returncode, 0, rejected)
+            self.assertFalse(invalid_log.exists() and invalid_log.read_text(encoding="utf-8").strip(), rejected.stderr)
+            self.assertFalse(invalid_output.exists())
+
     def test_static_contract_for_trusted_feature_pipeline(self):
         now = server.datetime(2026, 8, 27, 15, 30, 45, tzinfo=server.ZoneInfo("Asia/Shanghai"))
         first = server.allocate_feature_package_build_id("feature/release_login", now, [])
