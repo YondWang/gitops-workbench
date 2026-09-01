@@ -38,6 +38,7 @@ RESIDENT_KEYS = {
     "remote_run_sh": "remote_run.sh",
     "checksum_md5": "checksum.md5",
 }
+RESIDENT_ALLOWED_METADATA = {"build-info.json"}
 DEB_FILE_PATTERN = re.compile(r"(?:.+\.(?:deb|ddeb|changes|buildinfo)|resident_.+\.tar\.gz|simos_.+\.zip|config\.yaml)$")
 BUILD_ID_PATTERN = re.compile(r"T\d{14}_[A-Za-z0-9.-]+$")
 
@@ -46,11 +47,64 @@ def reject(message: str) -> None:
     raise SystemExit(f"feature Registry preflight rejected: {message}")
 
 
-def load_json(path: Path, description: str) -> dict:
-    if not path.is_file():
+def absolute_without_symlinks(path: Path, description: str) -> Path:
+    absolute = path.absolute()
+    for component in (absolute, *absolute.parents):
+        if component.is_symlink():
+            reject(f"{description} contains a symbolic link: {component}")
+    return absolute
+
+
+output_root = absolute_without_symlinks(output_root, "Feature output path")
+if not output_root.is_dir():
+    reject(f"Feature output directory is missing: {output_root}")
+resolved_output_root = output_root.resolve(strict=True)
+
+
+def confined_regular_file(path: Path, description: str = "Feature output file") -> Path:
+    absolute = absolute_without_symlinks(path, description)
+    try:
+        absolute.relative_to(output_root)
+    except ValueError:
+        reject(f"{description} is outside Feature output: {absolute}")
+    try:
+        resolved = absolute.resolve(strict=True)
+    except FileNotFoundError:
+        reject(f"missing {description}: {absolute}")
+    try:
+        resolved.relative_to(resolved_output_root)
+    except ValueError:
+        reject(f"{description} resolves outside Feature output: {absolute}")
+    if not resolved.is_file():
+        reject(f"{description} is not a regular file: {absolute}")
+    return resolved
+
+
+def confined_directory(path: Path, description: str) -> Path:
+    absolute = absolute_without_symlinks(path, description)
+    try:
+        absolute.relative_to(output_root)
+    except ValueError:
+        reject(f"{description} is outside Feature output: {absolute}")
+    try:
+        resolved = absolute.resolve(strict=True)
+    except FileNotFoundError:
+        reject(f"missing {description}: {absolute}")
+    try:
+        resolved.relative_to(resolved_output_root)
+    except ValueError:
+        reject(f"{description} resolves outside Feature output: {absolute}")
+    if not resolved.is_dir():
+        reject(f"{description} is not a directory: {absolute}")
+    return resolved
+
+
+def load_json(path: Path, description: str, *, confined: bool = False) -> dict:
+    local = confined_regular_file(path, description) if confined else absolute_without_symlinks(path, description)
+    if not local.is_file():
         reject(f"missing {description}: {path}")
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(local.read_text(encoding="utf-8"))
     except Exception as exc:
         reject(f"invalid {description}: {exc}")
     if not isinstance(value, dict):
@@ -66,17 +120,17 @@ def safe_name(value: object, description: str) -> str:
 
 
 def local_relative(path: Path) -> str:
+    absolute = absolute_without_symlinks(path, "Feature output path")
     try:
-        return str(path.relative_to(output_root))
+        return str(absolute.relative_to(output_root))
     except ValueError:
         reject(f"file is outside Feature output: {path}")
     raise AssertionError("unreachable")
 
 
 def digest(path: Path) -> tuple[int, str, str]:
-    if not path.is_file():
-        reject(f"listed file is missing: {local_relative(path)}")
-    data = path.read_bytes()
+    local = confined_regular_file(path, "listed Feature output file")
+    data = local.read_bytes()
     return len(data), hashlib.md5(data).hexdigest(), hashlib.sha256(data).hexdigest()
 
 
@@ -129,23 +183,44 @@ def one_signed_variant(manifest: dict, config_ref: str, label: str, kind: str) -
     return variant
 
 
+def validate_resident_build_info(path: Path, config_ref: str, label: str,
+                                 size: int, md5: str, sha256: str) -> None:
+    info = load_json(path, f"resident/{label} package build-info", confined=True)
+    expected = {
+        "status": "success",
+        "label": label,
+        "config_ref": config_ref,
+        "artifact_path": f"resident-packages/{label}/resident.tar.gz",
+        "md5": md5,
+        "sha256": sha256,
+    }
+    for field, value in expected.items():
+        if info.get(field) != value:
+            reject(f"resident/{label} package build-info {field} does not match resident artifact")
+    if "size" in info and (not isinstance(info["size"], int) or isinstance(info["size"], bool) or info["size"] != size):
+        reject(f"resident/{label} package build-info size does not match resident artifact")
+
+
 def reject_unlisted_files(root: Path, allowed: set[Path], kind: str, label: str, predicate) -> None:
-    if not root.is_dir():
-        reject(f"missing {kind}/{label} package directory: {local_relative(root)}")
+    root = confined_directory(root, f"{kind}/{label} package directory")
     for path in root.rglob("*"):
+        if path.is_symlink():
+            reject(f"{kind}/{label} package directory contains a symbolic link: {local_relative(path)}")
         if path.is_file() and predicate(path) and path not in allowed:
             reject(f"unlisted {kind} package file: {local_relative(path)}")
 
 
-def optional_metadata(plan: list[dict], package_name: str, variant_dir: Path, label: str, kind: str, names: tuple[str, ...]) -> None:
-    for relative in names:
+def optional_metadata(plan: list[dict], package_name: str, variant_dir: Path, label: str, kind: str,
+                      entries: tuple[tuple[str, str], ...]) -> None:
+    for relative, registry_file in entries:
         local = variant_dir / relative
+        absolute_without_symlinks(local, f"optional {kind}/{label} metadata")
         if not local.is_file():
             continue
         add_plan(
             plan,
             package_name=package_name,
-            registry_file=f"{label}-{relative.replace('/', '-')}",
+            registry_file=registry_file,
             local=local,
             label=label,
             kind=kind,
@@ -157,7 +232,7 @@ def validate_resident(config_ref: str, label: str, plan: list[dict]) -> None:
     kind, package_name = "resident", "simos-resident"
     variant_dir = output_root / kind / label
     manifest_path = variant_dir / "package-registry-result.json"
-    manifest = load_json(manifest_path, f"{kind}/{label} manifest")
+    manifest = load_json(manifest_path, f"{kind}/{label} manifest", confined=True)
     if "tag" in manifest and manifest["tag"] != "":
         reject(f"{kind}/{label} manifest has a non-empty tag")
     variant = one_signed_variant(manifest, config_ref, label, kind)
@@ -173,13 +248,24 @@ def validate_resident(config_ref: str, label: str, plan: list[dict]) -> None:
             reject(f"{kind}/{label} registry file is invalid for {key}")
         if not registry_files[key].startswith(f"{label}-"):
             reject(f"{kind}/{label} registry file lacks formal label prefix")
-        if not path.is_file():
-            reject(f"listed file is missing: {local_relative(path)}")
-    require_digest(local_files["resident"], variant)
-    listed_md5 = local_files["resident_md5"].read_text(encoding="utf-8").split()
-    if not listed_md5 or listed_md5[0] != digest(local_files["resident"])[1]:
+        confined_regular_file(path, f"listed {kind}/{label} file")
+    resident_size, resident_md5, resident_sha256 = require_digest(local_files["resident"], variant)
+    validate_resident_build_info(
+        package_root / "build-info.json", config_ref, label,
+        resident_size, resident_md5, resident_sha256,
+    )
+    listed_md5 = confined_regular_file(
+        local_files["resident_md5"], f"listed {kind}/{label} file"
+    ).read_text(encoding="utf-8").split()
+    if not listed_md5 or listed_md5[0] != resident_md5:
         reject(f"resident.md5 does not match {local_relative(local_files['resident'])}")
-    reject_unlisted_files(package_root, set(local_files.values()), kind, label, lambda _path: True)
+    reject_unlisted_files(
+        package_root,
+        set(local_files.values()) | {package_root / name for name in RESIDENT_ALLOWED_METADATA},
+        kind,
+        label,
+        lambda _path: True,
+    )
     for key, local in local_files.items():
         add_plan(
             plan,
@@ -194,9 +280,14 @@ def validate_resident(config_ref: str, label: str, plan: list[dict]) -> None:
     optional_metadata(
         plan, package_name, variant_dir, label, kind,
         (
-            "build-info.json", "checksums.txt", "config-build-info.env",
-            "resident-package-info/build-info.json", "resident-package-info/checksums.txt",
-            "resident-package-info/artifact-path.txt", "resident-package-info/package-registry-result.json",
+            ("build-info.json", f"{label}-build-info.json"),
+            ("checksums.txt", f"{label}-checksums.txt"),
+            ("checksum.md5", f"{label}-root-checksum.md5"),
+            ("config-build-info.env", f"{label}-config-build-info.env"),
+            ("resident-package-info/build-info.json", f"{label}-resident-package-info-build-info.json"),
+            ("resident-package-info/checksums.txt", f"{label}-resident-package-info-checksums.txt"),
+            ("resident-package-info/artifact-path.txt", f"{label}-resident-package-info-artifact-path.txt"),
+            ("resident-package-info/package-registry-result.json", f"{label}-resident-package-info-package-registry-result.json"),
         ),
     )
     add_plan(
@@ -214,7 +305,7 @@ def validate_deb(config_ref: str, label: str, plan: list[dict]) -> None:
     kind, package_name = "deb", "simos-debs"
     variant_dir = output_root / kind / label
     manifest_path = variant_dir / "deb-package-registry-result.json"
-    manifest = load_json(manifest_path, f"{kind}/{label} manifest")
+    manifest = load_json(manifest_path, f"{kind}/{label} manifest", confined=True)
     if "tag" not in manifest or manifest["tag"] != "":
         reject(f"{kind}/{label} manifest must contain an empty tag")
     variant = one_signed_variant(manifest, config_ref, label, kind)
@@ -251,8 +342,10 @@ def validate_deb(config_ref: str, label: str, plan: list[dict]) -> None:
     optional_metadata(
         plan, package_name, variant_dir, label, kind,
         (
-            "config-build-info.env", "vehicle.info", "deb-package-info/build-info.json",
-            "deb-package-info/deb-package-registry-result.json",
+            ("config-build-info.env", f"{label}-config-build-info.env"),
+            ("vehicle.info", f"{label}-vehicle.info"),
+            ("deb-package-info/build-info.json", f"{label}-deb-package-info-build-info.json"),
+            ("deb-package-info/deb-package-registry-result.json", f"{label}-deb-package-info-deb-package-registry-result.json"),
         ),
     )
     add_plan(
@@ -275,9 +368,6 @@ if not isinstance(build_id, str) or not BUILD_ID_PATTERN.fullmatch(build_id):
 registry = context.get("registry")
 if not isinstance(registry, dict) or not isinstance(registry.get("project"), str) or not registry["project"]:
     reject("feature context has an invalid Registry target")
-if not output_root.is_dir():
-    reject(f"Feature output directory is missing: {output_root}")
-
 upload_plan: list[dict] = []
 for signed_variant in FORMAL_CONFIG_SOURCE["variants"]:
     validate_resident(signed_variant["ref"], signed_variant["label"], upload_plan)
@@ -301,7 +391,7 @@ for item in upload_plan:
     subprocess.run([
         "curl", "--fail", "--silent", "--show-error", "--location",
         "--header", f"JOB-TOKEN: {os.environ['CI_JOB_TOKEN']}",
-        "--upload-file", str(output_root / item["local_path"]), item["registry_url"],
+        "--upload-file", str(confined_regular_file(output_root / item["local_path"])), item["registry_url"],
     ], check=True)
 
 publish_dir.mkdir(parents=True, exist_ok=True)

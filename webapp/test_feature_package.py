@@ -615,6 +615,18 @@ touch "$PWD/build-all-invoked"
                     write(resident / relative, f"metadata-{label}-{relative}".encode())
                 size, md5, sha256 = digest(resident_files["resident"])
                 resident_files["resident_md5"].write_text(f"{md5}  resident.tar.gz\n", encoding="utf-8")
+                (resident / "resident-packages" / label / "build-info.json").write_text(
+                    json.dumps({
+                        "status": "success",
+                        "label": label,
+                        "config_ref": config_ref,
+                        "artifact_path": f"resident-packages/{label}/resident.tar.gz",
+                        "size": size,
+                        "md5": md5,
+                        "sha256": sha256,
+                    }),
+                    encoding="utf-8",
+                )
                 resident_manifest = {
                     "status": "skipped",
                     "config_ref": config_ref,
@@ -692,11 +704,13 @@ touch "$PWD/build-all-invoked"
         self.assertIn("/simos-resident/T20260831183045_login/360s-resident.tar.gz", uploads)
         self.assertIn("/simos-debs/T20260831183045_login/360-app.deb", uploads)
         self.assertIn("/simos-debs/T20260831183045_login/360s-app.deb", uploads)
+        self.assertIn("/simos-resident/T20260831183045_login/360-root-checksum.md5", uploads)
         result = json.loads((publish / "registry-result.json").read_text(encoding="utf-8"))
         self.assertEqual(result["build_id"], context["build_id"])
         self.assertEqual(result["project"], "OS/simos")
         self.assertEqual({item["package_name"] for item in result["files"]}, {"simos-resident", "simos-debs"})
         self.assertIn("resident/360/resident.tar.gz", {item["nextcloud_path"] for item in result["files"]})
+        self.assertIn("resident/360/metadata/checksum.md5", {item["nextcloud_path"] for item in result["files"]})
         self.assertIn("deb/360/app.deb", {item["nextcloud_path"] for item in result["files"]})
         for item in result["files"]:
             self.assertEqual(set(item), {"package_name", "registry_file", "registry_url", "local_path", "label", "kind", "size", "md5", "sha256", "nextcloud_path"})
@@ -738,7 +752,36 @@ touch "$PWD/build-all-invoked"
             data = json.loads(path.read_text(encoding="utf-8")); data["files"][0]["md5"] = "0" * 32; path.write_text(json.dumps(data), encoding="utf-8")
         assert_rejected("wrong-md5", wrong_md5)
 
+        def tampered_resident_build_info(root):
+            path = root / "resident" / "360" / "resident-packages" / "360" / "build-info.json"
+            data = json.loads(path.read_text(encoding="utf-8")); data["sha256"] = "0" * 64; path.write_text(json.dumps(data), encoding="utf-8")
+        assert_rejected("tampered-resident-build-info", tampered_resident_build_info)
+
         assert_rejected("unlisted-package", lambda root: write(root / "deb" / "360" / "deb-packages" / "360" / "unlisted.deb", b"unlisted"))
+
+        def outside_symlink(root):
+            package = root / "resident" / "360" / "resident-packages" / "360"
+            outside = workspace / "outside-resident.tar.gz"
+            outside.write_bytes((package / "resident.tar.gz").read_bytes())
+            (package / "resident.tar.gz").unlink()
+            (package / "resident.tar.gz").symlink_to(outside)
+        assert_rejected("outside-listed-symlink", outside_symlink)
+
+        def outside_parent_symlink(root):
+            package = root / "resident" / "360" / "resident-packages" / "360"
+            outside = workspace / "outside-resident-package"
+            shutil.copytree(package, outside)
+            shutil.rmtree(package)
+            package.symlink_to(outside, target_is_directory=True)
+        assert_rejected("outside-parent-symlink", outside_parent_symlink)
+
+        def optional_outside_symlink(root):
+            metadata = root / "resident" / "360" / "config-build-info.env"
+            outside = workspace / "outside-config-build-info.env"
+            outside.write_bytes(metadata.read_bytes())
+            metadata.unlink()
+            metadata.symlink_to(outside)
+        assert_rejected("outside-optional-symlink", optional_outside_symlink)
 
         def missing_deb_tag(root):
             path = root / "deb" / "360" / "deb-package-registry-result.json"
