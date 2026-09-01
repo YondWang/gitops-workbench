@@ -230,7 +230,9 @@ def write_curl_config(path: Path, *, url: str, options: list[tuple[str, str]], f
 
 def run_curl(config_path: Path):
     try:
-        return subprocess.run(["curl", "--config", str(config_path)], capture_output=True, text=True, check=False)
+        # -q must be first: curl otherwise reads a runner-provided curlrc
+        # before this protected configuration, which could enable redirects.
+        return subprocess.run(["curl", "-q", "--config", str(config_path)], capture_output=True, text=True, check=False)
     except OSError:
         raise SystemExit("feature Nextcloud publication cannot execute curl") from None
 

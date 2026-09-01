@@ -799,6 +799,8 @@ touch "$PWD/build-all-invoked"
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n"
             "printf '%s\\n' \"$*\" >> \"$FAKE_CURL_LOG\"\n"
+            "skip_default_curlrc=0\n"
+            "if [[ \"${1:-}\" == \"-q\" ]]; then skip_default_curlrc=1; fi\n"
             "config=''\n"
             "for ((index = 1; index <= $#; index++)); do\n"
             "  if [[ \"${!index}\" == \"--config\" ]]; then next=$((index + 1)); config=\"${!next}\"; fi\n"
@@ -817,6 +819,14 @@ touch "$PWD/build-all-invoked"
             "  fi\n"
             "  printf 'download\\n' >> \"$FAKE_CURL_ACTION_LOG\"\n"
             "  if [[ \"${FAKE_CURL_FAILURE:-}\" == \"download\" ]]; then printf 'read-only-job-token' >&2; exit 22; fi\n"
+            "  if [[ \"${FAKE_CURL_FAILURE:-}\" == \"default-curlrc-redirect\" ]]; then\n"
+            "    curl_home=\"${CURL_HOME:-${HOME:-}}\"\n"
+            "    if [[ \"$skip_default_curlrc\" != \"1\" ]] && [[ -f \"$curl_home/.curlrc\" ]] && grep -qx 'location' \"$curl_home/.curlrc\"; then\n"
+            "      printf 'external-request:%s\\n' \"${FAKE_CURL_REDIRECT_TARGET:-https://attacker.test/steal}\" >> \"$FAKE_CURL_ACTION_LOG\"\n"
+            "      sed -n 's/^header = \"\\(.*\\)\"$/external-token:\\1/p' \"$config\" >> \"$FAKE_CURL_ACTION_LOG\"\n"
+            "    fi\n"
+            "    printf '302'; exit 0\n"
+            "  fi\n"
             "  if [[ \"${FAKE_CURL_FAILURE:-}\" == \"redirect\" ]]; then printf '302'; exit 0; fi\n"
             "  output=$(sed -n 's#^output = \\\"\\(.*\\)\\\"$#\\1#p' \"$config\")\n"
             "  printf '%s' \"${FAKE_DOWNLOAD_CONTENT:-downloaded}\" > \"$output\"\n"
@@ -907,7 +917,7 @@ touch "$PWD/build-all-invoked"
         self.assertEqual(success.returncode, 0, success.stderr)
         calls = curl_log.read_text(encoding="utf-8")
         self.assertTrue(calls.strip())
-        self.assertTrue(all(line.startswith("--config ") for line in calls.splitlines()))
+        self.assertTrue(all(line.startswith("-q --config ") for line in calls.splitlines()))
         self.assertNotIn("--location", calls)
         self.assertNotIn("read-only-job-token", calls)
         self.assertNotIn("feature-publisher", calls)
@@ -955,6 +965,24 @@ touch "$PWD/build-all-invoked"
         self.assertEqual(redirect_actions.read_text(encoding="utf-8").splitlines(), ["download"])
         self.assertNotIn("mkcol", redirect_actions.read_text(encoding="utf-8"))
         self.assertFalse(redirect_output.exists())
+
+        curl_home = workspace / "curl-home"
+        curl_home.mkdir(exist_ok=True)
+        (curl_home / ".curlrc").write_text("location\n", encoding="utf-8")
+        default_curlrc_redirect, _default_curlrc_log, default_curlrc_actions, default_curlrc_output = invoke(
+            "default-curlrc-redirect",
+            registry_result(files=valid_files),
+            FAKE_CURL_FAILURE="default-curlrc-redirect",
+            FAKE_CURL_REDIRECT_TARGET="https://attacker.test/stolen-package",
+            HOME=str(curl_home),
+            CURL_HOME=str(curl_home),
+        )
+        self.assertNotEqual(default_curlrc_redirect.returncode, 0, default_curlrc_redirect)
+        default_actions = default_curlrc_actions.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(default_actions, ["download"])
+        self.assertFalse(any(action.startswith("external-request:") for action in default_actions))
+        self.assertFalse(any("read-only-job-token" in action for action in default_actions))
+        self.assertFalse(default_curlrc_output.exists())
 
         corrupt, _corrupt_log, corrupt_actions, corrupt_output = invoke("corrupt-download", registry_result(files=valid_files), FAKE_DOWNLOAD_CONTENT="corrupt")
         self.assertNotEqual(corrupt.returncode, 0, corrupt)
