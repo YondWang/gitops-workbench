@@ -52,7 +52,7 @@ Feature 测试包规则：来源必须为 `feature/*`；服务端只读取该分
 
 可信 Feature Pipeline 只包含上下文校验、源码准备、构建、Registry 发布和 Nextcloud 发布，没有 `button_*` 手工操作、Tag、MR、release note 或 OTA Job。构建严格复用冻结的 SimOS 正式入口，每次只生成一个 resident 和一个 deb，输出目录为 `feature-output/resident` 与 `feature-output/deb`。
 
-Feature 的 `T...` build ID 只写入临时元数据、签名上下文、构建记录和发布路径，不作为正式构建子进程的 Git Tag。可信 Registry 发布器只接受这四个构建实例生成并验证过的 manifest，分别发布到以下两个 Generic Package：
+Feature 的 `T...` build ID 只写入临时元数据、签名上下文、构建记录和发布路径，不作为正式构建子进程的 Git Tag。resident 与 deb 各自完成构建后，在构建 Runner 本地校验并上传对应 manifest 到 Generic Package Registry；后续 Nextcloud Job 只接收小型 manifest artifact 并从 Registry 下载真实包，避免把大包经 GitLab Coordinator 二次传输。两个包分别发布到以下 Generic Package：
 
 ```text
 OS/simos / simos-resident / TyyyyMMddHHmmss_功能描述
@@ -61,7 +61,7 @@ OS/simos / simos-debs     / TyyyyMMddHHmmss_功能描述
 
 Nextcloud 发布器只下载该受信 Registry 清单中的精确 URL，并使用 `云盘分类/T.../resident/...`、`云盘分类/T.../deb/...` 平面目录；不扫描 Feature 工作目录，也不执行 Feature 源码中的发布脚本。所有 Registry 清单和路径会在第一次网络请求前验证，下载内容通过记录的大小、MD5 和 SHA-256 再校验后才写入 Nextcloud。
 
-GitLab 管理员必须将 `ci/feature-package` 设为受保护分支，并在 Workbench 项目受保护环境中维护以下变量：`GITOPS_FEATURE_CONTEXT_HMAC_KEY`（与 Workbench 服务端一致）、`GITOPS_FEATURE_BUILD_IMAGE`、`GITOPS_FEATURE_SIMOS_PROJECT_ID`、`GITOPS_FEATURE_NEXTCLOUD_URL`、`GITOPS_FEATURE_NEXTCLOUD_USER`、`GITOPS_FEATURE_NEXTCLOUD_PASSWORD`。其中 HMAC Key、Nextcloud 账号和密码必须 masked/protected；`gitops-feature-publisher` Runner 只能分配给受保护的发布 Job 并持有 Registry/Nextcloud 权限。`simos-feature-build` 必须是无 Docker socket、无发布凭据的非特权容器 Runner，且其 Job Token 仅需读取 OS/simos、选中子模块与 OS/config 的权限。
+GitLab 管理员必须将 `ci/feature-package` 设为受保护分支，并在 Workbench 项目受保护环境中维护以下变量：`GITOPS_FEATURE_CONTEXT_HMAC_KEY`（与 Workbench 服务端一致）、`GITOPS_FEATURE_BUILD_IMAGE`、`GITOPS_FEATURE_SIMOS_PROJECT_ID`、`GITOPS_FEATURE_NEXTCLOUD_URL`、`GITOPS_FEATURE_NEXTCLOUD_USER`、`GITOPS_FEATURE_NEXTCLOUD_PASSWORD`。其中 HMAC Key、Nextcloud 账号和密码必须 masked/protected；构建 Job 使用内置 `CI_JOB_TOKEN` 将本地产物写入 Generic Package Registry，但不接触 Nextcloud 凭据；`gitops-feature-publisher` Runner 只负责受保护的 Nextcloud 下载/发布 Job。`simos-feature-build` 必须是无 Docker socket 的非特权容器 Runner，Job Token 需要对 OS/simos Generic Package 具备写入权限，并对选中子模块与 OS/config 具备读取权限。
 
 Feature 打包使用 schema 3 签名上下文。Config 是可选的普通仓库；启用后与其他子库使用相同的 Feature/基线分支解析并冻结 SHA，不再使用 `SIMBOT_R6_A/B` 矩阵。每次 Pipeline 仅生成一个 resident 和一个 deb，阶段为 `package`、`publish`。`TyyyyMMddHHmmss_描述` 仅作为构建 ID、Generic Package 版本及 Nextcloud 目录名，不是 Git Tag；Feature 流程不会创建 Tag、分支、MR、release note 或 OTA 任务。
 

@@ -47,12 +47,23 @@ feature_build_resident:
     # Each build independently freezes the signed SimOS/component snapshot.
     - bash .gitlab/scripts/feature-package-prepare.sh feature-context.json feature-source
     - bash .gitlab/scripts/feature-package-build.sh resident feature-source feature-output
+    # Upload the large resident payload while it is still local to the build
+    # runner; only the verified Registry plan is passed to later jobs.
+    - bash .gitlab/scripts/feature-package-publish-registry.sh resident feature-context.json feature-output feature-publish
+  after_script:
+    # Never archive the large resident payload through the GitLab coordinator.
+    - rm -rf feature-output/resident/resident-packages feature-output/resident/deb-packages
   artifacts:
     when: always
     expire_in: 1 day
     paths:
       - feature-context.json
-      - feature-output/
+      - feature-output/resident/package-registry-result.json
+      - feature-output/resident/build-info.json
+      - feature-output/resident/checksums.txt
+      - feature-output/resident/checksum.md5
+      - feature-output/resident/resident-package-info/
+      - feature-publish/
 
 feature_build_deb:
   extends: .feature_package_rules
@@ -74,51 +85,56 @@ feature_build_deb:
   script:
     - bash .gitlab/scripts/feature-package-prepare.sh feature-context.json feature-source
     - bash .gitlab/scripts/feature-package-build.sh deb feature-source feature-output
+    - bash .gitlab/scripts/feature-package-publish-registry.sh deb feature-context.json feature-output feature-publish
+  after_script:
+    # Never archive the large deb payload through the GitLab coordinator.
+    - rm -rf feature-output/deb/deb-packages feature-output/deb/deb_packages
   artifacts:
     when: always
     expire_in: 1 day
     paths:
       - feature-context.json
-      - feature-output/
+      - feature-output/deb/deb-package-registry-result.json
+      - feature-output/deb/build-info.json
+      - feature-output/deb/checksums.txt
+      - feature-output/deb/checksum.md5
+      - feature-output/deb/deb-package-info/
+      - feature-publish/
 
-feature_publish_registry:
+feature_publish_nextcloud_resident:
   extends: .feature_package_rules
   stage: publish
-  # Reuse the currently assigned protected publishing Runner. It is kept
-  # separate from the non-privileged Feature build Runner.
   tags: ["gitops-feature-publisher"]
   image: "$GITOPS_FEATURE_BUILD_IMAGE"
   environment:
-    name: feature-package-registry
+    name: feature-package-nextcloud-resident
   variables:
     GIT_STRATEGY: fetch
   needs:
     - job: feature_build_resident
       artifacts: true
-    - job: feature_build_deb
-      artifacts: true
   script:
-    - bash .gitlab/scripts/feature-package-publish-registry.sh feature-context.json feature-output feature-publish
+    - bash .gitlab/scripts/feature-package-publish-nextcloud.sh resident feature-context.json feature-publish feature-package-result.json
   artifacts:
-    expire_in: 7 days
+    when: always
+    expire_in: 30 days
     paths:
-      - feature-context.json
-      - feature-publish/
+      - feature-package-result.json
 
-feature_publish_nextcloud:
+feature_publish_nextcloud_deb:
   extends: .feature_package_rules
   stage: publish
   tags: ["gitops-feature-publisher"]
   image: "$GITOPS_FEATURE_BUILD_IMAGE"
   environment:
-    name: feature-package-nextcloud
+    name: feature-package-nextcloud-deb
   variables:
     GIT_STRATEGY: fetch
   needs:
-    - job: feature_publish_registry
+    - job: feature_build_deb
       artifacts: true
   script:
-    - bash .gitlab/scripts/feature-package-publish-nextcloud.sh feature-context.json feature-publish feature-package-result.json
+    - bash .gitlab/scripts/feature-package-publish-nextcloud.sh deb feature-context.json feature-publish feature-package-result.json
   artifacts:
     when: always
     expire_in: 30 days

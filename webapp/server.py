@@ -1891,13 +1891,32 @@ class GitOpsApp:
         artifact = getattr(target.client, "job_artifact_file_text", None)
         if not callable(jobs) or not callable(artifact):
             return None
+        results: dict[str, dict[str, Any]] = {}
         for job in jobs(pipeline_id):
-            if str(job.get("name") or "") != "feature_publish_nextcloud":
+            name = str(job.get("name") or "")
+            if name not in {"feature_publish_nextcloud_resident", "feature_publish_nextcloud_deb"}:
                 continue
-            text = artifact(job.get("id"), "feature-package-result.json")
-            result = json.loads(text)
-            return result if isinstance(result, dict) else None
-        return None
+            kind = "resident" if name.endswith("resident") else "deb"
+            try:
+                text = artifact(job.get("id"), "feature-package-result.json")
+                value = json.loads(text)
+            except Exception:
+                continue
+            if isinstance(value, dict):
+                results[kind] = value
+        if len(results) != 2:
+            return None
+        resident, deb = results["resident"], results["deb"]
+        if resident.get("build_id") != deb.get("build_id"):
+            return None
+        return {
+            "status": "success" if resident.get("status") == "success" and deb.get("status") == "success" else "failed",
+            "build_id": resident.get("build_id"),
+            "components": resident.get("components") or deb.get("components") or [],
+            "registry": {"resident": resident.get("registry") or {}, "deb": deb.get("registry") or {}},
+            "nextcloud": {"resident": resident.get("nextcloud") or {}, "deb": deb.get("nextcloud") or {}},
+            "results": {"resident": resident, "deb": deb},
+        }
 
     def delete_tags(self, payload: dict[str, Any]) -> dict[str, Any]:
         tag_names = parse_tag_names(payload.get("tags", ""))
@@ -3235,6 +3254,14 @@ def feature_submodule_paths(simos_client: Any, source_ref: str, repositories: li
             continue
         path = paths_by_project.get(repository.project.strip("/"))
         if not path:
+            if is_config_repo(repository):
+                # Config is intentionally checked out by the formal SimOS CI
+                # entrypoints, not by `git submodule update`.  It may therefore
+                # be absent from older SimOS commits; keep the normal
+                # src/config location so prepare can clone the signed
+                # component directly.
+                result[repository.id] = configured_submodule_path(repository)
+                continue
             raise ValueError(
                 f"{repository.id} 不在 SimOS 来源提交 {source_ref} 的 .gitmodules 中，"
                 "无法冻结其子模块路径；请将该 gitlink 合入 SimOS Feature 分支，"

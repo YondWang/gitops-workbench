@@ -197,11 +197,10 @@ class SimulatedGitLabClient:
                 build_id = str(context["build_id"])
                 category = str(context["cloud_category"])
                 pipeline["feature_result"] = {
-                    "status": "success",
-                    "build_id": build_id,
+                    "status": "success", "build_id": build_id,
                     "components": context.get("components", []),
-                    "registry": {"project": context["registry"]["project"], "package_version": build_id},
-                    "nextcloud": {"cloud_dir": f"{category}/{build_id}"},
+                    "resident": {"status": "success", "build_id": build_id, "components": context.get("components", []), "registry": {"project": context["registry"]["project"], "package_version": build_id, "kind": "resident"}, "nextcloud": {"cloud_dir": f"{category}/{build_id}/resident"}},
+                    "deb": {"status": "success", "build_id": build_id, "components": context.get("components", []), "registry": {"project": context["registry"]["project"], "package_version": build_id, "kind": "deb"}, "nextcloud": {"cloud_dir": f"{category}/{build_id}/deb"}},
                 }
             except Exception as exc:
                 pipeline.update({"status": "failed", "feature_result": {"status": "failed", "error": str(exc)}})
@@ -222,7 +221,10 @@ class SimulatedGitLabClient:
     def pipeline_jobs(self, pipeline_id: int | str) -> list[dict[str, Any]]:
         pipeline = next((item for item in self._load()["pipelines"] if str(item.get("id")) == str(pipeline_id)), None)
         if pipeline and pipeline.get("feature_result") is not None:
-            return [{"id": f"{pipeline_id}-feature-publish", "name": "feature_publish_nextcloud", "status": pipeline["status"], "pipeline": {"id": int(pipeline_id)}}]
+            return [
+                {"id": f"{pipeline_id}-feature-publish-resident", "name": "feature_publish_nextcloud_resident", "status": pipeline["status"], "pipeline": {"id": int(pipeline_id)}},
+                {"id": f"{pipeline_id}-feature-publish-deb", "name": "feature_publish_nextcloud_deb", "status": pipeline["status"], "pipeline": {"id": int(pipeline_id)}},
+            ]
         return [{"id": f"{pipeline_id}-package", "name": "package", "status": "success", "pipeline": {"id": int(pipeline_id)}}]
 
     def job_artifact_file_text(self, job_id: int | str, artifact_path: str) -> str:
@@ -232,7 +234,9 @@ class SimulatedGitLabClient:
         pipeline = next((item for item in self._load()["pipelines"] if str(item.get("id")) == pipeline_id), None)
         if not pipeline or pipeline.get("feature_result") is None:
             raise GitLabError("模拟 Feature 构建结果不存在", status=404, payload={})
-        return json.dumps(pipeline["feature_result"], ensure_ascii=False)
+        feature = pipeline["feature_result"]
+        kind = "resident" if str(job_id).endswith("resident") else "deb"
+        return json.dumps(feature.get(kind) or feature, ensure_ascii=False)
 
     def reset(self) -> None:
         state = self._load()

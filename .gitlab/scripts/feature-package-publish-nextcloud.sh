@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-context_path=${1:?context required}
-publish_dir=${2:?registry result directory required}
-result_path=${3:?result required}
+kind=${1:?kind required}
+context_path=${2:?context required}
+publish_dir=${3:?registry result directory required}
+result_path=${4:?result required}
+case "$kind" in resident|deb) ;; *) echo "feature Nextcloud: kind must be resident or deb" >&2; exit 2;; esac
 : "${CI_JOB_TOKEN:?CI_JOB_TOKEN is required}"
 : "${CI_API_V4_URL:?CI_API_V4_URL is required}"
 : "${GITOPS_FEATURE_SIMOS_PROJECT_ID:?GITOPS_FEATURE_SIMOS_PROJECT_ID is required}"
@@ -14,7 +16,7 @@ result_path=${3:?result required}
 # Registry publication has already verified the frozen formal manifests. This
 # publisher trusts only that artifact and the signed context, never the
 # Feature checkout or a locally scanned output directory.
-python3 - "$context_path" "$publish_dir/registry-result.json" "$result_path" <<'PY'
+python3 - "$kind" "$context_path" "$publish_dir/registry-result.json" "$result_path" <<'PY'
 import hashlib
 import json
 import os
@@ -26,7 +28,7 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 
-context_path, registry_path, result_path = map(Path, sys.argv[1:])
+kind, context_path, registry_path, result_path = sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4])
 BUILD_ID_PATTERN = re.compile(r"T\d{14}_[A-Za-z0-9.-]+$")
 MD5_PATTERN = re.compile(r"[0-9a-f]{32}$")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}$")
@@ -121,13 +123,15 @@ if registry.get("build_id") != build_id:
     reject("Registry result build_id does not match Feature context")
 if registry.get("project") != registry_target["project"]:
     reject("Registry result project does not match Feature context")
-for kind, package_name in PACKAGE_NAMES.items():
-    package = registry.get(kind)
-    if not isinstance(package, dict) or package.get("package_name") != package_name or package.get("package_version") != build_id:
-        reject(f"Registry result has an invalid {kind} package")
+if registry.get("kind") != kind:
+    reject("Registry result kind does not match publisher kind")
+package_name = PACKAGE_NAMES[kind]
+package = registry.get(kind)
+if not isinstance(package, dict) or package.get("package_name") != package_name or package.get("package_version") != build_id:
+    reject(f"Registry result has an invalid {kind} package")
 files = registry.get("files")
-if not isinstance(files, list) or not files:
-    reject("Registry result has no files")
+if not isinstance(files, list):
+    reject("Registry result files must be a list")
 
 # Complete every structural validation before the first curl. The publishing
 # plan is immutable after this point, preventing partially accepted paths.
@@ -274,7 +278,7 @@ result = {
     "components": context.get("components", []),
     "registry": registry,
     "nextcloud": {
-        "cloud_dir": "/".join(directory_parts),
+        "cloud_dir": "/".join((*directory_parts, kind)),
         "files": published_files,
     },
 }
