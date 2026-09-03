@@ -3235,6 +3235,14 @@ def feature_submodule_paths(simos_client: Any, source_ref: str, repositories: li
             continue
         path = paths_by_project.get(repository.project.strip("/"))
         if not path:
+            if is_config_repo(repository):
+                # Config is intentionally checked out by the formal SimOS CI
+                # entrypoints, not by `git submodule update`.  It may therefore
+                # be absent from older SimOS commits; keep the normal
+                # src/config location so prepare can clone the signed
+                # component directly.
+                result[repository.id] = configured_submodule_path(repository)
+                continue
             raise ValueError(
                 f"{repository.id} 不在 SimOS 来源提交 {source_ref} 的 .gitmodules 中，"
                 "无法冻结其子模块路径；请将该 gitlink 合入 SimOS Feature 分支，"

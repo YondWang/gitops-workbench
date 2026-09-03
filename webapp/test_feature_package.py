@@ -1104,6 +1104,14 @@ touch "$PWD/build-all-invoked"
         prepare = (server.ROOT.parent / ".gitlab" / "scripts" / "feature-package-prepare.sh").read_text(encoding="utf-8")
         self.assertIn('"submodule", "update", "--init", "--recursive"', prepare)
 
+    def test_prepare_allows_config_without_simos_gitlink(self):
+        prepare = (server.ROOT.parent / ".gitlab" / "scripts" / "feature-package-prepare.sh").read_text(encoding="utf-8")
+        self.assertIn('repo_id == "config"', prepare)
+        self.assertIn('git", "clone"', prepare)
+        self.assertIn('component.get("project")', prepare)
+        self.assertIn('update-index", "--cacheinfo"', prepare)
+        self.assertIn('path != "src/config"', prepare)
+
     def test_pipeline_result_is_persisted_only_after_trusted_publish_artifact(self):
         app, clients = make_feature_app()
         started = app.create_feature_package(self.package_payload())

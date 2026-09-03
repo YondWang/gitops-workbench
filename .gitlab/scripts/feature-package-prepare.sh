@@ -35,9 +35,25 @@ run("git", "clone", "--no-checkout", base + source["project"] + ".git", str(root
 run("git", "checkout", "--detach", source["sha"], cwd=root)
 if subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip() != source["sha"]:
     raise SystemExit("simos SHA mismatch after checkout")
-# Populate unselected submodules from the exact SimOS gitlinks. Selected components
-# below are then replaced by their signed Feature/baseline snapshot.
-run("git", "submodule", "update", "--init", "--recursive", cwd=root)
+# Populate unselected submodules from the exact SimOS gitlinks. Config is
+# deliberately excluded: SimOS' formal entrypoints clone it independently,
+# and Feature contexts may select Config even when this source commit has no
+# src/config gitlink. Selected components below are then replaced by their
+# signed Feature/baseline snapshot.
+submodule_paths = []
+try:
+    configured_paths = subprocess.check_output(
+        ["git", "config", "--file", ".gitmodules", "--get-regexp", r"submodule\..*\.path"],
+        cwd=root, text=True,
+    ).splitlines()
+except subprocess.CalledProcessError:
+    configured_paths = []
+for line in configured_paths:
+    path = line.split(None, 1)[1].strip() if " " in line else ""
+    if path and path != "src/config":
+        submodule_paths.append(path)
+if submodule_paths:
+    run("git", "submodule", "update", "--init", "--recursive", *submodule_paths, cwd=root)
 for component in context["components"]:
     repo_id = component.get("repository_id") or component.get("repo")
     component_sha = component.get("commit_id") or component.get("sha")
@@ -46,24 +62,43 @@ for component in context["components"]:
     path = component.get("submodule_path") or "src/" + repo_id
     target = root / path
     if not (target / ".git").exists():
+        if repo_id == "config":
+            # SimOS' formal CI treats Config as an independently checked-out
+            # repository (it is intentionally excluded from the normal
+            # submodule update).  Feature packaging follows that contract:
+            # clone the signed Config component directly when the frozen
+            # SimOS commit has no src/config gitlink.
+            if target.exists():
+                if any(target.iterdir()):
+                    raise SystemExit(
+                        "config checkout path is not an empty directory: " + str(path)
+                    )
+                target.rmdir()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            project = str(component.get("project") or "").strip().strip("/")
+            if not project:
+                raise SystemExit("config component project is missing")
+            run("git", "clone", "--no-checkout", base + project + ".git", str(target))
+            run("git", "checkout", "--detach", component_sha, cwd=target)
+        else:
         # A selected component must be represented by a gitlink in the frozen
         # SimOS commit. Never silently clone a repository into an arbitrary
         # directory: doing so would break the signed snapshot contract and
         # make the resulting source tree differ from the source SHA.
-        try:
-            tree_entry = subprocess.check_output(
-                ["git", "ls-tree", "HEAD", "--", path], cwd=root, text=True
-            ).strip()
-        except subprocess.CalledProcessError:
-            tree_entry = ""
-        source_sha = str(source.get("sha") or "")
-        raise SystemExit(
-            "selected component %s requires submodule %s, but frozen SimOS "
-            "source commit %s does not contain an initialized gitlink (ls-tree: %s); "
-            "update the SimOS Feature branch/gitlink or remove this component "
-            "from the Feature selection"
-            % (repo_id, path, source_sha, tree_entry or "missing")
-        )
+            try:
+                tree_entry = subprocess.check_output(
+                    ["git", "ls-tree", "HEAD", "--", path], cwd=root, text=True
+                ).strip()
+            except subprocess.CalledProcessError:
+                tree_entry = ""
+            source_sha = str(source.get("sha") or "")
+            raise SystemExit(
+                "selected component %s requires submodule %s, but frozen SimOS "
+                "source commit %s does not contain an initialized gitlink (ls-tree: %s); "
+                "update the SimOS Feature branch/gitlink or remove this component "
+                "from the Feature selection"
+                % (repo_id, path, source_sha, tree_entry or "missing")
+            )
     run("git", "fetch", "--depth", "1", "origin", component_sha, cwd=target)
     run("git", "checkout", "--detach", component_sha, cwd=target)
     if subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=target, text=True).strip() != component_sha:
