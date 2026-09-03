@@ -46,7 +46,24 @@ for component in context["components"]:
     path = component.get("submodule_path") or "src/" + repo_id
     target = root / path
     if not (target / ".git").exists():
-        raise SystemExit("missing initialized submodule: " + path)
+        # A selected component must be represented by a gitlink in the frozen
+        # SimOS commit. Never silently clone a repository into an arbitrary
+        # directory: doing so would break the signed snapshot contract and
+        # make the resulting source tree differ from the source SHA.
+        try:
+            tree_entry = subprocess.check_output(
+                ["git", "ls-tree", "HEAD", "--", path], cwd=root, text=True
+            ).strip()
+        except subprocess.CalledProcessError:
+            tree_entry = ""
+        source_sha = str(source.get("sha") or "")
+        raise SystemExit(
+            "selected component %s requires submodule %s, but frozen SimOS "
+            "source commit %s does not contain an initialized gitlink (ls-tree: %s); "
+            "update the SimOS Feature branch/gitlink or remove this component "
+            "from the Feature selection"
+            % (repo_id, path, source_sha, tree_entry or "missing")
+        )
     run("git", "fetch", "--depth", "1", "origin", component_sha, cwd=target)
     run("git", "checkout", "--detach", component_sha, cwd=target)
     if subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=target, text=True).strip() != component_sha:

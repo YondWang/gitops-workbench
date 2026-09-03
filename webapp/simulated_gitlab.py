@@ -100,7 +100,21 @@ class SimulatedGitLabClient:
 
     def get_file_text(self, file_path: str, ref: str) -> str:
         state = self._load()
-        branch = self._repo(state)["branches"].get(ref)
+        repository = self._repo(state)
+        branch = repository["branches"].get(ref)
+        # Real GitLab accepts a commit SHA as `ref`.  Simulation state stores
+        # the file snapshot alongside each branch commit, so resolve an exact
+        # commit id as well; this keeps Feature contexts tied to the frozen
+        # SimOS SHA instead of a moving branch name.
+        if branch is None:
+            branch = next(
+                (
+                    item
+                    for item in repository["branches"].values()
+                    if str(item.get("commit_id") or "") == str(ref)
+                ),
+                None,
+            )
         if branch is None or file_path not in branch.get("files", {}):
             raise GitLabError(f"文件不存在：{file_path}@{ref}", status=404, payload={})
         return str(branch["files"][file_path])

@@ -1653,10 +1653,24 @@ class GitOpsApp:
         simos_repository = next((repository for repository in repositories if is_simos_repo(repository)), None)
         if simos_repository is None:
             raise ValueError("Feature 包需要启用 simos 仓库")
+        # Resolve the SimOS commit first, then read .gitmodules from that exact
+        # commit. Reading .gitmodules from a moving branch can race with a
+        # branch update and produce a context whose component paths do not
+        # belong to the frozen source SHA (the CI prepare job would then fail
+        # much later with a vague "missing initialized submodule" error).
+        simos_client = self.target(simos_repository.id).client
+        simos_client.project()
+        simos_branches = set(simos_client.branch_names())
+        if ref not in simos_branches:
+            raise ValueError(f"simos 不存在 Feature 分支 {ref}")
+        simos_commit = simos_client.branch(ref).get("commit") or {}
+        simos_sha = str(simos_commit.get("id") or simos_commit.get("short_id") or "")
+        if not simos_sha:
+            raise ValueError(f"simos 未读取到 {ref} 的 commit")
         # The selected SimOS commit is the source of truth for submodule
         # directory names. Repository IDs are not paths: mapengine, PnC and
         # localization demonstrate why deriving src/<repository-id> is wrong.
-        feature_paths = feature_submodule_paths(self.target(simos_repository.id).client, ref, repositories)
+        feature_paths = feature_submodule_paths(simos_client, simos_sha, repositories)
         if baseline_ref:
             resolutions = self.resolve_full_release_components(ref, baseline_ref, repositories)
             for item in resolutions:
@@ -3222,7 +3236,9 @@ def feature_submodule_paths(simos_client: Any, source_ref: str, repositories: li
         path = paths_by_project.get(repository.project.strip("/"))
         if not path:
             raise ValueError(
-                f"{repository.id} 不在 SimOS 来源分支 {source_ref} 的 .gitmodules 中，无法冻结其子模块路径"
+                f"{repository.id} 不在 SimOS 来源提交 {source_ref} 的 .gitmodules 中，"
+                "无法冻结其子模块路径；请将该 gitlink 合入 SimOS Feature 分支，"
+                "或取消选择该组件"
             )
         result[repository.id] = path
     return result
