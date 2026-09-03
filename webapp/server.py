@@ -49,10 +49,6 @@ SCHEDULE_RUNS_PATH = DATA_ROOT / "schedule-runs.json"
 RELEASE_TASKS_PATH = Path(os.environ.get("GITOPS_RELEASE_TASKS_PATH", str(DATA_ROOT / "release_tasks.json")))
 RELEASE_RUNS_PATH = Path(os.environ.get("GITOPS_RELEASE_RUNS_PATH", str(DATA_ROOT / "release_runs.json")))
 FEATURE_PACKAGE_RUNS_PATH = Path(os.environ.get("GITOPS_FEATURE_PACKAGE_RUNS_PATH", str(DATA_ROOT / "feature_package_runs.json")))
-FORMAL_FEATURE_CONFIG_VARIANTS = (
-    {"ref": "SIMBOT_R6_A", "label": "360"},
-    {"ref": "SIMBOT_R6_B", "label": "360s"},
-)
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "gitlab": {
@@ -146,14 +142,6 @@ VERSION_MERGE_MAX_ATTEMPTS = 6
 RELEASE_RUNS_LOCK = threading.RLock()
 FEATURE_PACKAGE_LOCK = threading.RLock()
 FEATURE_PACKAGE_RUNS_LOCK = threading.RLock()
-
-
-def formal_feature_config_source() -> dict[str, Any]:
-    return {
-        "mode": "formal_matrix",
-        "project": "OS/config",
-        "variants": [dict(item) for item in FORMAL_FEATURE_CONFIG_VARIANTS],
-    }
 
 
 def release_runs_locked(method: Callable[..., Any]) -> Callable[..., Any]:
@@ -325,7 +313,15 @@ class GitOpsApp:
             # a product's common source branch calculation.
             targets = [self.target(repo_id) for repo_id in self.release_repository_ids()]
         else:
-            targets = self.targets({"repository_ids": repository_ids})
+            # Ref discovery is read-only; Feature package selection may include
+            # the optional config repository. Write operations still reject it.
+            targets = []
+            ci_repo_id = str(self.config.get("feature_package_ci", {}).get("repository_id") or "")
+            for repo_id in repository_ids:
+                repo = self.store.get(str(repo_id))
+                if not repo.enabled or repo.id == ci_repo_id:
+                    raise ValueError(f"仓库未启用：{repo_id}")
+                targets.append(OperationTarget(repo=repo, client=self.client_for(repo)))
         if not targets:
             raise ValueError("没有启用的仓库")
 
@@ -1664,7 +1660,9 @@ class GitOpsApp:
         if baseline_ref:
             resolutions = self.resolve_full_release_components(ref, baseline_ref, repositories)
             for item in resolutions:
-                if item["repository_id"] in feature_paths:
+                if is_simos_repo(next(repository for repository in repositories if repository.id == item["repository_id"])):
+                    item["submodule_path"] = ""
+                elif item["repository_id"] in feature_paths:
                     item["submodule_path"] = feature_paths[item["repository_id"]]
             return resolutions
         resolutions: list[dict[str, str]] = []
@@ -1753,17 +1751,19 @@ class GitOpsApp:
         signed_components = [
             {
                 "repo": item["repository_id"],
+                "repository_id": item["repository_id"],
                 "project": self.store.get(item["repository_id"]).project,
                 "submodule_path": item["submodule_path"],
-                "ref": item["resolved_ref"],
-                "sha": item["commit_id"],
+                "requested_ref": item["requested_ref"],
+                "resolved_ref": item["resolved_ref"],
+                "commit_id": item["commit_id"],
+                "resolution": item["resolution"],
                 "component": item["component"],
             }
             for item in resolutions
         ]
-        config_source = formal_feature_config_source()
         context = {
-            "schema": 2,
+            "schema": 3,
             "run_id": run_id,
             "expires_at": (local_now + timedelta(minutes=15)).isoformat(),
             "build_id": package_version,
@@ -1771,7 +1771,6 @@ class GitOpsApp:
             "source": {"repository_id": simos_target.repo.id, "project": simos_target.repo.project, "ref": ref, "sha": simos_resolution["commit_id"]},
             "baseline_ref": baseline_ref,
             "cloud_category": cloud_category,
-            "config_source": config_source,
             "components": signed_components,
             "registry": {"repository_id": registry_target.repo.id, "project": registry_target.repo.project},
             "metadata": {
@@ -1794,7 +1793,6 @@ class GitOpsApp:
             "repository_ids": [target.repo.id for target in targets],
             "baseline_ref": baseline_ref,
             "cloud_category": cloud_category,
-            "config_source": config_source,
             "component_resolutions": resolutions,
             "registry_project": registry_target.repo.project,
             "ci_project": ci_target.repo.project,
@@ -2509,7 +2507,24 @@ class GitOpsApp:
         return targets
 
     def feature_package_targets(self, payload: dict[str, Any]) -> list[OperationTarget]:
-        targets = self.targets(payload)
+        # Feature packaging is the sole workflow that may *select* config as
+        # a read-only component snapshot. Other write operations continue to
+        # use targets(), which rejects config.
+        raw_ids = payload.get("repository_ids")
+        if not isinstance(raw_ids, list) or not raw_ids:
+            raise ValueError("repository_ids 必须是非空数组")
+        repo_ids = [str(item).strip() for item in raw_ids]
+        if len(repo_ids) != len(set(repo_ids)) or any(not item for item in repo_ids):
+            raise ValueError("repository_ids 不能重复且不能为空")
+        targets: list[OperationTarget] = []
+        ci_repo_id = str(self.config.get("feature_package_ci", {}).get("repository_id") or "")
+        for repo_id in repo_ids:
+            repo = self.store.get(repo_id)
+            if not repo.enabled:
+                raise ValueError(f"仓库未启用：{repo_id}")
+            if repo.id == ci_repo_id:
+                raise ValueError(f"不能作为业务写入目标：{repo_id}")
+            targets.append(OperationTarget(repo=repo, client=self.client_for(repo)))
         if not any(is_simos_repo(target.repo) for target in targets):
             raise ValueError("Feature 包必须选择 simos 仓库")
         validate_submodule_configs([target.repo for target in targets])

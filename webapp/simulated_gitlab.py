@@ -184,9 +184,10 @@ class SimulatedGitLabClient:
                 category = str(context["cloud_category"])
                 pipeline["feature_result"] = {
                     "status": "success",
+                    "build_id": build_id,
+                    "components": context.get("components", []),
                     "registry": {"project": context["registry"]["project"], "package_version": build_id},
                     "nextcloud": {"cloud_dir": f"{category}/{build_id}"},
-                    "config_source": context["config_source"],
                 }
             except Exception as exc:
                 pipeline.update({"status": "failed", "feature_result": {"status": "failed", "error": str(exc)}})

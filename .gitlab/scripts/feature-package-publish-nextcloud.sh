@@ -31,19 +31,8 @@ BUILD_ID_PATTERN = re.compile(r"T\d{14}_[A-Za-z0-9.-]+$")
 MD5_PATTERN = re.compile(r"[0-9a-f]{32}$")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}$")
 PROJECT_ID_PATTERN = re.compile(r"[1-9][0-9]*$")
-ITEM_KEYS = {
-    "package_name", "registry_file", "registry_url", "local_path", "label",
-    "kind", "size", "md5", "sha256", "nextcloud_path",
-}
+ITEM_KEYS = {"package_name", "registry_file", "registry_url", "local_path", "kind", "size", "md5", "sha256", "nextcloud_path"}
 PACKAGE_NAMES = {"resident": "simos-resident", "deb": "simos-debs"}
-FORMAL_CONFIG_SOURCE = {
-    "mode": "formal_matrix",
-    "project": "OS/config",
-    "variants": [
-        {"ref": "SIMBOT_R6_A", "label": "360"},
-        {"ref": "SIMBOT_R6_B", "label": "360s"},
-    ],
-}
 
 
 def reject(message: str) -> None:
@@ -117,19 +106,8 @@ build_id = context.get("build_id")
 if not isinstance(build_id, str) or not BUILD_ID_PATTERN.fullmatch(build_id):
     reject("Feature context has an invalid build_id")
 cloud_parts = safe_relative_path(context.get("cloud_category"), "cloud category")
-config_source = context.get("config_source")
-if context.get("schema") != 2 or config_source != FORMAL_CONFIG_SOURCE:
-    reject("Feature context does not contain the exact formal config_source")
-variants = config_source.get("variants")
-if not isinstance(variants, list) or not variants:
-    reject("Feature context config_source has no variants")
-signed_labels = set()
-for variant in variants:
-    if not isinstance(variant, dict) or not isinstance(variant.get("label"), str) or not variant["label"]:
-        reject("Feature context config_source has an invalid variant")
-    if variant["label"] in signed_labels:
-        reject("Feature context config_source has duplicate labels")
-    signed_labels.add(variant["label"])
+if context.get("schema") != 3 or "config_source" in context:
+    reject("Feature context must be schema 3 without config_source")
 registry_target = context.get("registry")
 if not isinstance(registry_target, dict) or not isinstance(registry_target.get("project"), str) or not registry_target["project"]:
     reject("Feature context has an invalid Registry target")
@@ -159,18 +137,15 @@ for position, item in enumerate(files):
     if not isinstance(item, dict) or set(item) != ITEM_KEYS:
         reject(f"Registry result file #{position} has an invalid schema")
     kind = item["kind"]
-    label = item["label"]
-    if kind not in PACKAGE_NAMES or not isinstance(label, str) or label not in signed_labels:
-        reject(f"Registry result file #{position} has an invalid kind or label")
+    if kind not in PACKAGE_NAMES:
+        reject(f"Registry result file #{position} has an invalid kind")
     if item["package_name"] != PACKAGE_NAMES[kind]:
         reject(f"Registry result file #{position} has an invalid package name")
     registry_file = safe_leaf(item["registry_file"], f"Registry result file #{position} registry_file")
     local_parts = safe_relative_path(item["local_path"], f"Registry result file #{position} local_path")
     nextcloud_parts = safe_relative_path(item["nextcloud_path"], f"Registry result file #{position} nextcloud_path")
-    if nextcloud_parts[:2] != (kind, label):
-        reject(f"Registry result file #{position} nextcloud_path does not match its kind and label")
-    if local_parts[:2] != (kind, label):
-        reject(f"Registry result file #{position} local_path does not match its kind and label")
+    if nextcloud_parts[0] != kind or local_parts[0] != kind:
+        reject(f"Registry result file #{position} path does not match its kind")
     registry_url = validate_url(item["registry_url"], f"Registry result file #{position} registry_url")
     expected_registry_url = (
         f"{gitlab_api}/projects/{project_id}/packages/generic/"
@@ -296,7 +271,7 @@ published_files = [{key: value for key, value in item.items() if key not in {"ne
 result = {
     "status": "success",
     "build_id": build_id,
-    "config_source": config_source,
+    "components": context.get("components", []),
     "registry": registry,
     "nextcloud": {
         "cloud_dir": "/".join(directory_parts),

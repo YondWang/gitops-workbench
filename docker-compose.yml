@@ -21,7 +21,7 @@ services:
     extra_hosts:
       - "www.chancee-shanghai.cn:${GITLAB_HOST_IP:-192.168.110.222}"
     volumes:
-      - /data/gitops-workbench/data:/app/data
+      - gitops-workbench-data:/app/data
       - /data/simos-ci:/data/simos-ci:ro
       - /etc/gitlab/ssl:/etc/gitlab/ssl:ro
     ports:
@@ -41,3 +41,8 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+volumes:
+  gitops-workbench-data:
+    name: gitops-workbench-data
+    external: true

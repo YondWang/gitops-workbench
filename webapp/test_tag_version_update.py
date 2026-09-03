@@ -61,6 +61,32 @@ class FakeStore:
         raise ValueError(f"repo not found: {repo_id}")
 
 
+class RepositoryStoreRecoveryTest(unittest.TestCase):
+    def test_missing_repository_file_is_recreated_from_defaults(self):
+        default = RepositoryConfig("simos", "simos", "https://gitlab.test", "OS/simos")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "repositories.json"
+            store = RepositoryStore(path, [default])
+            path.unlink()
+
+            self.assertEqual([repository.id for repository in store.list()], ["simos"])
+            self.assertTrue(path.is_file())
+
+    def test_production_compose_uses_a_managed_volume_for_application_data(self):
+        compose = (Path(__file__).resolve().parents[1] / "docker-compose.yml").read_text(encoding="utf-8")
+
+        self.assertIn("gitops-workbench-data:/app/data", compose)
+        self.assertIn("gitops-workbench-data:", compose)
+        self.assertIn("external: true", compose)
+        self.assertNotIn("/data/gitops-workbench/data:/app/data", compose)
+
+    def test_deployment_verifies_repository_data_without_an_authenticated_http_request(self):
+        deploy_script = (Path(__file__).resolve().parents[1] / "deploy" / "deploy-to-server.sh").read_text(encoding="utf-8")
+
+        self.assertIn("docker exec gitops-workbench python -c", deploy_script)
+        self.assertNotIn("https://127.0.0.1:9910/api/config", deploy_script)
+
+
 class FakeClient:
     def __init__(
         self,

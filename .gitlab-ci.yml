@@ -105,9 +105,8 @@ image: docker.m.daocloud.io/curlimages/curl:latest
 
 stages:
   - operate
-  - feature_validate
-  - feature_build
-  - feature_publish
+  - package
+  - publish
 
 variables:
   GITLAB_API_URL: "https://www.chancee-shanghai.cn:9900/api/v4"
