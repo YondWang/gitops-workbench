@@ -666,6 +666,7 @@ function fillScheduleForm(schedule = null) {
   form.elements.daily_time.value = next.daily_time || timeFromCron(next.cron || "0 16 * * *");
   renderConfigBranchOptions();
   renderSchedulePreviewFromForm();
+  syncConfigMatrixControls();
 }
 
 function scheduleFormBody() {
@@ -685,6 +686,18 @@ function renderConfigBranchOptions() {
     if (previous && state.configBranches.some((branch) => branch.name === previous)) {
       select.value = previous;
     }
+  });
+}
+
+function syncConfigMatrixControls() {
+  document.querySelectorAll("[data-config-matrix-toggle]").forEach((toggle) => {
+    const form = toggle.closest("form");
+    if (!form) return;
+    const matrix = form.querySelector("[data-config-matrix]");
+    const single = form.querySelector("[data-config-single]");
+    const enabled = toggle.checked;
+    if (matrix) matrix.classList.toggle("hidden", !enabled);
+    if (single) single.classList.toggle("hidden", enabled);
   });
 }
 
@@ -817,6 +830,7 @@ function renderSelectOptions() {
   fillCloudCategoryOptions();
   renderTagDeleteOptions().catch((error) => appendLog("刷新可删除 Tag 失败", error.message));
   syncTagUpdateVersionControl();
+  syncConfigMatrixControls();
   refreshFeaturePackagePreview().catch((error) => setText("#featurePackageVersionPreview", error.message));
 }
 
@@ -843,6 +857,10 @@ function businessRepositories() {
   return state.repositories.filter((repo) => repo.enabled && repo.id !== "config" && repo.id !== "gitops-workbench");
 }
 
+function featurePackageRepositories() {
+  return state.repositories.filter((repo) => repo.enabled && repo.id !== "gitops-workbench");
+}
+
 function renderRepositorySelectors() {
   const mappings = ["release", "feature", "featurePackage", "bugfix", "tag", "tagDelete"];
   const repositories = businessRepositories();
@@ -850,7 +868,8 @@ function renderRepositorySelectors() {
     const root = $(`#${name}Repositories`);
     if (!root) return;
     const selected = Array.from(root.querySelectorAll('input[name="repository_ids"]:checked')).map((input) => input.value);
-    root.innerHTML = repositories.map((repo) => `<label><input type="checkbox" name="repository_ids" value="${escapeHtml(repo.id)}" ${selected.includes(repo.id) ? "checked" : ""} /> ${escapeHtml(repo.name)}</label>`).join("") || "<span class=\"meta\">暂无可操作仓库</span>";
+    const available = name === "featurePackage" ? featurePackageRepositories() : repositories;
+    root.innerHTML = available.map((repo) => `<label><input type="checkbox" name="repository_ids" value="${escapeHtml(repo.id)}" ${selected.includes(repo.id) ? "checked" : ""} /> ${escapeHtml(repo.name)}</label>`).join("") || "<span class=\"meta\">暂无可操作仓库</span>";
   });
 }
 
@@ -1455,6 +1474,7 @@ function bindEvents() {
   $("#featurePackageForm")?.elements.ref?.addEventListener("change", () =>
     refreshFeaturePackagePreview().catch((error) => setText("#featurePackageVersionPreview", error.message)),
   );
+  document.querySelectorAll("[data-config-matrix-toggle]").forEach((toggle) => toggle.addEventListener("change", syncConfigMatrixControls));
   ["ref", "baseline_ref", "cloud_category"].forEach((name) => $("#featurePackageForm")?.elements[name]?.addEventListener("change", () =>
     refreshFeaturePackagePreview().catch((error) => setText("#featurePackageVersionPreview", error.message)),
   ));

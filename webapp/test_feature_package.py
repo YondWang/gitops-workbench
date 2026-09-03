@@ -1074,6 +1074,10 @@ touch "$PWD/build-all-invoked"
         registry_needs = ci.split("feature_publish_registry:", 1)[1].split("feature_publish_nextcloud:", 1)[0]
         self.assertIn("- job: feature_build_resident\n      artifacts: true", registry_needs)
         self.assertIn("- job: feature_build_deb\n      artifacts: true", registry_needs)
+        registry_artifacts = registry_needs.split("  artifacts:", 1)[1]
+        self.assertIn("- feature-context.json", registry_artifacts)
+        self.assertIn("- feature-publish/", registry_artifacts)
+        self.assertNotIn("- feature-output/", registry_artifacts)
         self.assertNotIn("feature_prepare:\n", ci)
         for job, stage in (
             ("feature_context_validate", "feature_validate"),

@@ -40,9 +40,10 @@ class RepositoryConfig:
 class RepositoryStore:
     def __init__(self, path: Path, defaults: list[RepositoryConfig]) -> None:
         self.path = path
+        self.defaults = self._normalize_all(defaults)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
-            self._save(self._normalize_all(defaults))
+            self._save(self.defaults)
         else:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
             repositories = self._normalize_all(raw.get("repositories", []))
@@ -50,7 +51,11 @@ class RepositoryStore:
                 self._save(repositories)
 
     def list(self) -> list[RepositoryConfig]:
-        raw = json.loads(self.path.read_text(encoding="utf-8"))
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            self._save(self.defaults)
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
         return self._normalize_all(raw.get("repositories", []))
 
     def get(self, repo_id: str) -> RepositoryConfig:

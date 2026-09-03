@@ -336,6 +336,14 @@
                   Feature 缺失时回退分支
                   <input name="feature_fallback_ref" value="release" required />
                 </label>
+                <label class="checkline">
+                  <input type="checkbox" name="config_matrix_enabled" checked data-config-matrix-toggle />
+                  使用双配置矩阵（SIMBOT_R6_A / SIMBOT_R6_B）
+                </label>
+                <label data-config-single>
+                  单配置分支（关闭矩阵时）
+                  <input name="config_ref" placeholder="例如 release 或 feature/config_x" />
+                </label>
                 <fieldset class="inline-options" data-config-matrix>
                   <legend>构建配置</legend>
                   <label><input type="checkbox" name="config_matrix" value="SIMBOT_R6_A:360" checked /> SIMBOT_R6_A / 360</label>
@@ -425,6 +433,14 @@
                 <p class="field-hint">
                   SimOS 必须存在代码来源 ref；非 SimOS 仓库缺少该 ref（包括 <code>feature/*</code>）时，使用上方指定的回退分支。
                 </p>
+                <label class="checkline">
+                  <input type="checkbox" name="config_matrix_enabled" checked data-config-matrix-toggle />
+                  使用双配置矩阵（SIMBOT_R6_A / SIMBOT_R6_B）
+                </label>
+                <label data-config-single>
+                  单配置分支（关闭矩阵时）
+                  <input name="config_ref" placeholder="例如 release 或 feature/config_x" />
+                </label>
                 <fieldset class="inline-options" data-config-matrix>
                   <legend>构建配置</legend>
                   <label><input type="checkbox" name="config_matrix" value="SIMBOT_R6_A:360" checked /> SIMBOT_R6_A / 360</label>

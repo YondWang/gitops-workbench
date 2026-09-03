@@ -39,18 +39,20 @@ if subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).st
 # below are then replaced by their signed Feature/baseline snapshot.
 run("git", "submodule", "update", "--init", "--recursive", cwd=root)
 for component in context["components"]:
-    if component["repo"] == source["repository_id"]:
+    repo_id = component.get("repository_id") or component.get("repo")
+    component_sha = component.get("commit_id") or component.get("sha")
+    if repo_id == source["repository_id"]:
         continue
-    path = component.get("submodule_path") or "src/" + component["repo"]
+    path = component.get("submodule_path") or "src/" + repo_id
     target = root / path
     if not (target / ".git").exists():
         raise SystemExit("missing initialized submodule: " + path)
-    run("git", "fetch", "--depth", "1", "origin", component["sha"], cwd=target)
-    run("git", "checkout", "--detach", component["sha"], cwd=target)
-    if subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=target, text=True).strip() != component["sha"]:
-        raise SystemExit("component SHA mismatch: " + component["repo"])
+    run("git", "fetch", "--depth", "1", "origin", component_sha, cwd=target)
+    run("git", "checkout", "--detach", component_sha, cwd=target)
+    if subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=target, text=True).strip() != component_sha:
+        raise SystemExit("component SHA mismatch: " + repo_id)
     run("git", "add", "-f", path, cwd=root)
-    run("git", "update-index", "--cacheinfo", "160000," + component["sha"] + "," + path, cwd=root)
+    run("git", "update-index", "--cacheinfo", "160000," + component_sha + "," + path, cwd=root)
 (root / "version.info").write_text(context["metadata"]["version_info"], encoding="utf-8")
 (root / "software.yaml").write_text(context["metadata"]["software_yaml"], encoding="utf-8")
 PY
