@@ -15,6 +15,7 @@ const state = {
   schedules: [],
   scheduleRuns: [],
   featurePackageRuns: [],
+  accounts: [],
   selectedScheduleRunId: null,
   schedulePreviews: {},
   configBranches: [],
@@ -23,6 +24,67 @@ const state = {
 const RESIDENT_PACKAGE_TAG_RE = /^[A-Za-z0-9._-]+_[VvFfTt]?\d+(?:\.\d+)+_\d{12}$/;
 
 const $ = (selector) => document.querySelector(selector);
+let featurePackageSubmitting = false;
+
+function setFeaturePackageSubmitting(form, submitting) {
+  featurePackageSubmitting = submitting;
+  form?.querySelectorAll("input, select, textarea, button").forEach((control) => {
+    control.disabled = submitting;
+  });
+  const button = form?.querySelector("#createFeaturePackageBtn");
+  if (button) button.textContent = submitting ? "创建中，请稍候…" : "创建测试包";
+}
+
+function showFeaturePackageResult(result, failed = false) {
+  const modal = $("#featurePackageResultModal");
+  if (!modal) return;
+  const error = result?.error || result?.message || "请求未能完成，请稍后重试";
+  const version = result?.version || result?.build_id || result?.run?.version || result?.run?.build_id || "";
+  const pipeline = result?.pipeline?.web_url || result?.run?.pipeline?.web_url || result?.run?.pipeline_url || "";
+  modal.classList.toggle("modal-success", !failed);
+  modal.classList.toggle("modal-error", failed);
+  $("#featurePackageResultTitle").textContent = failed ? "Feature 测试包创建失败" : "Feature 测试包创建成功";
+  $("#featurePackageResultIcon").textContent = failed ? "!" : "✓";
+  $("#featurePackageResultMessage").textContent = failed ? `具体原因：${error}` : "流水线已创建，请在构建记录中查看后续状态。";
+  $("#featurePackageResultVersion").textContent = version ? `测试包版本：${version}` : "";
+  const link = $("#featurePackageResultPipeline");
+  link.hidden = !pipeline;
+  link.href = pipeline || "#";
+  modal.hidden = false;
+  modal.classList.add("open");
+  document.body.classList.add("modal-open");
+  $("#featurePackageResultClose")?.focus();
+}
+
+function closeFeaturePackageResult() {
+  const modal = $("#featurePackageResultModal");
+  if (!modal) return;
+  modal.classList.remove("open");
+  modal.hidden = true;
+  document.body.classList.remove("modal-open");
+}
+
+async function handleFeaturePackageSubmit(form) {
+  if (featurePackageSubmitting) return;
+  // FormData excludes disabled controls. Capture the complete payload before
+  // locking the form so ref/baseline/cloud_category are still submitted.
+  const body = operationBody(form);
+  setFeaturePackageSubmitting(form, true);
+  try {
+    const result = await postJson("/api/feature-package/create", body);
+    appendLog("创建 Feature 测试包", summarizeOperationResult(result));
+    const failed = result?.ok === false;
+    showFeaturePackageResult(result, failed);
+    if (!failed) {
+      await refreshAll().catch((error) => appendLog("刷新 Feature 构建记录失败", error.message));
+    }
+  } catch (error) {
+    appendLog("创建 Feature 测试包失败", error.message);
+    showFeaturePackageResult({ error: error.message }, true);
+  } finally {
+    setFeaturePackageSubmitting(form, false);
+  }
+}
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -378,8 +440,99 @@ function renderSession() {
   document.querySelectorAll("[data-user-block]").forEach((el) => el.classList.toggle("hidden", isAdmin));
   document.querySelectorAll("[data-feature-package-only]").forEach((el) => el.classList.toggle("hidden", !canCreateFeaturePackage));
   document.querySelectorAll("[data-feature-package-denied]").forEach((el) => el.classList.toggle("hidden", canCreateFeaturePackage));
-  if (!isAdmin && ["release", "bugfix", "tag", "schedules", "repositories"].some((id) => $(`#${id}`).classList.contains("active-view"))) {
+  if (!isAdmin && ["release", "bugfix", "tag", "schedules", "repositories", "accounts"].some((id) => $(`#${id}`)?.classList.contains("active-view"))) {
     switchView("overview");
+  }
+}
+
+function renderAccounts() {
+  if (!state.accounts.length && !$("#accounts")?.classList.contains("active-view")) return;
+  const body = $("#accountsBody");
+  if (!body) return;
+  const currentUser = state.session?.username || "";
+  setText("#accountCount", String(state.accounts.length));
+  body.innerHTML =
+    state.accounts
+      .map(
+        (account) => `
+          <tr>
+            <td><strong>${escapeHtml(account.username)}</strong>${account.username === currentUser ? ' <span class="badge muted">当前</span>' : ""}</td>
+            <td><span class="pill">${escapeHtml(account.role)}</span></td>
+            <td class="account-actions">
+              <button type="button" class="secondary small" data-edit-account="${escapeHtml(account.username)}">编辑</button>
+              <button type="button" class="danger small" data-delete-account="${escapeHtml(account.username)}">删除</button>
+            </td>
+          </tr>
+        `,
+      )
+      .join("") || `<tr><td colspan="3">暂无账号，请先添加。</td></tr>`;
+}
+
+function fillAccountForm(account) {
+  const editing = Boolean(account);
+  $("#accountEditingUsername").value = account?.username || "";
+  $("#accountFormTitle").textContent = editing ? `编辑账号：${account.username}` : "添加账号";
+  $("#accountForm").elements.username.value = account?.username || "";
+  $("#accountForm").elements.username.disabled = editing;
+  $("#accountForm").elements.role.value = account?.role || "user";
+  $("#accountForm").elements.password.value = "";
+  $("#accountForm").elements.password.required = !editing;
+  $("#accountPasswordHint").textContent = editing
+    ? "留空表示不修改密码。"
+    : "创建账号时必填密码，不允许使用默认密码。";
+  const message = $("#accountFormMessage");
+  if (message) {
+    message.textContent = "";
+    message.className = "message";
+  }
+}
+
+function resetAccountForm() {
+  fillAccountForm(null);
+}
+
+async function saveAccount(form) {
+  const editingUsername = $("#accountEditingUsername").value;
+  const values = formValues(form);
+  const message = $("#accountFormMessage");
+  try {
+    if (editingUsername) {
+      const result = await api(`/api/accounts/${encodeURIComponent(editingUsername)}`, {
+        method: "PUT",
+        body: JSON.stringify(values),
+      });
+      appendLog("更新账号", result);
+    } else {
+      const result = await postJson("/api/accounts", {
+        username: values.username,
+        role: values.role,
+        password: values.password,
+      });
+      appendLog("添加账号", result);
+      resetAccountForm();
+    }
+    await refreshAll();
+    if (message) {
+      message.textContent = "账号已保存。";
+      message.className = "message ok";
+    }
+  } catch (error) {
+    appendLog("保存账号失败", error.message);
+    if (message) {
+      message.textContent = error.message;
+      message.className = "message error";
+    }
+  }
+}
+
+async function deleteAccount(username) {
+  if (!confirm(`确认删除账号 ${username}？此操作不可撤销。`)) return;
+  try {
+    const result = await api(`/api/accounts/${encodeURIComponent(username)}`, { method: "DELETE" });
+    appendLog("删除账号", result);
+    await refreshAll();
+  } catch (error) {
+    appendLog("删除账号失败", error.message);
   }
 }
 
@@ -441,12 +594,13 @@ function renderFeaturePackageRuns() {
       ? `<a href="${escapeHtml(run.pipeline_url)}" target="_blank" rel="noreferrer">#${escapeHtml(run.pipeline_id || "-")}</a>`
       : "-";
     const cloudDir = run.nextcloud?.cloud_dir || run.result?.nextcloud?.cloud_dir || "-";
-    return `<tr>
+    return `<tr data-run-id="${escapeHtml(run.id || "")}">
       <td><code>${escapeHtml(run.version || "-")}</code></td>
       <td><code>${escapeHtml(run.source_ref || "-")}</code></td>
       <td><span class="pill">${escapeHtml(run.status || "queued")}</span></td>
       <td>${pipeline}</td>
       <td><code>${escapeHtml(cloudDir)}</code></td>
+      <td data-admin-only class="${state.session?.role === "admin" ? "" : "hidden"}"><button type="button" class="danger feature-run-delete" data-run-id="${escapeHtml(run.id || "")}">删除</button></td>
     </tr>`;
   }).join("") || '<tr><td colspan="5">暂无构建记录</td></tr>';
 }
@@ -993,6 +1147,11 @@ function fillSelect(selector, values, preferred = "") {
     select.value = previous;
   } else if (preferred && values.includes(preferred)) {
     select.value = preferred;
+  } else if (values.length) {
+    // Explicitly select the first real option after a refresh. Relying on the
+    // browser's implicit selection can leave a re-rendered select with an
+    // empty value, which then submits an invalid Feature source ref.
+    select.value = values[0];
   }
 }
 
@@ -1009,7 +1168,7 @@ async function refreshAll() {
   if (search) params.set("search", search);
   const simosRepo = simosRepository();
   const configRepo = configRepository();
-  const [branches, tags, commonRefs, simosTags, schedules, configBranches, previews, featureRuns] = await Promise.all([
+  const [branches, tags, commonRefs, simosTags, schedules, configBranches, previews, featureRuns, accounts] = await Promise.all([
     api(`/api/branches?${params}`),
     api(`/api/tags?${params}`),
     api("/api/common-refs").catch((error) => {
@@ -1040,6 +1199,12 @@ async function refreshAll() {
       appendLog("刷新 Feature 构建记录失败", error.message);
       return null;
     }),
+    state.session?.role === "admin"
+      ? api("/api/accounts").catch((error) => {
+          appendLog("刷新账号列表失败", error.message);
+          return null;
+        })
+      : Promise.resolve(null),
   ]);
   state.branches = branches.branches || [];
   state.tags = tags.tags || [];
@@ -1048,6 +1213,7 @@ async function refreshAll() {
   state.schedules = schedules?.tasks || schedules?.schedules || [];
   state.scheduleRuns = schedules?.runs || [];
   state.featurePackageRuns = featureRuns?.runs || [];
+  state.accounts = accounts?.accounts || [];
   applySchedulePreviews(previews);
   state.configBranches = configBranches?.branches || [];
   renderConfigBranchOptions();
@@ -1057,6 +1223,7 @@ async function refreshAll() {
   renderTags();
   renderSchedules();
   renderFeaturePackageRuns();
+  renderAccounts();
 }
 
 async function refreshWorkspace() {
@@ -1469,7 +1636,14 @@ function bindEvents() {
 
   $("#featurePackageForm")?.addEventListener("submit", (event) => {
     event.preventDefault();
-    handleOperation("创建 Feature 测试包", "/api/feature-package/create", event.currentTarget).catch((error) => appendLog("创建 Feature 测试包失败", error.message));
+    handleFeaturePackageSubmit(event.currentTarget);
+  });
+  $("#featurePackageResultClose")?.addEventListener("click", closeFeaturePackageResult);
+  $("#featurePackageResultModal")?.addEventListener("click", (event) => {
+    if (event.target instanceof HTMLElement && event.target.hasAttribute("data-modal-close")) closeFeaturePackageResult();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && $("#featurePackageResultModal")?.classList.contains("open")) closeFeaturePackageResult();
   });
   $("#featurePackageForm")?.elements.ref?.addEventListener("change", () =>
     refreshFeaturePackagePreview().catch((error) => setText("#featurePackageVersionPreview", error.message)),
@@ -1525,6 +1699,15 @@ function bindEvents() {
     rerunExistingTag(event.currentTarget).catch((error) => appendLog("重跑已有 Tag 失败", error.message));
   });
   $("#refreshFeaturePackageRunsBtn")?.addEventListener("click", () => refreshAll().catch((error) => appendLog("刷新 Feature 构建记录失败", error.message)));
+  $("#featurePackageRunsBody")?.addEventListener("click", (event) => {
+    const button = event.target.closest(".feature-run-delete");
+    if (!button) return;
+    const runId = button.dataset.runId;
+    if (!runId || !window.confirm("确定删除这条 Feature 构建记录吗？")) return;
+    api(`/api/feature-package/runs/${encodeURIComponent(runId)}`, { method: "DELETE" })
+      .then(() => refreshAll())
+      .catch((error) => appendLog("删除 Feature 构建记录失败", error.message));
+  });
   $("#scheduleListBody")?.addEventListener("click", (event) => {
     const editId = event.target.dataset.editSchedule;
     const deleteId = event.target.dataset.deleteSchedule;
@@ -1565,6 +1748,23 @@ function bindEvents() {
   });
 
   $("#resetRepositoryFormBtn").addEventListener("click", () => fillRepositoryForm(null));
+
+  $("#accountForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    saveAccount(event.currentTarget).catch((error) => appendLog("保存账号失败", error.message));
+  });
+  $("#resetAccountFormBtn")?.addEventListener("click", resetAccountForm);
+  $("#accountsBody")?.addEventListener("click", (event) => {
+    const editId = event.target.dataset.editAccount;
+    const deleteId = event.target.dataset.deleteAccount;
+    if (editId) {
+      const account = state.accounts.find((item) => item.username === editId);
+      if (account) fillAccountForm(account);
+    }
+    if (deleteId) {
+      deleteAccount(deleteId).catch((error) => appendLog("删除账号失败", error.message));
+    }
+  });
 
   $("#repositoriesBody").addEventListener("click", async (event) => {
     const editId = event.target.dataset.editRepo;

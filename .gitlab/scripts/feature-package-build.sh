@@ -26,13 +26,17 @@ entry=ci/resident/ci-build-resident.sh
 if [[ $kind == deb ]]; then manifest=deb-package-registry-result.json; entry=ci/deb/ci-build-debs.sh; fi
 set +e
 if [[ $kind == resident ]]; then
-  CI_PROJECT_DIR="$source_dir" CI_COMMIT_TAG="" SIMOS_CONFIG_MATRIX_DISABLED=true SIMOS_BUILD_IMAGE="${SIMOS_BUILD_IMAGE:-}" SIMOS_PACKAGE_REGISTRY_NAME=simos-resident SIMOS_PACKAGE_REGISTRY_UPLOAD_ENABLED=false SIMOS_PACKAGE_REGISTRY_UPLOAD_REQUIRED=false bash "$source_dir/$entry"
+  env -u SIMOS_CONFIG_MATRIX -u SIMOS_CONFIG_REFS -u SIMOS_CONFIG_REF -u SIMOS_CONFIG_TAG_MESSAGE -u SIMOS_MATRIX_CONFIG_REF -u SIMOS_MATRIX_CONFIG_LABEL \
+    CI_PROJECT_DIR="$source_dir" CI_COMMIT_TAG="" SIMOS_CONFIG_MATRIX_DISABLED=true SIMOS_BUILD_IMAGE="${SIMOS_BUILD_IMAGE:-}" SIMOS_PACKAGE_REGISTRY_NAME=simos-resident SIMOS_PACKAGE_REGISTRY_UPLOAD_ENABLED=false SIMOS_PACKAGE_REGISTRY_UPLOAD_REQUIRED=false \
+    bash "$source_dir/$entry"
 else
-  CI_PROJECT_DIR="$source_dir" CI_COMMIT_TAG="" SIMOS_CONFIG_MATRIX_DISABLED=true SIMOS_DEB_BUILD_IMAGE="${SIMOS_DEB_BUILD_IMAGE:-}" SIMOS_DEB_BUILD_MODE=all SIMOS_DEB_BUILD_JOBS=16 SIMOS_DEB_PACKAGE_REGISTRY_NAME=simos-debs SIMOS_DEB_PACKAGE_REGISTRY_UPLOAD_ENABLED=false SIMOS_DEB_PACKAGE_REGISTRY_UPLOAD_REQUIRED=false bash "$source_dir/$entry"
+  env -u SIMOS_CONFIG_MATRIX -u SIMOS_CONFIG_REFS -u SIMOS_CONFIG_REF -u SIMOS_CONFIG_TAG_MESSAGE -u SIMOS_MATRIX_CONFIG_REF -u SIMOS_MATRIX_CONFIG_LABEL \
+    CI_PROJECT_DIR="$source_dir" CI_COMMIT_TAG="" SIMOS_CONFIG_MATRIX_DISABLED=true SIMOS_DEB_BUILD_IMAGE="${SIMOS_DEB_BUILD_IMAGE:-}" SIMOS_DEB_BUILD_MODE=all SIMOS_DEB_BUILD_JOBS=16 SIMOS_DEB_PACKAGE_REGISTRY_NAME=simos-debs SIMOS_DEB_PACKAGE_REGISTRY_UPLOAD_ENABLED=false SIMOS_DEB_PACKAGE_REGISTRY_UPLOAD_REQUIRED=false \
+    bash "$source_dir/$entry"
 fi
 child_status=$?
 set -e
-for path in resident-packages resident-package-info deb-packages deb-package-info package-registry-result.json deb-package-registry-result.json build-info.json checksums.txt checksum.md5 config-build-info.env vehicle.info; do
+for path in resident-packages resident-package-info deb-packages deb_packages deb-package-info package-registry-result.json deb-package-registry-result.json build-info.json checksums.txt checksum.md5 config-build-info.env vehicle.info; do
   [[ -e "$source_dir/$path" ]] && cp -a "$source_dir/$path" "$target/"
 done
 if [[ $child_status -ne 0 ]]; then echo "formal $kind build failed; preserved available diagnostics in $target" >&2; exit $child_status; fi

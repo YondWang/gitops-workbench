@@ -3,6 +3,8 @@
 
 .feature_package_rules:
   rules:
+    - if: '$GITOPS_FEATURE_REPUBLISH_JOB_ID'
+      when: never
     - if: '$CI_PIPELINE_SOURCE == "api" && $CI_COMMIT_REF_NAME == "ci/feature-package" && $GITOPS_FEATURE_PACKAGE == "1"'
       when: on_success
     - when: never
@@ -95,9 +97,6 @@ feature_build_deb:
     paths:
       - feature-context.json
       - feature-output/deb/deb-package-registry-result.json
-      - feature-output/deb/build-info.json
-      - feature-output/deb/checksums.txt
-      - feature-output/deb/checksum.md5
       - feature-output/deb/deb-package-info/
       - feature-publish/
 
@@ -107,7 +106,8 @@ feature_publish_nextcloud_resident:
   tags: ["gitops-feature-publisher"]
   image: "$GITOPS_FEATURE_BUILD_IMAGE"
   environment:
-    name: feature-package-nextcloud-resident
+    # Both publishers use the installed SimOS publisher on the protected Runner.
+    name: feature-package-nextcloud
   variables:
     GIT_STRATEGY: fetch
   needs:
@@ -115,6 +115,13 @@ feature_publish_nextcloud_resident:
       artifacts: true
   script:
     - bash .gitlab/scripts/feature-package-publish-nextcloud.sh resident feature-context.json feature-publish feature-package-result.json
+  after_script:
+    # Keep the always-uploaded result artifact present when protected-variable
+    # preflight fails before the publisher can write its success result.
+    - |
+      if [ ! -s feature-package-result.json ]; then
+        printf '%s\n' '{"status":"failed","message":"feature-package publisher did not produce a success result"}' > feature-package-result.json
+      fi
   artifacts:
     when: always
     expire_in: 30 days
@@ -127,7 +134,8 @@ feature_publish_nextcloud_deb:
   tags: ["gitops-feature-publisher"]
   image: "$GITOPS_FEATURE_BUILD_IMAGE"
   environment:
-    name: feature-package-nextcloud-deb
+    # Both publishers use the installed SimOS publisher on the protected Runner.
+    name: feature-package-nextcloud
   variables:
     GIT_STRATEGY: fetch
   needs:
@@ -135,8 +143,26 @@ feature_publish_nextcloud_deb:
       artifacts: true
   script:
     - bash .gitlab/scripts/feature-package-publish-nextcloud.sh deb feature-context.json feature-publish feature-package-result.json
+  after_script:
+    # Keep the always-uploaded result artifact present when protected-variable
+    # preflight fails before the publisher can write its success result.
+    - |
+      if [ ! -s feature-package-result.json ]; then
+        printf '%s\n' '{"status":"failed","message":"feature-package publisher did not produce a success result"}' > feature-package-result.json
+      fi
   artifacts:
     when: always
     expire_in: 30 days
     paths:
       - feature-package-result.json
+
+# Reuse a successful build job's Registry plan with this pipeline's CI code.
+feature_republish:
+  extends: feature_publish_nextcloud_deb
+  needs: []
+  rules:
+    - if: '$CI_COMMIT_REF_PROTECTED == "true" && $CI_COMMIT_REF_NAME == "ci/feature-package" && $GITOPS_FEATURE_PACKAGE == "1" && $GITOPS_FEATURE_REPUBLISH_JOB_ID'
+      when: on_success
+    - when: never
+  script:
+    - bash .gitlab/scripts/feature-package-republish.sh

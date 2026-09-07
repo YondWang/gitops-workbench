@@ -49,6 +49,7 @@ SCHEDULE_RUNS_PATH = DATA_ROOT / "schedule-runs.json"
 RELEASE_TASKS_PATH = Path(os.environ.get("GITOPS_RELEASE_TASKS_PATH", str(DATA_ROOT / "release_tasks.json")))
 RELEASE_RUNS_PATH = Path(os.environ.get("GITOPS_RELEASE_RUNS_PATH", str(DATA_ROOT / "release_runs.json")))
 FEATURE_PACKAGE_RUNS_PATH = Path(os.environ.get("GITOPS_FEATURE_PACKAGE_RUNS_PATH", str(DATA_ROOT / "feature_package_runs.json")))
+ACCOUNTS_PATH = Path(os.environ.get("GITOPS_ACCOUNTS_PATH", str(DATA_ROOT / "users.json")))
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "gitlab": {
@@ -100,7 +101,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "feature_package_ci": {
         "repository_id": "gitops-workbench",
         "ref": "ci/feature-package",
-        "registry_repository_id": "simos",
+        "registry_repository_id": "gitops-workbench",
     },
 }
 
@@ -405,6 +406,17 @@ class GitOpsApp:
         if run is None:
             raise ValueError("Feature 构建记录不存在")
         return {"ok": True, "run": run}
+
+    def delete_feature_package_run(self, run_id: str) -> dict[str, Any]:
+        run_id = str(run_id or "").strip()
+        if not run_id:
+            raise ValueError("Feature 构建记录 ID 不能为空")
+        runs = load_feature_package_runs()
+        if not any(item.get("id") == run_id for item in runs):
+            raise ValueError("Feature 构建记录不存在")
+        remaining = [item for item in runs if item.get("id") != run_id]
+        save_feature_package_runs(remaining)
+        return {"ok": True, "deleted": run_id, "runs": sorted(remaining, key=lambda item: str(item.get("started_at") or ""), reverse=True)}
 
     def save_schedule(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.save_release_task(payload)
@@ -1729,6 +1741,15 @@ class GitOpsApp:
         if simos_target is None:
             raise ValueError("Feature 包需要启用 simos 仓库")
         baseline_ref = normalize_optional_baseline_ref(payload.get("baseline_ref"))
+        # An omitted baseline is only meaningful for an all-repository package:
+        # in that mode every selected component must provide the same Feature
+        # branch.  Partial packages must explicitly identify their baseline.
+        if not baseline_ref:
+            ci_repo_id = str(self.config.get("feature_package_ci", {}).get("repository_id") or "")
+            all_package_repo_ids = {repo.id for repo in self.store.enabled() if repo.id != ci_repo_id}
+            selected_repo_ids = {target.repo.id for target in targets}
+            if selected_repo_ids != all_package_repo_ids:
+                raise ValueError("未选择全部仓库时必须填写基线分支")
         cloud_category = self.require_package_cloud_category(payload.get("cloud_category"))
         resolutions = self.resolve_feature_package_components(ref, baseline_ref, [target.repo for target in targets])
         resolution_by_repo = {item["repository_id"]: item for item in resolutions}
@@ -1760,8 +1781,8 @@ class GitOpsApp:
         feature_config = self.config.get("feature_package_ci") or {}
         registry_repo_id = str(feature_config.get("registry_repository_id") or "").strip()
         registry_target = self.target(registry_repo_id)
-        if not is_simos_repo(registry_target.repo):
-            raise ValueError("feature_package_ci.registry_repository_id 必须指向 simos 仓库")
+        if registry_target.repo.id != str(feature_config.get("repository_id") or ""):
+            raise ValueError("feature_package_ci.registry_repository_id 必须指向 Workbench 仓库")
         signed_components = [
             {
                 "repo": item["repository_id"],
@@ -3811,7 +3832,7 @@ def build_app(config_path: str | None) -> tuple[GitOpsApp, dict[str, Any]]:
     config = load_json_config(config_path)
     store = RepositoryStore(REPOSITORIES_PATH, default_repositories(config))
     ensure_feature_package_ci_repository(store, config)
-    return GitOpsApp(store, AuthManager.from_environment(), config), config
+    return GitOpsApp(store, AuthManager.from_environment(accounts_path=str(ACCOUNTS_PATH)), config), config
 
 
 def make_handler(app: GitOpsApp):
@@ -3843,6 +3864,7 @@ def make_handler(app: GitOpsApp):
                 "/api/release-task-previews": ("view", app.release_task_previews),
                 "/api/release-runs": ("view", lambda: {"ok": True, "runs": load_release_runs()}),
                 "/api/feature-package/runs": ("view", app.feature_package_runs),
+                "/api/accounts": ("admin", app.auth.accounts),
                 "/api/release-runs/manual-preview": (
                     "create_tag",
                     lambda: app.manual_release_preview(
@@ -3913,6 +3935,7 @@ def make_handler(app: GitOpsApp):
                 "/api/tags/delete": ("create_tag", lambda: app.delete_tags(payload)),
                 "/api/schedules": ("admin", lambda: app.save_schedule(payload)),
                 "/api/release-tasks": ("admin", lambda: app.save_release_task(payload)),
+                "/api/accounts": ("admin", lambda: app.auth.add_user(payload.get("username", ""), payload.get("role", "user"), payload.get("password", ""))),
                 "/api/release-runs/manual": ("create_tag", lambda: app.manual_release_run(payload)),
                 "/api/release-runs/rerun-tag": ("create_tag", lambda: app.rerun_tag_release(payload)),
             }
@@ -3952,14 +3975,46 @@ def make_handler(app: GitOpsApp):
                 task_id = release_task_route[0]
                 self.handle_api("admin", lambda task_id=task_id: app.save_release_task({**payload, "id": task_id}))
                 return
+            account_route = match_account_path(path)
+            if account_route:
+                route_account = account_route
+                self.handle_api(
+                    "admin",
+                    lambda route_account=route_account: self.update_account(route_account, payload),
+                )
+                return
             repo_id = match_repository_path(path)
             if not repo_id:
                 json_response(self, 404, {"ok": False, "error": "Unknown endpoint."})
                 return
             self.handle_api("admin", lambda: app.update_repository(repo_id, payload))
 
+        def update_account(self, username: str, payload: dict[str, Any]) -> dict[str, Any]:
+            current = self.current_session()
+            new_role = payload.get("role")
+            if current and current.get("username") == username and new_role is not None and str(new_role) != "admin":
+                raise ValueError("不能移除自己账号的管理员角色")
+            password = payload.get("password")
+            update_password = str(password) if password is not None and str(password) != "" else None
+            return app.auth.update_user(username, role=new_role, password=update_password)
+
+        def delete_account(self, username: str) -> dict[str, Any]:
+            current = self.current_session()
+            if current and current.get("username") == username:
+                raise ValueError("不能删除当前登录的账号")
+            return app.auth.delete_user(username)
+
         def do_DELETE(self) -> None:
             path = urlparse(self.path).path
+            if path.startswith("/api/feature-package/runs/"):
+                run_id = path.rsplit("/", 1)[-1]
+                self.handle_api("admin", lambda run_id=run_id: app.delete_feature_package_run(run_id))
+                return
+            account_route = match_account_path(path)
+            if account_route:
+                route_account = account_route
+                self.handle_api("admin", lambda route_account=route_account: self.delete_account(route_account))
+                return
             if path == "/api/release-runs":
                 self.handle_api("admin", app.clear_release_runs)
                 return
@@ -4095,6 +4150,13 @@ def match_release_task_path(path: str) -> tuple[str, str] | None:
     if len(parts) == 4 and parts[0] == "api" and parts[1] == "release-tasks":
         return parts[2], parts[3]
     return None
+
+
+def match_account_path(path: str) -> str:
+    parts = [item for item in path.split("/") if item]
+    if len(parts) == 3 and parts[0] == "api" and parts[1] == "accounts":
+        return parts[2]
+    return ""
 
 
 def match_release_run_path(path: str) -> str:

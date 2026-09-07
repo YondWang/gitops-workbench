@@ -42,6 +42,7 @@
           <button class="nav-item" data-view="tag" data-admin-only>Tag</button>
           <button class="nav-item" data-view="schedules" data-admin-only>发版任务</button>
           <button class="nav-item" data-view="repositories" data-admin-only>仓库管理</button>
+          <button class="nav-item" data-view="accounts" data-admin-only>账号管理</button>
           <button class="nav-item" data-view="settings">配置</button>
         </nav>
       </aside>
@@ -168,7 +169,7 @@
                 <code id="featurePackageVersionPreview">选择 Feature 分支后计算</code>
               </div>
               <p class="field-hint">构建只冻结当前 Feature 的提交快照并在临时工作区注入 T 版本；不会创建远端分支、Tag、提交或 MR，也不会上传 OTA。</p>
-              <button class="primary">创建测试包</button>
+              <button class="primary" id="createFeaturePackageBtn" type="submit">创建测试包</button>
             </form>
           </article>
           </div>
@@ -179,8 +180,8 @@
             </div>
             <div class="table-wrap">
               <table>
-                <thead><tr><th>版本</th><th>来源</th><th>状态</th><th>Pipeline</th><th>云盘</th></tr></thead>
-                <tbody id="featurePackageRunsBody"><tr><td colspan="5">暂无构建记录</td></tr></tbody>
+                <thead><tr><th>版本</th><th>来源</th><th>状态</th><th>Pipeline</th><th>云盘</th><th data-admin-only>操作</th></tr></thead>
+                <tbody id="featurePackageRunsBody"><tr><td colspan="6">暂无构建记录</td></tr></tbody>
               </table>
             </div>
           </article>
@@ -686,6 +687,63 @@
           </div>
         </section>
 
+        <section id="accounts" class="view" data-admin-only>
+          <div class="grid two">
+            <article class="panel">
+              <div class="panel-title">
+                <h2>账号列表</h2>
+                <span id="accountCount" class="badge muted">0</span>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>用户名</th>
+                      <th>角色</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="accountsBody"></tbody>
+                </table>
+              </div>
+              <p class="field-hint">账号由管理员在此统一维护。生产环境不会回退到默认账号或默认密码，每个账号在创建时都必须设置密码。</p>
+            </article>
+            <article class="panel">
+              <div class="panel-title">
+                <h2 id="accountFormTitle">添加账号</h2>
+              </div>
+              <form id="accountForm">
+                <input type="hidden" id="accountEditingUsername" value="" />
+                <label>
+                  用户名
+                  <input name="username" placeholder="如 zhangsan 或 workbench-admin" required />
+                </label>
+                <label>
+                  角色
+                  <select name="role" required>
+                    <option value="user">user（查看/创建 Feature/创建 Feature 包）</option>
+                    <option value="admin">admin（管理员）</option>
+                  </select>
+                </label>
+                <label>
+                  密码
+                  <input name="password" type="password" autocomplete="new-password" placeholder="创建账号时必填" />
+                </label>
+                <p class="field-hint" id="accountPasswordHint">创建账号时必填密码，不允许使用默认密码。编辑时可留空表示不修改密码。</p>
+                <div class="button-row">
+                  <button class="primary" id="saveAccountBtn">保存账号</button>
+                  <button type="button" id="resetAccountFormBtn">清空</button>
+                </div>
+              </form>
+              <div id="accountFormMessage" class="message"></div>
+            </article>
+          </div>
+          <article class="panel readonly-panel" data-user-block>
+            <h2>权限不足</h2>
+            <p>账号管理需要 admin 角色。</p>
+          </article>
+        </section>
+
         <section id="settings" class="view">
           <article class="panel">
             <div class="panel-title">
@@ -704,6 +762,18 @@
         </article>
       </section>
     </main>
+
+    <div id="featurePackageResultModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="featurePackageResultTitle" hidden>
+      <div class="modal-backdrop" data-modal-close></div>
+      <div class="modal-card" tabindex="-1">
+        <div id="featurePackageResultIcon" class="modal-status" aria-hidden="true"></div>
+        <h2 id="featurePackageResultTitle">Feature 测试包创建结果</h2>
+        <p id="featurePackageResultMessage"></p>
+        <div id="featurePackageResultVersion" class="modal-detail"></div>
+        <a id="featurePackageResultPipeline" class="modal-link" target="_blank" rel="noopener noreferrer" hidden>查看流水线</a>
+        <div class="modal-actions"><button id="featurePackageResultClose" type="button">知道了</button></div>
+      </div>
+    </div>
 
     <script src="/app.js"></script>
   </body>

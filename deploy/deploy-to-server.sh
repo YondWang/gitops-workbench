@@ -7,7 +7,11 @@ DATA_DIR="${DATA_DIR:-/data/gitops-workbench}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-ssh "$SSH_TARGET" "test -d '$APP_DIR' && test -w '$APP_DIR'"
+die() { echo "deploy-to-server: ERROR: $*" >&2; exit 1; }
+echo "deploy-to-server: target=$SSH_TARGET"
+
+ssh "$SSH_TARGET" "test -d '$APP_DIR' && test -w '$APP_DIR'" || die "cannot write remote APP_DIR=$APP_DIR"
+
 ssh "$SSH_TARGET" "test -f /etc/gitlab/ssl/chancee-shanghai.cn-crt.pem && test -f /etc/gitlab/ssl/chancee-shanghai.cn-key.pem"
 ssh "$SSH_TARGET" "test -f '$APP_DIR/.env'"
 ssh "$SSH_TARGET" "docker ps >/dev/null"
