@@ -59,9 +59,20 @@ OS/simos / simos-resident / TyyyyMMddHHmmss_功能描述
 OS/simos / simos-debs     / TyyyyMMddHHmmss_功能描述
 ```
 
-Nextcloud 发布器只下载该受信 Registry 清单中的精确 URL，并使用 `云盘分类/T.../resident/...`、`云盘分类/T.../deb/...` 平面目录；不扫描 Feature 工作目录，也不执行 Feature 源码中的发布脚本。所有 Registry 清单和路径会在第一次网络请求前验证，下载内容通过记录的大小、MD5 和 SHA-256 再校验后才写入 Nextcloud。
+Nextcloud 发布器只下载已验证的 Registry 清单，校验大小、MD5 和 SHA-256，再调用服务器上安装的 `/usr/local/bin/simos-ci-publish-resident`。与 SimOS 正式发布共用文件复制、权限处理和 Nextcloud 扫描；Feature 使用 `/public/Versions/<分类>/<T编号>/resident|deb`。服务器程序必须支持 `--capability feature-package-v1`，发布 Runner 用户必须可以通过 `sudo -n` 调用。无需配置 `GITOPS_FEATURE_NEXTCLOUD_URL/USER/PASSWORD`。
 
-GitLab 管理员必须将 `ci/feature-package` 设为受保护分支，并在 Workbench 项目受保护环境中维护以下变量：`GITOPS_FEATURE_CONTEXT_HMAC_KEY`（与 Workbench 服务端一致）、`GITOPS_FEATURE_BUILD_IMAGE`、`GITOPS_FEATURE_SIMOS_PROJECT_ID`、`GITOPS_FEATURE_NEXTCLOUD_URL`、`GITOPS_FEATURE_NEXTCLOUD_USER`、`GITOPS_FEATURE_NEXTCLOUD_PASSWORD`。其中 HMAC Key、Nextcloud 账号和密码必须 masked/protected；构建 Job 使用内置 `CI_JOB_TOKEN` 将本地产物写入 Generic Package Registry，但不接触 Nextcloud 凭据；`gitops-feature-publisher` Runner 只负责受保护的 Nextcloud 下载/发布 Job。`simos-feature-build` 必须是无 Docker socket 的非特权容器 Runner，Job Token 需要对 OS/simos Generic Package 具备写入权限，并对选中子模块与 OS/config 具备读取权限。
+升级顺序：先将 SimOS 仓库的 `ci/resident/server/simos-ci-publish-resident` 安装到 222 服务器的 `/usr/local/bin/simos-ci-publish-resident`，再发布 Workbench CI 修改。在服务器以 Runner 身份运行 `sudo -n /usr/local/bin/simos-ci-publish-resident --capability feature-package-v1`，必须成功输出 `feature-package-v1`；仅更新 Git 仓库不会更新服务器安装文件。Feature 扩展保留正式版本发布能力及原目录规则。
+
+结果中的 `nextcloud.files[].nextcloud_path` 相对于 `<分类>/<T编号>`，例如 `resident/resident.tar.gz`、`deb/business_3.1.3.0_arm64.deb`。服务器不复制的构建诊断文件仍保留在 Registry 清单中，不列入云盘文件清单。
+
+`ci/feature-package` 必须是受保护分支。HMAC Key、构建镜像、SimOS 项目 ID 和分类白名单的 CI 变量使用 `*` scope，使校验和构建 Job 可以访问；HMAC Key 保持 masked/protected。发布 Job 共用环境 `feature-package-nextcloud`，运行在 222 的 Shell Runner。构建 Runner 保持非特权容器且无 Docker socket；跨项目 Registry 读写使用 `CI_JOB_TOKEN`。
+
+发布调试：
+
+- 网络或服务器配置修复后，直接 Retry 失败的发布 Job，可复用原流水线的构建产物。
+- CI 脚本修改后，Retry 原 Job 仍使用原提交。应在受保护分支的新提交上，通过 GitLab Run pipeline 或 API 启动仅发布流水线，设置 `GITOPS_FEATURE_PACKAGE=1`、`GITOPS_FEATURE_REPUBLISH_JOB_ID=<成功构建Job ID>`、`GITOPS_FEATURE_REPUBLISH_KIND=resident|deb`。
+- 仅发布流水线只运行 `feature_republish`，从本项目指定 Job 下载两份清单，再从 Registry 下载包，不执行编译。构建 artifact 必须尚未过期，指定 Job 的类型必须与 kind 一致。结果 artifact 属于新流水线，原流水线状态不会因此变绿，Workbench 原构建记录也不会自动更新。
+- 三个发布 Job 均通过 `after_script` 为提前失败生成不含凭据的失败结果；这不会改变 Job 的失败状态。补发布下载仅接受 GitLab 端点的 HTTP 200；artifact 已过期、权限不足或端点返回重定向时会失败，不会继续发布。
 
 Feature 打包使用 schema 3 签名上下文。Config 是可选的普通仓库；启用后与其他子库使用相同的 Feature/基线分支解析并冻结 SHA，不再使用 `SIMBOT_R6_A/B` 矩阵。每次 Pipeline 仅生成一个 resident 和一个 deb，阶段为 `package`、`publish`。`TyyyyMMddHHmmss_描述` 仅作为构建 ID、Generic Package 版本及 Nextcloud 目录名，不是 Git Tag；Feature 流程不会创建 Tag、分支、MR、release note 或 OTA 任务。
 

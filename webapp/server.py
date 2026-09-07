@@ -100,7 +100,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "feature_package_ci": {
         "repository_id": "gitops-workbench",
         "ref": "ci/feature-package",
-        "registry_repository_id": "simos",
+        "registry_repository_id": "gitops-workbench",
     },
 }
 
@@ -405,6 +405,17 @@ class GitOpsApp:
         if run is None:
             raise ValueError("Feature 构建记录不存在")
         return {"ok": True, "run": run}
+
+    def delete_feature_package_run(self, run_id: str) -> dict[str, Any]:
+        run_id = str(run_id or "").strip()
+        if not run_id:
+            raise ValueError("Feature 构建记录 ID 不能为空")
+        runs = load_feature_package_runs()
+        if not any(item.get("id") == run_id for item in runs):
+            raise ValueError("Feature 构建记录不存在")
+        remaining = [item for item in runs if item.get("id") != run_id]
+        save_feature_package_runs(remaining)
+        return {"ok": True, "deleted": run_id, "runs": sorted(remaining, key=lambda item: str(item.get("started_at") or ""), reverse=True)}
 
     def save_schedule(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.save_release_task(payload)
@@ -1729,6 +1740,15 @@ class GitOpsApp:
         if simos_target is None:
             raise ValueError("Feature 包需要启用 simos 仓库")
         baseline_ref = normalize_optional_baseline_ref(payload.get("baseline_ref"))
+        # An omitted baseline is only meaningful for an all-repository package:
+        # in that mode every selected component must provide the same Feature
+        # branch.  Partial packages must explicitly identify their baseline.
+        if not baseline_ref:
+            ci_repo_id = str(self.config.get("feature_package_ci", {}).get("repository_id") or "")
+            all_package_repo_ids = {repo.id for repo in self.store.enabled() if repo.id != ci_repo_id}
+            selected_repo_ids = {target.repo.id for target in targets}
+            if selected_repo_ids != all_package_repo_ids:
+                raise ValueError("未选择全部仓库时必须填写基线分支")
         cloud_category = self.require_package_cloud_category(payload.get("cloud_category"))
         resolutions = self.resolve_feature_package_components(ref, baseline_ref, [target.repo for target in targets])
         resolution_by_repo = {item["repository_id"]: item for item in resolutions}
@@ -1760,8 +1780,8 @@ class GitOpsApp:
         feature_config = self.config.get("feature_package_ci") or {}
         registry_repo_id = str(feature_config.get("registry_repository_id") or "").strip()
         registry_target = self.target(registry_repo_id)
-        if not is_simos_repo(registry_target.repo):
-            raise ValueError("feature_package_ci.registry_repository_id 必须指向 simos 仓库")
+        if registry_target.repo.id != str(feature_config.get("repository_id") or ""):
+            raise ValueError("feature_package_ci.registry_repository_id 必须指向 Workbench 仓库")
         signed_components = [
             {
                 "repo": item["repository_id"],
@@ -3960,6 +3980,10 @@ def make_handler(app: GitOpsApp):
 
         def do_DELETE(self) -> None:
             path = urlparse(self.path).path
+            if path.startswith("/api/feature-package/runs/"):
+                run_id = path.rsplit("/", 1)[-1]
+                self.handle_api("admin", lambda run_id=run_id: app.delete_feature_package_run(run_id))
+                return
             if path == "/api/release-runs":
                 self.handle_api("admin", app.clear_release_runs)
                 return

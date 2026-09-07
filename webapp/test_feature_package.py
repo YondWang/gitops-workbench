@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -62,7 +63,7 @@ class FeatureClient:
         return {"name": name, "commit": {"id": self.branch_map[name], "parent_ids": []}}
     def get_file_text(self, file_path, ref):
         self.calls.append(("get_file_text", file_path, ref))
-        if self.repo_id == "simos" and file_path == ".gitmodules" and ref == "feature/release_login": return GITMODULES
+        if self.repo_id == "simos" and file_path == ".gitmodules" and ref in {"feature/release_login", "simos-feature-abcdef"}: return GITMODULES
         if self.repo_id == "simos" and file_path == server.VERSION_INFO_PATH and ref == "feature/release_login": return VERSION_INFO
         raise server.GitLabError("missing file", status=404, payload={})
     def create_pipeline(self, ref, variables=None):
@@ -87,7 +88,7 @@ def make_feature_app():
         "business": FeatureClient("business", {"release": "business-release-abcdef", "feature/release_login": "business-feature-abcdef"}),
         "gitops-workbench": FeatureClient("gitops-workbench", {"ci/feature-package": "trusted-ci-abcdef"}),
     }
-    config = {**server.DEFAULT_CONFIG, "feature_package_ci": {"repository_id": "gitops-workbench", "ref": "ci/feature-package", "registry_repository_id": "simos"}}
+    config = {**server.DEFAULT_CONFIG, "feature_package_ci": {"repository_id": "gitops-workbench", "ref": "ci/feature-package", "registry_repository_id": "gitops-workbench"}}
     app = server.GitOpsApp(FeatureStore(repos), auth.AuthManager.from_environment(), config)
     app.client_for = lambda repo: clients[repo.id]  # type: ignore[method-assign]
     app.token_loaded = lambda repo: True  # type: ignore[method-assign]
@@ -168,16 +169,8 @@ class FeaturePackageTest(unittest.TestCase):
         variables = call[2]
         self.assertEqual(set(variables), {"GITOPS_FEATURE_PACKAGE", "GITOPS_FEATURE_CONTEXT_B64", "GITOPS_FEATURE_CONTEXT_HMAC"})
         context = json.loads(base64.urlsafe_b64decode(variables["GITOPS_FEATURE_CONTEXT_B64"]).decode())
-        expected_config_source = {
-            "mode": "formal_matrix",
-            "project": "OS/config",
-            "variants": [
-                {"ref": "SIMBOT_R6_A", "label": "360"},
-                {"ref": "SIMBOT_R6_B", "label": "360s"},
-            ],
-        }
-        self.assertEqual(context["schema"], 2)
-        self.assertEqual(context["config_source"], expected_config_source)
+        self.assertEqual(context["schema"], 3)
+        self.assertNotIn("config_source", context)
         self.assertEqual(context["operator"], "user")
         self.assertEqual(context["source"]["sha"], "simos-feature-abcdef")
         self.assertEqual({item["repo"] for item in context["components"]}, {"simos", "business"})
@@ -187,8 +180,8 @@ class FeaturePackageTest(unittest.TestCase):
                 self.assertFalse(any(call[0] in {"create_branch", "create_commit", "create_tag", "create_pipeline"} for call in clients[repo_id].calls))
         persisted_run = app.feature_package_runs()["runs"][0]
         self.assertEqual(persisted_run["operator"], "user")
-        self.assertEqual(persisted_run["config_source"], expected_config_source)
-        self.assertEqual(result["run"]["config_source"], expected_config_source)
+        self.assertNotIn("config_source", persisted_run)
+        self.assertNotIn("config_source", result["run"])
 
     def test_rejects_client_controlled_config_fields_without_creating_pipeline(self):
         for field in ("config_source", "config_ref", "config_sha", "SIMOS_CONFIG_REF", "pipeline_variables"):
@@ -260,16 +253,9 @@ class FeaturePackageTest(unittest.TestCase):
         entrypoint = source / "ci" / "resident" / "ci-build-resident.sh"
         gate.parent.mkdir(parents=True)
         (workspace / "feature-context.json").write_text(json.dumps({
-            "schema": 2,
+            "schema": 3,
             "build_id": "T20260831183045_login",
-            "config_source": {
-                "mode": "formal_matrix",
-                "project": "OS/config",
-                "variants": [
-                    {"ref": "SIMBOT_R6_A", "label": "360"},
-                    {"ref": "SIMBOT_R6_B", "label": "360s"},
-                ],
-            },
+            "components": [{"repository_id": "simos"}],
         }), encoding="utf-8")
         gate.write_text(r'''#!/usr/bin/env bash
 set -Eeuo pipefail
@@ -332,7 +318,7 @@ printf '{"status":"skipped","files":[]}\n' > "$CI_PROJECT_DIR/package-registry-r
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((source / "formal-entrypoint-tag.txt").read_text(encoding="utf-8"), "")
-        manifest = json.loads((output / "resident" / "360" / "package-registry-result.json").read_text(encoding="utf-8"))
+        manifest = json.loads((output / "resident" / "package-registry-result.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest.get("tag", ""), "")
 
     def test_feature_build_wrapper_uses_formal_entrypoints(self):
@@ -366,16 +352,9 @@ printf '{"status":"skipped","files":[]}\n' > "$CI_PROJECT_DIR/package-registry-r
         resident_script.parent.mkdir(parents=True)
         deb_script.parent.mkdir(parents=True)
         context = {
-            "schema": 2,
+            "schema": 3,
             "build_id": "T20260831183045_login",
-            "config_source": {
-                "mode": "formal_matrix",
-                "project": "OS/config",
-                "variants": [
-                    {"ref": "SIMBOT_R6_A", "label": "360"},
-                    {"ref": "SIMBOT_R6_B", "label": "360s"},
-                ],
-            },
+            "components": [{"repository_id": "simos"}],
         }
         (workspace / "feature-context.json").write_text(json.dumps(context), encoding="utf-8")
         resident_script.write_text(r'''#!/usr/bin/env bash
@@ -397,13 +376,13 @@ PY
 mkdir -p "$CI_PROJECT_DIR/resident-packages/360/nested" "$CI_PROJECT_DIR/resident-package-info"
 printf 'resident' > "$CI_PROJECT_DIR/resident-packages/360/nested/resident.tar.gz"
 if [[ "${FAKE_SKIP_MANIFEST:-false}" != true ]]; then
-  printf '{"status":"skipped","tag":"%s","config_ref":"%s","files":[]}\n' "$CI_COMMIT_TAG" "$SIMOS_MATRIX_CONFIG_REF" > "$CI_PROJECT_DIR/package-registry-result.json"
+  printf '{"status":"skipped","tag":"%s","config_ref":"%s","files":[]}\n' "$CI_COMMIT_TAG" "${SIMOS_MATRIX_CONFIG_REF:-}" > "$CI_PROJECT_DIR/package-registry-result.json"
 fi
 printf '{}' > "$CI_PROJECT_DIR/resident-package-info/build-info.json"
 printf '{}' > "$CI_PROJECT_DIR/build-info.json"
 printf 'sha256  resident-packages/360/nested/resident.tar.gz\n' > "$CI_PROJECT_DIR/checksums.txt"
 printf 'md5  resident-packages/360/nested/resident.tar.gz\n' > "$CI_PROJECT_DIR/checksum.md5"
-printf 'SIMOS_CONFIG_REF=%s\n' "$SIMOS_MATRIX_CONFIG_REF" > "$CI_PROJECT_DIR/config-build-info.env"
+printf 'SIMOS_CONFIG_REF=%s\n' "${SIMOS_MATRIX_CONFIG_REF:-}" > "$CI_PROJECT_DIR/config-build-info.env"
 printf 'must not be copied' > "$CI_PROJECT_DIR/unlisted-output.zip"
 [[ "${FAKE_FAIL_AFTER_OUTPUT:-false}" != true ]] || exit 42
 ''', encoding="utf-8")
@@ -425,11 +404,13 @@ Path(os.environ["CI_PROJECT_DIR"], "deb-invocation.json").write_text(
 PY
 mkdir -p "$CI_PROJECT_DIR/deb-packages/360/nested" "$CI_PROJECT_DIR/deb-package-info"
 printf 'deb' > "$CI_PROJECT_DIR/deb-packages/360/nested/app.deb"
+mkdir -p "$CI_PROJECT_DIR/deb_packages"
+printf 'single-config-deb' > "$CI_PROJECT_DIR/deb_packages/simos_1.0_arm64.deb"
 if [[ "${FAKE_SKIP_MANIFEST:-false}" != true ]]; then
-  printf '{"status":"skipped","tag":"%s","config_ref":"%s","files":[]}\n' "$CI_COMMIT_TAG" "$SIMOS_MATRIX_CONFIG_REF" > "$CI_PROJECT_DIR/deb-package-registry-result.json"
+  printf '{"status":"skipped","tag":"%s","config_ref":"%s","files":[]}\n' "$CI_COMMIT_TAG" "${SIMOS_MATRIX_CONFIG_REF:-}" > "$CI_PROJECT_DIR/deb-package-registry-result.json"
 fi
 printf '{}' > "$CI_PROJECT_DIR/deb-package-info/build-info.json"
-printf 'SIMOS_CONFIG_REF=%s\n' "$SIMOS_MATRIX_CONFIG_REF" > "$CI_PROJECT_DIR/config-build-info.env"
+printf 'SIMOS_CONFIG_REF=%s\n' "${SIMOS_MATRIX_CONFIG_REF:-}" > "$CI_PROJECT_DIR/config-build-info.env"
 printf 'vehicle' > "$CI_PROJECT_DIR/vehicle.info"
 printf 'must not be copied' > "$CI_PROJECT_DIR/unlisted-output.deb"
 [[ "${FAKE_FAIL_AFTER_OUTPUT:-false}" != true ]] || exit 43
@@ -490,15 +471,15 @@ touch "$PWD/build-all-invoked"
         self.assertEqual(resident_environment, {
             "CI_PROJECT_DIR": str(source),
             "CI_COMMIT_TAG": "",
-            "SIMOS_MATRIX_CONFIG_REF": "SIMBOT_R6_A",
-            "SIMOS_MATRIX_CONFIG_LABEL": "360",
+            "SIMOS_MATRIX_CONFIG_REF": None,
+            "SIMOS_MATRIX_CONFIG_LABEL": None,
             "SIMOS_PACKAGE_REGISTRY_NAME": "simos-resident",
             "SIMOS_PACKAGE_REGISTRY_UPLOAD_ENABLED": "false",
             "SIMOS_PACKAGE_REGISTRY_UPLOAD_REQUIRED": "false",
             "SIMOS_BUILD_IMAGE": "resident-image:test",
         })
-        self.assertTrue((output / "resident" / "360" / "resident-packages" / "360" / "nested" / "resident.tar.gz").is_file())
-        self.assertTrue((output / "resident" / "360" / "package-registry-result.json").is_file())
+        self.assertTrue((output / "resident" / "resident-packages" / "360" / "nested" / "resident.tar.gz").is_file())
+        self.assertTrue((output / "resident" / "package-registry-result.json").is_file())
         for relative_path in (
             "resident-package-info/build-info.json",
             "build-info.json",
@@ -506,7 +487,7 @@ touch "$PWD/build-all-invoked"
             "checksum.md5",
             "config-build-info.env",
         ):
-            self.assertTrue((output / "resident" / "360" / relative_path).is_file(), relative_path)
+            self.assertTrue((output / "resident" / relative_path).is_file(), relative_path)
         self.assertFalse((output / "resident.tar.gz").exists())
         self.assertFalse(any(output.rglob("unlisted-output.zip")))
         self.assertFalse((source / "build-all-invoked").exists())
@@ -518,8 +499,8 @@ touch "$PWD/build-all-invoked"
         self.assertEqual(deb_environment, {
             "CI_PROJECT_DIR": str(source),
             "CI_COMMIT_TAG": "",
-            "SIMOS_MATRIX_CONFIG_REF": "SIMBOT_R6_A",
-            "SIMOS_MATRIX_CONFIG_LABEL": "360",
+            "SIMOS_MATRIX_CONFIG_REF": None,
+            "SIMOS_MATRIX_CONFIG_LABEL": None,
             "SIMOS_DEB_PACKAGE_REGISTRY_NAME": "simos-debs",
             "SIMOS_DEB_PACKAGE_REGISTRY_UPLOAD_ENABLED": "false",
             "SIMOS_DEB_PACKAGE_REGISTRY_UPLOAD_REQUIRED": "false",
@@ -527,8 +508,9 @@ touch "$PWD/build-all-invoked"
             "SIMOS_DEB_BUILD_MODE": "all",
             "SIMOS_DEB_BUILD_JOBS": "16",
         })
-        self.assertTrue((output / "deb" / "360" / "deb-packages" / "360" / "nested" / "app.deb").is_file())
-        deb_manifest_path = output / "deb" / "360" / "deb-package-registry-result.json"
+        self.assertTrue((output / "deb" / "deb-packages" / "360" / "nested" / "app.deb").is_file())
+        self.assertTrue((output / "deb" / "deb_packages" / "simos_1.0_arm64.deb").is_file())
+        deb_manifest_path = output / "deb" / "deb-package-registry-result.json"
         self.assertTrue(deb_manifest_path.is_file())
         deb_manifest = json.loads(deb_manifest_path.read_text(encoding="utf-8"))
         self.assertIn("tag", deb_manifest)
@@ -538,12 +520,12 @@ touch "$PWD/build-all-invoked"
             "config-build-info.env",
             "vehicle.info",
         ):
-            self.assertTrue((output / "deb" / "360" / relative_path).is_file(), relative_path)
+            self.assertTrue((output / "deb" / relative_path).is_file(), relative_path)
         self.assertFalse((output / "app.deb").exists())
         self.assertFalse(any(output.rglob("unlisted-output.deb")))
         self.assertEqual({path.name for path in output.iterdir()}, {"resident", "deb"})
-        self.assertEqual([path.name for path in (output / "resident").iterdir()], ["360"])
-        self.assertEqual([path.name for path in (output / "deb").iterdir()], ["360"])
+        self.assertIn("resident-packages", {path.name for path in (output / "resident").iterdir()})
+        self.assertIn("deb-packages", {path.name for path in (output / "deb").iterdir()})
         self.assertFalse((source / "build-all-invoked").exists())
 
         failed_resident = invoke(
@@ -554,9 +536,9 @@ touch "$PWD/build-all-invoked"
         )
         self.assertEqual(failed_resident.returncode, 42, failed_resident.stderr)
         self.assertIn("preserved available diagnostics", failed_resident.stderr)
-        self.assertTrue((output / "resident" / "360" / "package-registry-result.json").is_file())
+        self.assertTrue((output / "resident" / "package-registry-result.json").is_file())
         self.assertTrue(
-            (output / "resident" / "360" / "resident-packages" / "360" / "nested" / "resident.tar.gz").is_file()
+            (output / "resident" / "resident-packages" / "360" / "nested" / "resident.tar.gz").is_file()
         )
 
         failed_deb = invoke(
@@ -567,17 +549,18 @@ touch "$PWD/build-all-invoked"
         )
         self.assertEqual(failed_deb.returncode, 43, failed_deb.stderr)
         self.assertIn("preserved available diagnostics", failed_deb.stderr)
-        self.assertTrue((output / "deb" / "360" / "deb-package-registry-result.json").is_file())
+        self.assertTrue((output / "deb" / "deb-package-registry-result.json").is_file())
         self.assertTrue(
-            (output / "deb" / "360" / "deb-packages" / "360" / "nested" / "app.deb").is_file()
+            (output / "deb" / "deb-packages" / "360" / "nested" / "app.deb").is_file()
         )
 
         (source / "resident-invocation.json").unlink()
         (source / "deb-invocation.json").unlink()
         mismatch = invoke("resident", source_argument, output_argument, config_ref="SIMBOT_R6_A", config_label="360s")
-        self.assertNotEqual(mismatch.returncode, 0, mismatch)
-        self.assertIn("matrix pair", mismatch.stderr)
-        self.assertFalse((source / "resident-invocation.json").exists())
+        self.assertEqual(mismatch.returncode, 0, mismatch.stderr)
+        inherited = json.loads((source / "resident-invocation.json").read_text())
+        self.assertIsNone(inherited["SIMOS_MATRIX_CONFIG_REF"])
+        self.assertIsNone(inherited["SIMOS_MATRIX_CONFIG_LABEL"])
         self.assertFalse((source / "deb-invocation.json").exists())
         self.assertFalse((source / "build-all-invoked").exists())
 
@@ -587,452 +570,211 @@ touch "$PWD/build-all-invoked"
         self.assertIn("formal resident manifest is missing", missing_manifest.stderr)
 
     def test_feature_registry_publisher_validates_formal_manifests(self):
-        """The publisher must complete all manifest checks before its first curl."""
-        script = server.ROOT.parent / ".gitlab" / "scripts" / "feature-package-publish-registry.sh"
-        workspace = Path(self.tmpdir.name) / "registry-publisher"
-        fake_bin = workspace / "bin"
-        fake_curl = fake_bin / "curl"
-        fake_bin.mkdir(parents=True)
-        fake_curl.write_text(
-            "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$*\" >> \"$FAKE_CURL_LOG\"\n",
-            encoding="utf-8",
-        )
-        fake_curl.chmod(0o755)
-        context = {
-            "schema": 2,
-            "build_id": "T20260831183045_login",
-            "registry": {"project": "OS/simos"},
-            "config_source": {
-                "mode": "formal_matrix",
-                "project": "OS/config",
-                "variants": [
-                    {"ref": "SIMBOT_R6_A", "label": "360"},
-                    {"ref": "SIMBOT_R6_B", "label": "360s"},
-                ],
-            },
-        }
+        script = server.ROOT.parent / ".gitlab/scripts/feature-package-publish-registry.sh"
+        root = Path(self.tmpdir.name)
+        binary = root / "bin"
+        binary.mkdir()
+        curl = binary / "curl"
+        curl.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$UPLOAD_LOG\"\n")
+        curl.chmod(0o755)
+        context = {"schema": 3, "build_id": "T20260908143140_r3", "registry": {"project": "software_hmi_app/gitops-control"}}
+        context_path = root / "context.json"
+        context_path.write_text(json.dumps(context))
+        for kind in ("resident", "deb"):
+            with self.subTest(kind=kind):
+                output = root / kind / "output"
+                directory = output / kind
+                package_dir = directory / ("resident-packages" if kind == "resident" else "deb_packages")
+                package_dir.mkdir(parents=True)
+                name = "resident.tar.gz" if kind == "resident" else "business_3.1.3.0_arm64.deb"
+                package = package_dir / name
+                package.write_bytes(b"payload")
+                metadata = directory / (kind + "-package-info") / "build-info.json"
+                metadata.parent.mkdir()
+                metadata.write_text("{}")
+                manifest_path = directory / ("package-registry-result.json" if kind == "resident" else "deb-package-registry-result.json")
+                entry = {"file": name, "size": 7, "md5": hashlib.md5(b"payload").hexdigest(),
+                         "sha256": hashlib.sha256(b"payload").hexdigest()}
+                manifest = {"status": "skipped", "tag": "", "files": [entry]}
+                manifest_path.write_text(json.dumps(manifest))
+                publish = root / kind / "publish"
+                log = root / kind / "uploads.log"
 
-        def digest(path):
-            data = path.read_bytes()
-            return len(data), hashlib.md5(data).hexdigest(), hashlib.sha256(data).hexdigest()
+                def invoke():
+                    log.unlink(missing_ok=True)
+                    shutil.rmtree(publish, ignore_errors=True)
+                    return subprocess.run(
+                        ["bash", str(script), kind, str(context_path), str(output), str(publish)],
+                        env={**os.environ, "PATH": str(binary) + ":" + os.environ["PATH"],
+                             "UPLOAD_LOG": str(log), "CI_API_V4_URL": "https://gitlab.test/api/v4",
+                             "CI_PROJECT_ID": "30", "CI_PROJECT_PATH": "software_hmi_app/gitops-control", "CI_JOB_TOKEN": "test-token"},
+                        capture_output=True, text=True)
 
-        def write(path, contents):
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(contents)
-            return path
+                result = invoke()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                plan = json.loads((publish / "registry-result.json").read_text())
+                self.assertEqual(plan["kind"], kind)
+                self.assertIn(f"{kind}/{package_dir.name}/{name}", {item["local_path"] for item in plan["files"]})
+                self.assertIn(f"{kind}/{kind}-package-info/build-info.json", {item["local_path"] for item in plan["files"]})
+                self.assertTrue(log.is_file())
 
-        def build_output(name):
-            root = workspace / name
-            for config_ref, label in (("SIMBOT_R6_A", "360"), ("SIMBOT_R6_B", "360s")):
-                resident = root / "resident" / label
-                resident_files = {
-                    "resident": write(resident / "resident-packages" / label / "resident.tar.gz", f"resident-{label}".encode()),
-                    "resident_md5": write(resident / "resident-packages" / label / "resident.md5", f"md5-{label}".encode()),
-                    "simos_config": write(resident / "resident-packages" / label / "simos.config", f"config-{label}".encode()),
-                    "deploy_sh": write(resident / "resident-packages" / label / "deploy.sh", b"#!/bin/sh\n"),
-                    "remote_run_sh": write(resident / "resident-packages" / label / "remote_run.sh", b"#!/bin/sh\n"),
-                    "checksum_md5": write(resident / "resident-packages" / label / "checksum.md5", f"checksum-{label}".encode()),
-                }
-                for relative in (
-                    "build-info.json",
-                    "checksums.txt",
-                    "checksum.md5",
-                    "config-build-info.env",
-                    "resident-package-info/build-info.json",
-                    "resident-package-info/checksums.txt",
-                    "resident-package-info/artifact-path.txt",
-                    "resident-package-info/package-registry-result.json",
-                ):
-                    write(resident / relative, f"metadata-{label}-{relative}".encode())
-                size, md5, sha256 = digest(resident_files["resident"])
-                resident_files["resident_md5"].write_text(f"{md5}  resident.tar.gz\n", encoding="utf-8")
-                (resident / "resident-packages" / label / "build-info.json").write_text(
-                    json.dumps({
-                        "status": "success",
-                        "label": label,
-                        "config_ref": config_ref,
-                        "artifact_path": f"resident-packages/{label}/resident.tar.gz",
-                        "size": size,
-                        "md5": md5,
-                        "sha256": sha256,
-                    }),
-                    encoding="utf-8",
-                )
-                resident_manifest = {
-                    "status": "skipped",
-                    "config_ref": config_ref,
-                    "config_variants": [{
-                        "label": label,
-                        "config_ref": config_ref,
-                        "artifact_path": f"resident-packages/{label}/resident.tar.gz",
-                        "size": size,
-                        "md5": md5,
-                        "sha256": sha256,
-                        "registry_files": {key: f"{label}-{path.name}" for key, path in resident_files.items()},
-                    }],
-                }
-                (resident / "package-registry-result.json").write_text(json.dumps(resident_manifest), encoding="utf-8")
-
-                deb = root / "deb" / label
-                deb_file = write(deb / "deb-packages" / label / "app.deb", f"deb-{label}".encode())
-                size, md5, sha256 = digest(deb_file)
-                deb_entry = {
-                    "file": "app.deb",
-                    "registry_file": f"{label}-app.deb",
-                    "size": size,
-                    "md5": md5,
-                    "sha256": sha256,
-                    "label": label,
-                    "config_ref": config_ref,
-                }
-                deb_variant_entry = {key: value for key, value in deb_entry.items() if key not in {"label", "config_ref"}}
-                for relative in (
-                    "config-build-info.env",
-                    "vehicle.info",
-                    "deb-package-info/build-info.json",
-                    "deb-package-info/deb-package-registry-result.json",
-                ):
-                    write(deb / relative, f"metadata-{label}-{relative}".encode())
-                deb_manifest = {
-                    "status": "skipped",
-                    "tag": "",
-                    "config_ref": config_ref,
-                    "config_variants": [{"label": label, "config_ref": config_ref, "files": [deb_variant_entry]}],
-                    "files": [deb_entry],
-                }
-                (deb / "deb-package-registry-result.json").write_text(json.dumps(deb_manifest), encoding="utf-8")
-            return root
-
-        context_path = workspace / "feature-context.json"
-        context_path.write_text(json.dumps(context), encoding="utf-8")
-
-        def invoke(output, name):
-            publish = workspace / f"publish-{name}"
-            curl_log = workspace / f"curl-{name}.log"
-            curl_log.unlink(missing_ok=True)
-            result = subprocess.run(
-                ["bash", str(script), str(context_path), str(output), str(publish)],
-                cwd=workspace,
-                env={
-                    **os.environ,
-                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
-                    "FAKE_CURL_LOG": str(curl_log),
-                    "CI_API_V4_URL": "https://gitlab.test/api/v4",
-                    "GITOPS_FEATURE_SIMOS_PROJECT_ID": "20",
-                    "CI_JOB_TOKEN": "publisher-token",
-                },
-                capture_output=True,
-                text=True,
-            )
-            return result, curl_log, publish
-
-        output = build_output("valid-output")
-        success, curl_log, publish = invoke(output, "success")
-        self.assertEqual(success.returncode, 0, success.stderr)
-        self.assertTrue(curl_log.exists(), "valid formal artifacts must be uploaded")
-        uploads = curl_log.read_text(encoding="utf-8")
-        self.assertIn("/simos-resident/T20260831183045_login/360-resident.tar.gz", uploads)
-        self.assertIn("/simos-resident/T20260831183045_login/360s-resident.tar.gz", uploads)
-        self.assertIn("/simos-debs/T20260831183045_login/360-app.deb", uploads)
-        self.assertIn("/simos-debs/T20260831183045_login/360s-app.deb", uploads)
-        self.assertIn("/simos-resident/T20260831183045_login/360-root-checksum.md5", uploads)
-        result = json.loads((publish / "registry-result.json").read_text(encoding="utf-8"))
-        self.assertEqual(result["build_id"], context["build_id"])
-        self.assertEqual(result["project"], "OS/simos")
-        self.assertEqual({item["package_name"] for item in result["files"]}, {"simos-resident", "simos-debs"})
-        self.assertIn("resident/360/resident.tar.gz", {item["nextcloud_path"] for item in result["files"]})
-        self.assertIn("resident/360/metadata/checksum.md5", {item["nextcloud_path"] for item in result["files"]})
-        self.assertIn("deb/360/app.deb", {item["nextcloud_path"] for item in result["files"]})
-        for item in result["files"]:
-            self.assertEqual(set(item), {"package_name", "registry_file", "registry_url", "local_path", "label", "kind", "size", "md5", "sha256", "nextcloud_path"})
-
-        def assert_rejected(name, mutate):
-            invalid = build_output(f"invalid-{name}")
-            mutate(invalid)
-            rejected, invalid_log, invalid_publish = invoke(invalid, name)
-            self.assertNotEqual(rejected.returncode, 0, rejected)
-            self.assertFalse(invalid_log.exists() and invalid_log.read_text(encoding="utf-8").strip(), rejected.stderr)
-            self.assertFalse((invalid_publish / "registry-result.json").exists())
-
-        assert_rejected("missing-output", lambda root: shutil.rmtree(root / "resident" / "360"))
-
-        def nonempty_tag(root):
-            path = root / "resident" / "360" / "package-registry-result.json"
-            data = json.loads(path.read_text(encoding="utf-8")); data["tag"] = "release_V3.2.1.001_202608311830"; path.write_text(json.dumps(data), encoding="utf-8")
-        assert_rejected("nonempty-tag", nonempty_tag)
-
-        def nonempty_deb_tag(root):
-            path = root / "deb" / "360" / "deb-package-registry-result.json"
-            data = json.loads(path.read_text(encoding="utf-8")); data["tag"] = "release_V3.2.1.001_202608311830"; path.write_text(json.dumps(data), encoding="utf-8")
-        assert_rejected("nonempty-deb-tag", nonempty_deb_tag)
-
-        def wrong_config_pair(root):
-            path = root / "deb" / "360" / "deb-package-registry-result.json"
-            data = json.loads(path.read_text(encoding="utf-8")); data["config_ref"] = "wrong"; data["config_variants"][0]["config_ref"] = "wrong"; data["files"][0]["config_ref"] = "wrong"; path.write_text(json.dumps(data), encoding="utf-8")
-        assert_rejected("wrong-config-pair", wrong_config_pair)
-
-        assert_rejected("missing-listed-file", lambda root: (root / "deb" / "360" / "deb-packages" / "360" / "app.deb").unlink())
-
-        def wrong_checksum(root):
-            path = root / "deb" / "360" / "deb-package-registry-result.json"
-            data = json.loads(path.read_text(encoding="utf-8")); data["files"][0]["sha256"] = "0" * 64; path.write_text(json.dumps(data), encoding="utf-8")
-        assert_rejected("wrong-checksum", wrong_checksum)
-
-        def wrong_md5(root):
-            path = root / "deb" / "360" / "deb-package-registry-result.json"
-            data = json.loads(path.read_text(encoding="utf-8")); data["files"][0]["md5"] = "0" * 32; path.write_text(json.dumps(data), encoding="utf-8")
-        assert_rejected("wrong-md5", wrong_md5)
-
-        def tampered_resident_build_info(root):
-            path = root / "resident" / "360" / "resident-packages" / "360" / "build-info.json"
-            data = json.loads(path.read_text(encoding="utf-8")); data["sha256"] = "0" * 64; path.write_text(json.dumps(data), encoding="utf-8")
-        assert_rejected("tampered-resident-build-info", tampered_resident_build_info)
-
-        assert_rejected("unlisted-package", lambda root: write(root / "deb" / "360" / "deb-packages" / "360" / "unlisted.deb", b"unlisted"))
-
-        def outside_symlink(root):
-            package = root / "resident" / "360" / "resident-packages" / "360"
-            outside = workspace / "outside-resident.tar.gz"
-            outside.write_bytes((package / "resident.tar.gz").read_bytes())
-            (package / "resident.tar.gz").unlink()
-            (package / "resident.tar.gz").symlink_to(outside)
-        assert_rejected("outside-listed-symlink", outside_symlink)
-
-        def outside_parent_symlink(root):
-            package = root / "resident" / "360" / "resident-packages" / "360"
-            outside = workspace / "outside-resident-package"
-            shutil.copytree(package, outside)
-            shutil.rmtree(package)
-            package.symlink_to(outside, target_is_directory=True)
-        assert_rejected("outside-parent-symlink", outside_parent_symlink)
-
-        def optional_outside_symlink(root):
-            metadata = root / "resident" / "360" / "config-build-info.env"
-            outside = workspace / "outside-config-build-info.env"
-            outside.write_bytes(metadata.read_bytes())
-            metadata.unlink()
-            metadata.symlink_to(outside)
-        assert_rejected("outside-optional-symlink", optional_outside_symlink)
-
-        def missing_deb_tag(root):
-            path = root / "deb" / "360" / "deb-package-registry-result.json"
-            data = json.loads(path.read_text(encoding="utf-8")); data.pop("tag"); path.write_text(json.dumps(data), encoding="utf-8")
-        assert_rejected("missing-deb-tag", missing_deb_tag)
+                for field, value in (("size", 8), ("md5", "0" * 32), ("sha256", "0" * 64),
+                                     ("file", "../outside.deb"), ("registry_file", "../escape")):
+                    with self.subTest(kind=kind, field=field):
+                        manifest_path.write_text(json.dumps({**manifest, "files": [{**entry, field: value}]}))
+                        result = invoke()
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertFalse(log.exists(), result.stderr)
+                manifest_path.write_text(json.dumps({**manifest, "tag": "release_V3.1.3.0"}))
+                self.assertNotEqual(invoke().returncode, 0)
+                self.assertFalse(log.exists())
+                manifest_path.write_text(json.dumps(manifest))
+                unlisted = package_dir / "extra.deb"
+                unlisted.write_bytes(b"unlisted")
+                self.assertNotEqual(invoke().returncode, 0)
+                self.assertFalse(log.exists())
+                unlisted.unlink()
+                package.unlink()
+                self.assertNotEqual(invoke().returncode, 0)
+                self.assertFalse(log.exists())
+                outside = root / (kind + "-outside")
+                outside.write_bytes(b"payload")
+                package.symlink_to(outside)
+                self.assertNotEqual(invoke().returncode, 0)
+                self.assertFalse(log.exists())
 
     def test_feature_nextcloud_publisher_preserves_variant_layout(self):
-        """Only the verified Registry plan may drive nested Nextcloud writes."""
-        script = server.ROOT.parent / ".gitlab" / "scripts" / "feature-package-publish-nextcloud.sh"
-        workspace = Path(self.tmpdir.name) / "nextcloud-publisher"
-        fake_bin = workspace / "bin"
-        fake_curl = fake_bin / "curl"
-        fake_bin.mkdir(parents=True)
-        fake_curl.write_text(
-            "#!/usr/bin/env bash\n"
-            "set -euo pipefail\n"
-            "printf '%s\\n' \"$*\" >> \"$FAKE_CURL_LOG\"\n"
-            "skip_default_curlrc=0\n"
-            "if [[ \"${1:-}\" == \"-q\" ]]; then skip_default_curlrc=1; fi\n"
-            "config=''\n"
-            "for ((index = 1; index <= $#; index++)); do\n"
-            "  if [[ \"${!index}\" == \"--config\" ]]; then next=$((index + 1)); config=\"${!next}\"; fi\n"
-            "done\n"
-            "if [[ -n \"$config\" ]]; then\n"
-            "  contents=$(<\"$config\")\n"
-            "  if grep -q '^request = \"MKCOL\"$' \"$config\"; then\n"
-            "    printf 'mkcol\\n' >> \"$FAKE_CURL_ACTION_LOG\"\n"
-            "    if [[ \"${FAKE_CURL_FAILURE:-}\" == \"mkcol\" ]]; then printf 'feature-publisher' >&2; printf '500'; exit 0; fi\n"
-            "    printf '%s' \"${FAKE_MKCOL_STATUS:-201}\"; exit 0\n"
-            "  fi\n"
-            "  if [[ \"$contents\" == *'upload-file = '* ]]; then\n"
-            "    printf 'put\\n' >> \"$FAKE_CURL_ACTION_LOG\"\n"
-            "    if [[ \"${FAKE_CURL_FAILURE:-}\" == \"put\" ]]; then printf 'protected-password' >&2; exit 22; fi\n"
-            "    printf '201'; exit 0\n"
-            "  fi\n"
-            "  printf 'download\\n' >> \"$FAKE_CURL_ACTION_LOG\"\n"
-            "  if [[ \"${FAKE_CURL_FAILURE:-}\" == \"download\" ]]; then printf 'read-only-job-token' >&2; exit 22; fi\n"
-            "  if [[ \"${FAKE_CURL_FAILURE:-}\" == \"default-curlrc-redirect\" ]]; then\n"
-            "    curl_home=\"${CURL_HOME:-${HOME:-}}\"\n"
-            "    if [[ \"$skip_default_curlrc\" != \"1\" ]] && [[ -f \"$curl_home/.curlrc\" ]] && grep -qx 'location' \"$curl_home/.curlrc\"; then\n"
-            "      printf 'external-request:%s\\n' \"${FAKE_CURL_REDIRECT_TARGET:-https://attacker.test/steal}\" >> \"$FAKE_CURL_ACTION_LOG\"\n"
-            "      sed -n 's/^header = \"\\(.*\\)\"$/external-token:\\1/p' \"$config\" >> \"$FAKE_CURL_ACTION_LOG\"\n"
-            "    fi\n"
-            "    printf '302'; exit 0\n"
-            "  fi\n"
-            "  if [[ \"${FAKE_CURL_FAILURE:-}\" == \"redirect\" ]]; then printf '302'; exit 0; fi\n"
-            "  output=$(sed -n 's#^output = \\\"\\(.*\\)\\\"$#\\1#p' \"$config\")\n"
-            "  printf '%s' \"${FAKE_DOWNLOAD_CONTENT:-downloaded}\" > \"$output\"\n"
-            "  printf '200'; exit 0\n"
-            "fi\n"
-            "if [[ \" $* \" == *\" -X MKCOL \"* ]]; then printf '201'; exit 0; fi\n"
-            "for ((index = 1; index <= $#; index++)); do\n"
-            "  if [[ \"${!index}\" == \"--output\" ]]; then next=$((index + 1)); printf 'downloaded' > \"${!next}\"; fi\n"
-            "done\n",
-            encoding="utf-8",
-        )
-        fake_curl.chmod(0o755)
-        context = {
-            "schema": 2,
-            "build_id": "T20260831183045_login",
-            "cloud_category": "车机/Feature测试包",
-            "registry": {"project": "OS/simos"},
-            "config_source": {
-                "mode": "formal_matrix",
-                "project": "OS/config",
-                "variants": [
-                    {"ref": "SIMBOT_R6_A", "label": "360"},
-                    {"ref": "SIMBOT_R6_B", "label": "360s"},
-                ],
-            },
-        }
-        context_path = workspace / "feature-context.json"
-        context_path.write_text(json.dumps(context), encoding="utf-8")
+        SCRIPT = str(server.ROOT.parent / ".gitlab/scripts/feature-package-publish-nextcloud.sh")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            binary = root / 'bin'
+            binary.mkdir()
+            sudo = binary / 'sudo'
+            sudo.write_text("""#!/usr/bin/env python3
+import os, shutil, sys
+from pathlib import Path
+args = sys.argv[1:]
+assert args[:2] == ['-n', '/usr/local/bin/simos-ci-publish-resident']
+with open(os.environ['PUBLISH_LOG'], 'a') as log:
+    log.write(('capability' if '--capability' in args else 'publish') + '\\n')
+if os.environ.get('SIMOS_FEATURE_TEST_SERVER_PUBLISHER'):
+    os.execv(os.environ['SIMOS_FEATURE_TEST_SERVER_PUBLISHER'], [os.environ['SIMOS_FEATURE_TEST_SERVER_PUBLISHER'], *args[2:]])
+if '--capability' in args:
+    print(os.environ.get('TEST_CAPABILITY', 'feature-package-v1'))
+else:
+    if os.environ.get('PUBLISH_FAIL'): sys.exit(2)
+    def value(flag): return args[args.index(flag) + 1]
+    bid = value('--feature-build-id')
+    assert value('--tag') == value('--version') == bid
+    kind = 'deb' if '--deb-only' in args else 'resident'
+    incoming = Path(value('--incoming')) / (kind + '-packages')
+    assert incoming.is_dir()
+    target = Path(os.environ['SIMOS_PUBLISH_NEXTCLOUD_VERSIONS_ROOT']) / value('--category') / bid / kind
+    shutil.copytree(incoming, target, dirs_exist_ok=True)
+""")
+            sudo.chmod(0o755)
+            curl = binary / 'curl'
+            curl.write_text('''#!/usr/bin/env python3
+import os, shlex, sys
+from pathlib import Path
+assert sys.argv[1:3] == ['-q', '--config']
+settings = {}
+for line in Path(sys.argv[-1]).read_text().splitlines():
+    tokens = shlex.split(line)
+    if len(tokens) == 3: settings[tokens[0]] = tokens[2]
+assert settings['header'] == 'JOB-TOKEN: test-token'
+assert 'location' not in settings
+with open(os.environ['DOWNLOAD_LOG'], 'a') as log:
+    log.write(settings['url'] + '\\n')
+if os.environ.get('HTTP_STATUS'):
+    print(os.environ['HTTP_STATUS'], end=''); sys.exit(0)
+if settings['url'].endswith('/artifacts'):
+    Path(settings['output']).write_bytes(Path(os.environ['SOURCE_ARCHIVE']).read_bytes())
+    print('200', end=''); sys.exit(0)
+Path(settings['output']).write_bytes(b'corrupt' if os.environ.get('CORRUPT') else b'payload')
+print('200', end='')
+''')
+            curl.chmod(0o755)
+            env = {**os.environ, 'PATH': str(binary) + ':' + os.environ['PATH'],
+                   'PUBLISH_LOG': str(root / 'publisher.log'), 'DOWNLOAD_LOG': str(root / 'download.log'),
+                   'CI_JOB_TOKEN': 'test-token',
+                   'CI_API_V4_URL': 'https://gitlab.test/api/v4', 'CI_PROJECT_ID': '30', 'CI_PROJECT_PATH': 'software_hmi_app/gitops-control',
+                   'SIMOS_PUBLISH_ARTIFACT_ROOT': str(root / 'artifacts'),
+                   'SIMOS_PUBLISH_NEXTCLOUD_VERSIONS_ROOT': str(root / 'cloud'), 'SIMOS_PUBLISH_SKIP_OCC': 'true'}
+            bid = 'T20260908143140_r3'
+            context = {'schema': 3, 'build_id': bid, 'cloud_category': 'Feature/packages',
+                       'registry': {'project': 'software_hmi_app/gitops-control'}, 'components': []}
+            (root / 'context.json').write_text(json.dumps(context))
+            publish = root / 'publish'
+            publish.mkdir()
+            for kind in ('resident', 'deb'):
+                package = 'feature-resident' if kind == 'resident' else 'feature-debs'
+                names = ['resident.tar.gz', 'simos.config', 'deploy.sh', 'remote_run.sh', 'checksum.md5'] if kind == 'resident' else ['simos_1_arm64.deb']
+                directory = 'resident-packages' if kind == 'resident' else 'deb_packages'
+                files = [{'package_name': package, 'registry_file': name,
+                          'registry_url': f'https://gitlab.test/api/v4/projects/30/packages/generic/{package}/{bid}/{name}',
+                          'local_path': f'{kind}/{directory}/{name}', 'nextcloud_path': f'{kind}/{directory}/{name}',
+                          'kind': kind, 'size': 7, 'md5': hashlib.md5(b'payload').hexdigest(),
+                          'sha256': hashlib.sha256(b'payload').hexdigest()} for name in names]
+                plan = {'build_id': bid, 'project': 'software_hmi_app/gitops-control', 'kind': kind,
+                        kind: {'package_name': package, 'package_version': bid}, 'files': files}
+                (publish / 'registry-result.json').write_text(json.dumps(plan))
+                command = ['bash', SCRIPT, kind, 'context.json', 'publish', 'result.json']
+                result = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue((root / 'cloud' / 'Feature' / 'packages' / bid / kind / names[0]).is_file())
+                self.assertEqual(json.loads((root / 'result.json').read_text())['nextcloud']['cloud_dir'], f'/public/Versions/Feature/packages/{bid}/{kind}')
+                published = json.loads((root / 'result.json').read_text())['nextcloud']['files']
+                self.assertEqual({item['nextcloud_path'] for item in published}, {f'{kind}/{name}' for name in names})
+                for item in published:
+                    self.assertTrue((root / 'cloud' / 'Feature' / 'packages' / bid / item['nextcloud_path']).is_file())
+                (root / 'result.json').unlink()
+                calls_before = (root / 'publisher.log').read_text().count('publish\n')
+                result = subprocess.run(command, cwd=root, env={**env, 'CORRUPT': '1'}, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual((root / 'publisher.log').read_text().count('publish\n'), calls_before)
+                self.assertFalse((root / 'result.json').exists())
+                self.assertFalse(list(root.glob('.feature-package-nextcloud-*')))
 
-        def entry(kind, label, name):
-            contents = b"downloaded"
-            package_name = "simos-resident" if kind == "resident" else "simos-debs"
-            return {
-                "package_name": package_name,
-                "registry_file": f"{label}-{name}",
-                "registry_url": f"https://gitlab.test/api/v4/projects/20/packages/generic/{package_name}/{context['build_id']}/{label}-{name}",
-                "local_path": f"{kind}/{label}/{name}",
-                "label": label,
-                "kind": kind,
-                "size": len(contents),
-                "md5": hashlib.md5(contents).hexdigest(),
-                "sha256": hashlib.sha256(contents).hexdigest(),
-                "nextcloud_path": f"{kind}/{label}/{name}",
-            }
+                for mutation in (
+                    {**plan, 'kind': 'deb' if kind == 'resident' else 'resident'},
+                    {**plan, 'files': []},
+                    {**plan, 'files': [*files, files[0]]},
+                    {**plan, 'files': [{**files[0], 'registry_url': 'https://other.test/package'}]},
+                    {**plan, 'files': [{**files[0], 'local_path': f'{kind}/../escape'}]},
+                ):
+                    (root / 'download.log').unlink(missing_ok=True)
+                    (publish / 'registry-result.json').write_text(json.dumps(mutation))
+                    rejected = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True)
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertFalse((root / 'download.log').exists(), rejected.stderr)
+                (publish / 'registry-result.json').write_text(json.dumps(plan))
+                for status in ('302', '403'):
+                    rejected = subprocess.run(command, cwd=root, env={**env, 'HTTP_STATUS': status}, capture_output=True, text=True)
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertEqual((root / 'publisher.log').read_text().count('publish\n'), calls_before)
 
-        def registry_result(*, files):
-            return {
-                "build_id": context["build_id"],
-                "project": "OS/simos",
-                "resident": {"package_name": "simos-resident", "package_version": context["build_id"]},
-                "deb": {"package_name": "simos-debs", "package_version": context["build_id"]},
-                "files": files,
-            }
-
-        def invoke(name, result, **extra_environment):
-            publish = workspace / f"publish-{name}"
-            publish.mkdir(parents=True, exist_ok=True)
-            (publish / "registry-result.json").write_text(json.dumps(result), encoding="utf-8")
-            curl_log = workspace / f"curl-{name}.log"
-            curl_log.unlink(missing_ok=True)
-            action_log = workspace / f"curl-{name}.actions"
-            action_log.unlink(missing_ok=True)
-            output = workspace / f"feature-package-result-{name}.json"
-            output.unlink(missing_ok=True)
-            completed = subprocess.run(
-                ["bash", str(script), str(context_path), str(publish), str(output)],
-                cwd=workspace,
-                env={
-                    **os.environ,
-                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
-                    "FAKE_CURL_LOG": str(curl_log),
-                    "FAKE_CURL_ACTION_LOG": str(action_log),
-                    "CI_JOB_TOKEN": "read-only-job-token",
-                    "CI_API_V4_URL": "https://gitlab.test/api/v4",
-                    "GITOPS_FEATURE_SIMOS_PROJECT_ID": "20",
-                    "GITOPS_FEATURE_NEXTCLOUD_URL": "https://nextcloud.test",
-                    "GITOPS_FEATURE_NEXTCLOUD_USER": "feature-publisher",
-                    "GITOPS_FEATURE_NEXTCLOUD_PASSWORD": "protected-password",
-                    **extra_environment,
-                },
-                capture_output=True,
-                text=True,
-            )
-            return completed, curl_log, action_log, output
-
-        valid_files = [entry("resident", "360", "resident.tar.gz"), entry("deb", "360", "app.deb")]
-        success, curl_log, action_log, output = invoke("valid", registry_result(files=valid_files))
-        self.assertEqual(success.returncode, 0, success.stderr)
-        calls = curl_log.read_text(encoding="utf-8")
-        self.assertTrue(calls.strip())
-        self.assertTrue(all(line.startswith("-q --config ") for line in calls.splitlines()))
-        self.assertNotIn("--location", calls)
-        self.assertNotIn("read-only-job-token", calls)
-        self.assertNotIn("feature-publisher", calls)
-        self.assertNotIn("protected-password", calls)
-        actions = action_log.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(actions[:2], ["download", "download"])
-        self.assertGreaterEqual(actions.count("mkcol"), 7)
-        self.assertEqual(actions.count("put"), 2)
-        result = json.loads(output.read_text(encoding="utf-8"))
-        self.assertEqual(result["status"], "success")
-        self.assertEqual(result["build_id"], context["build_id"])
-        self.assertEqual(result["config_source"], context["config_source"])
-        self.assertEqual(result["nextcloud"]["cloud_dir"], "车机/Feature测试包/T20260831183045_login")
-        self.assertEqual({item["nextcloud_path"] for item in result["nextcloud"]["files"]}, {
-            "resident/360/resident.tar.gz", "deb/360/app.deb",
-        })
-        self.assertNotIn("protected-password", output.read_text(encoding="utf-8"))
-
-        for name, invalid_path in (
-            ("dotdot", "resident/../resident.tar.gz"),
-            ("leading-slash", "/resident/360/resident.tar.gz"),
-            ("empty-segment", "resident//resident.tar.gz"),
-        ):
-            invalid_files = [dict(valid_files[0], nextcloud_path=invalid_path), valid_files[1]]
-            rejected, invalid_log, _invalid_actions, invalid_output = invoke(name, registry_result(files=invalid_files))
-            self.assertNotEqual(rejected.returncode, 0, rejected)
-            self.assertFalse(invalid_log.exists() and invalid_log.read_text(encoding="utf-8").strip(), rejected.stderr)
-            self.assertFalse(invalid_output.exists())
-
-        def assert_rejected_before_curl(name, mutate):
-            invalid_files = [dict(item) for item in valid_files]
-            mutate(invalid_files)
-            rejected, invalid_log, _invalid_actions, invalid_output = invoke(name, registry_result(files=invalid_files))
-            self.assertNotEqual(rejected.returncode, 0, rejected)
-            self.assertFalse(invalid_log.exists() and invalid_log.read_text(encoding="utf-8").strip(), rejected.stderr)
-            self.assertFalse(invalid_output.exists())
-
-        assert_rejected_before_curl("wrong-registry-host", lambda items: items[0].update(registry_url=items[0]["registry_url"].replace("gitlab.test", "attacker.test")))
-        assert_rejected_before_curl("wrong-registry-project", lambda items: items[0].update(registry_url=items[0]["registry_url"].replace("/projects/20/", "/projects/99/")))
-        assert_rejected_before_curl("wrong-registry-package", lambda items: items[0].update(registry_url=items[0]["registry_url"].replace("simos-resident", "simos-debs")))
-        assert_rejected_before_curl("wrong-registry-version", lambda items: items[0].update(registry_url=items[0]["registry_url"].replace(context["build_id"], "T20260831183046_login")))
-
-        redirected, redirect_log, redirect_actions, redirect_output = invoke("redirect", registry_result(files=valid_files), FAKE_CURL_FAILURE="redirect")
-        self.assertNotEqual(redirected.returncode, 0, redirected)
-        self.assertEqual(redirect_actions.read_text(encoding="utf-8").splitlines(), ["download"])
-        self.assertNotIn("mkcol", redirect_actions.read_text(encoding="utf-8"))
-        self.assertFalse(redirect_output.exists())
-
-        curl_home = workspace / "curl-home"
-        curl_home.mkdir(exist_ok=True)
-        (curl_home / ".curlrc").write_text("location\n", encoding="utf-8")
-        default_curlrc_redirect, _default_curlrc_log, default_curlrc_actions, default_curlrc_output = invoke(
-            "default-curlrc-redirect",
-            registry_result(files=valid_files),
-            FAKE_CURL_FAILURE="default-curlrc-redirect",
-            FAKE_CURL_REDIRECT_TARGET="https://attacker.test/stolen-package",
-            HOME=str(curl_home),
-            CURL_HOME=str(curl_home),
-        )
-        self.assertNotEqual(default_curlrc_redirect.returncode, 0, default_curlrc_redirect)
-        default_actions = default_curlrc_actions.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(default_actions, ["download"])
-        self.assertFalse(any(action.startswith("external-request:") for action in default_actions))
-        self.assertFalse(any("read-only-job-token" in action for action in default_actions))
-        self.assertFalse(default_curlrc_output.exists())
-
-        corrupt, _corrupt_log, corrupt_actions, corrupt_output = invoke("corrupt-download", registry_result(files=valid_files), FAKE_DOWNLOAD_CONTENT="corrupt")
-        self.assertNotEqual(corrupt.returncode, 0, corrupt)
-        self.assertEqual(corrupt_actions.read_text(encoding="utf-8").splitlines(), ["download"])
-        self.assertFalse(corrupt_output.exists())
-
-        existing, _existing_log, _existing_actions, existing_output = invoke("existing-directories", registry_result(files=valid_files), FAKE_MKCOL_STATUS="405")
-        self.assertEqual(existing.returncode, 0, existing.stderr)
-        self.assertTrue(existing_output.exists())
-
-        for failure in ("download", "mkcol", "put"):
-            failed, failed_log, _failed_actions, failed_output = invoke(f"failure-{failure}", registry_result(files=valid_files), FAKE_CURL_FAILURE=failure)
-            combined = failed.stdout + failed.stderr + (failed_log.read_text(encoding="utf-8") if failed_log.exists() else "")
-            self.assertNotEqual(failed.returncode, 0, combined)
-            self.assertNotIn("read-only-job-token", combined)
-            self.assertNotIn("feature-publisher", combined)
-            self.assertNotIn("protected-password", combined)
-            self.assertFalse(failed_output.exists())
-            self.assertFalse(list(workspace.glob(".feature-package-nextcloud-*")))
+                archive = root / 'source.zip'
+                with zipfile.ZipFile(archive, 'w') as bundle:
+                    bundle.writestr('feature-context.json', json.dumps(context))
+                    bundle.writestr('feature-publish/registry-result.json', json.dumps(plan))
+                    bundle.writestr('../unwanted', 'must not extract')
+                scripts = root / '.gitlab/scripts'
+                scripts.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(SCRIPT, scripts / 'feature-package-publish-nextcloud.sh')
+                republish = server.ROOT.parent / '.gitlab/scripts/feature-package-republish.sh'
+                republish_env = {**env, 'CI_PROJECT_ID': '30', 'SOURCE_ARCHIVE': str(archive),
+                                 'GITOPS_FEATURE_REPUBLISH_JOB_ID': '21562', 'GITOPS_FEATURE_REPUBLISH_KIND': kind}
+                retried = subprocess.run(['bash', str(republish)], cwd=root, env=republish_env, capture_output=True, text=True)
+                self.assertEqual(retried.returncode, 0, retried.stderr)
+                self.assertEqual(json.loads((root / 'feature-package-result.json').read_text())['status'], 'success')
+                self.assertFalse(list(root.glob('.feature-republish-*')))
+                self.assertFalse((root.parent / 'unwanted').exists())
+                rejected = subprocess.run(['bash', str(republish)], cwd=root,
+                    env={**republish_env, 'GITOPS_FEATURE_REPUBLISH_KIND': 'deb' if kind == 'resident' else 'resident'},
+                    capture_output=True, text=True)
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn('source build kind', rejected.stderr)
 
     def test_static_contract_for_trusted_feature_pipeline(self):
         now = server.datetime(2026, 8, 27, 15, 30, 45, tzinfo=server.ZoneInfo("Asia/Shanghai"))
@@ -1060,33 +802,33 @@ touch "$PWD/build-all-invoked"
         self.assertIn("if: '$GITOPS_FEATURE_PACKAGE == \"1\"'", root_ci)
         self.assertIn("when: never", root_ci)
         self.assertIn("- when: manual", root_ci)
-        self.assertIn("stages:\n  - operate\n  - feature_validate\n  - feature_build\n  - feature_publish", root_ci)
+        self.assertIn("stages:\n  - operate\n  - package\n  - publish", root_ci)
         self.assertIn(".gitops_base:\n  stage: operate", root_ci)
         self.assertIn("feature_build_resident:", ci)
         self.assertIn("feature_build_deb:", ci)
         for build_job in ("feature_build_resident:", "feature_build_deb:"):
-            build_section = ci.split(build_job, 1)[1].split("feature_publish_registry:", 1)[0]
+            build_section = ci.split(build_job, 1)[1]
             self.assertIn("artifacts:\n    when: always", build_section)
-        self.assertNotIn("feature_build:\n", ci)
-        for config_ref, config_label in (("SIMBOT_R6_A", "360"), ("SIMBOT_R6_B", "360s")):
-            self.assertEqual(ci.count(f'SIMOS_MATRIX_CONFIG_REF: "{config_ref}"'), 2)
-            self.assertEqual(ci.count(f'SIMOS_MATRIX_CONFIG_LABEL: "{config_label}"'), 2)
-        registry_needs = ci.split("feature_publish_registry:", 1)[1].split("feature_publish_nextcloud:", 1)[0]
-        self.assertIn("- job: feature_build_resident\n      artifacts: true", registry_needs)
-        self.assertIn("- job: feature_build_deb\n      artifacts: true", registry_needs)
-        registry_artifacts = registry_needs.split("  artifacts:", 1)[1]
-        self.assertIn("- feature-context.json", registry_artifacts)
-        self.assertIn("- feature-publish/", registry_artifacts)
-        self.assertNotIn("- feature-output/", registry_artifacts)
+        self.assertNotIn("feature_publish_registry:", ci)
+        self.assertNotIn("SIMOS_MATRIX_CONFIG_REF", ci)
+        self.assertNotIn("SIMOS_MATRIX_CONFIG_LABEL", ci)
         self.assertNotIn("feature_prepare:\n", ci)
         for job, stage in (
-            ("feature_context_validate", "feature_validate"),
-            ("feature_build_resident", "feature_build"),
-            ("feature_build_deb", "feature_build"),
-            ("feature_publish_registry", "feature_publish"),
-            ("feature_publish_nextcloud", "feature_publish"),
+            ("feature_context_validate", "package"),
+            ("feature_build_resident", "package"),
+            ("feature_build_deb", "package"),
+            ("feature_publish_nextcloud_resident", "publish"),
+            ("feature_publish_nextcloud_deb", "publish"),
         ):
             self.assertIn(f"{job}:\n  extends: .feature_package_rules\n  stage: {stage}", ci)
+        publisher_jobs = ("feature_publish_nextcloud_resident:", "feature_publish_nextcloud_deb:")
+        for index, publisher_job in enumerate(publisher_jobs):
+            publisher_section = ci.split(publisher_job, 1)[1]
+            if index + 1 < len(publisher_jobs):
+                publisher_section = publisher_section.split(publisher_jobs[index + 1], 1)[0]
+            self.assertIn("    name: feature-package-nextcloud\n", publisher_section)
+            self.assertIn("  after_script:\n", publisher_section)
+            self.assertIn("feature-package publisher did not produce a success result", publisher_section)
         self.assertNotIn("button_", ci)
         self.assertNotIn("upload-ota", ci)
         self.assertNotIn("release-note", ci)
@@ -1123,14 +865,23 @@ touch "$PWD/build-all-invoked"
         started = app.create_feature_package(self.package_payload())
         pipeline = clients["gitops-workbench"].created_pipelines[0]
         pipeline["status"] = "success"
-        clients["gitops-workbench"].jobs_by_pipeline[pipeline["id"]] = [{"id": 41, "name": "feature_publish_nextcloud"}]
-        clients["gitops-workbench"].artifacts[(41, "feature-package-result.json")] = json.dumps({"status": "success", "registry": {"package_version": started["version"]}, "nextcloud": {"cloud_dir": "车机/Feature测试包/x"}})
+        clients["gitops-workbench"].jobs_by_pipeline[pipeline["id"]] = [
+            {"id": 41, "name": "feature_publish_nextcloud_resident"},
+            {"id": 42, "name": "feature_publish_nextcloud_deb"},
+        ]
+        for job_id, kind in ((41, "resident"), (42, "deb")):
+            clients["gitops-workbench"].artifacts[(job_id, "feature-package-result.json")] = json.dumps({
+                "status": "success", "build_id": started["version"],
+                "registry": {"package_version": started["version"]},
+                "nextcloud": {"cloud_dir": f"Feature/x/{kind}"},
+            })
 
         run = app.feature_package_runs()["runs"][0]
 
         self.assertEqual(run["status"], "success")
-        self.assertEqual(run["registry"]["package_version"], started["version"])
-        self.assertEqual(run["nextcloud"]["cloud_dir"], "车机/Feature测试包/x")
+        for kind in ("resident", "deb"):
+            self.assertEqual(run["registry"][kind]["package_version"], started["version"])
+            self.assertEqual(run["nextcloud"][kind]["cloud_dir"], f"Feature/x/{kind}")
 
     def test_success_pipeline_without_publish_artifact_is_recorded_as_failure(self):
         app, clients = make_feature_app()
@@ -1153,28 +904,19 @@ touch "$PWD/build-all-invoked"
         self.assertIn("可信 Feature Pipeline", run["error"])
 
     def test_validator_rejects_missing_tampered_and_expired_contexts(self):
-        script = server.ROOT.parent / ".gitlab" / "scripts" / "feature-package-validate.py"
+        script = server.ROOT.parent / ".gitlab/scripts/feature-package-validate.py"
         context = {
-            "schema": 2,
-            "run_id": "feature-test",
+            "schema": 3, "run_id": "feature-test",
             "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
             "build_id": "T20260827153045_login",
-            "source": {"repository_id": "simos", "project": "OS/simos", "ref": "feature/release_login", "sha": "a" * 40},
-            "cloud_category": "车机/Feature测试包",
-            "components": [{"repo": "simos", "project": "OS/simos", "submodule_path": "", "ref": "feature/release_login", "sha": "a" * 40}],
-            "metadata": {"version_info": "Version:T20260827153045_login\n", "software_yaml": "version: T20260827153045_login\n"},
-            "config_source": {
-                "mode": "formal_matrix",
-                "project": "OS/config",
-                "variants": [
-                    {"ref": "SIMBOT_R6_A", "label": "360"},
-                    {"ref": "SIMBOT_R6_B", "label": "360s"},
-                ],
-            },
+            "source": {"repository_id": "simos", "project": "OS/simos",
+                       "ref": "feature/release_login", "sha": "a" * 40},
+            "cloud_category": "Feature/packages",
+            "components": [{"repository_id": "simos", "project": "OS/simos", "submodule_path": "",
+                            "requested_ref": "feature/release_login", "resolved_ref": "feature/release_login",
+                            "commit_id": "a" * 40, "resolution": "simos_source"}],
+            "metadata": {"version_info": "Version:T20260827153045_login", "software_yaml": "version: T20260827153045_login"},
         }
-        encoded = base64.urlsafe_b64encode(json.dumps(context).encode()).decode()
-        signature = hmac.new(b"test-feature-key", encoded.encode(), hashlib.sha256).hexdigest()
-        environment = {**os.environ, "GITOPS_FEATURE_PACKAGE": "1", "CI_PIPELINE_SOURCE": "api", "CI_COMMIT_REF_NAME": "ci/feature-package", "GITOPS_FEATURE_CONTEXT_HMAC_KEY": "test-feature-key", "GITOPS_FEATURE_CLOUD_CATEGORIES": "车机/Feature测试包", "GITOPS_FEATURE_CONTEXT_B64": encoded}
         output = Path(self.tmpdir.name) / "feature-context.json"
 
         def invoke(candidate, signature_override=None):
@@ -1182,56 +924,38 @@ touch "$PWD/build-all-invoked"
             encoded = base64.urlsafe_b64encode(json.dumps(candidate).encode()).decode()
             signature = hmac.new(b"test-feature-key", encoded.encode(), hashlib.sha256).hexdigest()
             return subprocess.run(
-                [sys.executable, str(script)],
-                cwd=self.tmpdir.name,
-                env={
-                    **environment,
-                    "GITOPS_FEATURE_CONTEXT_B64": encoded,
-                    "GITOPS_FEATURE_CONTEXT_HMAC": signature if signature_override is None else signature_override(signature),
-                },
-                capture_output=True,
-                text=True,
-            )
+                [sys.executable, str(script)], cwd=self.tmpdir.name,
+                env={**os.environ, "GITOPS_FEATURE_PACKAGE": "1", "CI_PIPELINE_SOURCE": "api",
+                     "CI_COMMIT_REF_NAME": "ci/feature-package",
+                     "GITOPS_FEATURE_CLOUD_CATEGORIES": "Feature/packages",
+                     "GITOPS_FEATURE_CONTEXT_B64": encoded,
+                     "GITOPS_FEATURE_CONTEXT_HMAC": signature if signature_override is None else signature_override},
+                capture_output=True, text=True)
 
         valid = invoke(context)
-        output.unlink(missing_ok=True)
-        missing = subprocess.run([sys.executable, str(script)], cwd=self.tmpdir.name, env=environment, capture_output=True, text=True)
-        tampered = invoke(context, lambda value: "0" * len(value))
-        expired_context = {**context, "expires_at": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()}
-        expired = invoke(expired_context)
-        legacy_schema_1 = invoke({key: value for key, value in context.items() if key != "config_source"} | {"schema": 1})
-        legacy_context = json.loads(output.read_text(encoding="utf-8"))
-        future_schema = invoke({**context, "schema": 3})
-        invalid_mode = invoke({**context, "config_source": {**context["config_source"], "mode": "shared_branch_snapshot"}})
-        unknown_mode = invoke({**context, "config_source": {**context["config_source"], "mode": "unrecognized"}})
-        invalid_project = invoke({**context, "config_source": {**context["config_source"], "project": "OS/other"}})
-        invalid_order = invoke({**context, "config_source": {**context["config_source"], "variants": list(reversed(context["config_source"]["variants"]))}})
-        duplicate_variants = invoke({**context, "config_source": {**context["config_source"], "variants": [
-            {"ref": "SIMBOT_R6_A", "label": "360"},
-            {"ref": "SIMBOT_R6_A", "label": "360"},
-        ]}})
-        missing_variant = invoke({**context, "config_source": {**context["config_source"], "variants": [
-            {"ref": "SIMBOT_R6_A", "label": "360"},
-        ]}})
-        invalid_label = invoke({**context, "config_source": {**context["config_source"], "variants": [
-            {"ref": "SIMBOT_R6_A", "label": "bad"},
-            {"ref": "SIMBOT_R6_B", "label": "360s"},
-        ]}})
-        extra_policy_key = invoke({**context, "config_source": {**context["config_source"], "ref": "SIMBOT_R6_A"}})
-
         self.assertEqual(valid.returncode, 0, valid.stderr)
-        self.assertNotEqual(missing.returncode, 0); self.assertIn("signature context", missing.stderr)
-        self.assertNotEqual(tampered.returncode, 0); self.assertIn("HMAC mismatch", tampered.stderr)
-        self.assertNotEqual(expired.returncode, 0); self.assertIn("context expired", expired.stderr)
-        self.assertEqual(legacy_schema_1.returncode, 0, legacy_schema_1.stderr)
-        self.assertEqual(legacy_context["schema"], 2)
-        self.assertEqual(legacy_context["config_source"], context["config_source"])
-        self.assertNotEqual(future_schema.returncode, 0)
-        self.assertIn("unsupported schema", future_schema.stderr)
-        for result in (invalid_mode, unknown_mode, invalid_project, invalid_order, duplicate_variants, missing_variant, invalid_label, extra_policy_key):
+        self.assertEqual(json.loads(output.read_text()), context)
+        for signature, message in (("", "signature context"), ("0" * 64, "HMAC mismatch")):
+            result = invoke(context, signature)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("config_source", result.stderr)
-        self.assertFalse(output.exists())
+            self.assertIn(message, result.stderr)
+            self.assertFalse(output.exists())
+        cases = [
+            ({"expires_at": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()}, "context expired"),
+            ({"schema": 1}, "unsupported schema"), ({"schema": 2}, "unsupported schema"),
+            ({"schema": 4}, "unsupported schema"), ({"config_source": {}}, "config_source"),
+            ({"cloud_category": "../other"}, "allow-list"), ({"components": []}, "snapshot missing"),
+            ({"components": context["components"] * 2}, "duplicate repository"),
+            ({"components": [{**context["components"][0], "commit_id": "b" * 40}]}, "source SHA"),
+            ({"components": [{**context["components"][0], "submodule_path": "src/../bad"}]}, "submodule path"),
+            ({"source": {**context["source"], "sha": "invalid"}}, "source snapshot"),
+        ]
+        for changes, message in cases:
+            with self.subTest(changes=changes):
+                result = invoke({**context, **changes})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+                self.assertFalse(output.exists())
 
     def test_user_route_is_allowed_and_generic_tag_route_is_not(self):
         app, _ = make_feature_app(); app.create_feature_package = lambda payload: {"ok": True}  # type: ignore[method-assign]

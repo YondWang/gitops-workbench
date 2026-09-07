@@ -8,10 +8,7 @@ result_path=${4:?result required}
 case "$kind" in resident|deb) ;; *) echo "feature Nextcloud: kind must be resident or deb" >&2; exit 2;; esac
 : "${CI_JOB_TOKEN:?CI_JOB_TOKEN is required}"
 : "${CI_API_V4_URL:?CI_API_V4_URL is required}"
-: "${GITOPS_FEATURE_SIMOS_PROJECT_ID:?GITOPS_FEATURE_SIMOS_PROJECT_ID is required}"
-: "${GITOPS_FEATURE_NEXTCLOUD_URL:?protected Nextcloud endpoint is required}"
-: "${GITOPS_FEATURE_NEXTCLOUD_USER:?protected Nextcloud account is required}"
-: "${GITOPS_FEATURE_NEXTCLOUD_PASSWORD:?protected Nextcloud password is required}"
+: "${CI_PROJECT_ID:?CI_PROJECT_ID is required}"
 
 # Registry publication has already verified the frozen formal manifests. This
 # publisher trusts only that artifact and the signed context, never the
@@ -22,6 +19,7 @@ import json
 import os
 import re
 import subprocess
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -34,7 +32,7 @@ MD5_PATTERN = re.compile(r"[0-9a-f]{32}$")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}$")
 PROJECT_ID_PATTERN = re.compile(r"[1-9][0-9]*$")
 ITEM_KEYS = {"package_name", "registry_file", "registry_url", "local_path", "kind", "size", "md5", "sha256", "nextcloud_path"}
-PACKAGE_NAMES = {"resident": "simos-resident", "deb": "simos-debs"}
+PACKAGE_NAMES = {"resident": "feature-resident", "deb": "feature-debs"}
 
 
 def reject(message: str) -> None:
@@ -85,12 +83,6 @@ def protected_text(value: object, description: str) -> str:
     return value
 
 
-def nextcloud_user(value: object) -> str:
-    if not isinstance(value, str) or not value or "/" in value or "\\" in value or any(char in "\x00\r\n\t" for char in value):
-        reject("invalid protected Nextcloud account")
-    return value
-
-
 def digest(path: Path) -> tuple[int, str, str]:
     sha256 = hashlib.sha256()
     md5 = hashlib.md5()
@@ -114,7 +106,7 @@ registry_target = context.get("registry")
 if not isinstance(registry_target, dict) or not isinstance(registry_target.get("project"), str) or not registry_target["project"]:
     reject("Feature context has an invalid Registry target")
 gitlab_api = validate_url(os.environ["CI_API_V4_URL"], "GitLab API endpoint").rstrip("/")
-project_id = os.environ["GITOPS_FEATURE_SIMOS_PROJECT_ID"]
+project_id = os.environ["CI_PROJECT_ID"]
 if not PROJECT_ID_PATTERN.fullmatch(project_id):
     reject("invalid protected SimOS project id")
 
@@ -140,10 +132,12 @@ targets: set[tuple[str, ...]] = set()
 for position, item in enumerate(files):
     if not isinstance(item, dict) or set(item) != ITEM_KEYS:
         reject(f"Registry result file #{position} has an invalid schema")
-    kind = item["kind"]
-    if kind not in PACKAGE_NAMES:
+    item_kind = item["kind"]
+    if item_kind not in PACKAGE_NAMES:
         reject(f"Registry result file #{position} has an invalid kind")
-    if item["package_name"] != PACKAGE_NAMES[kind]:
+    if item_kind != kind:
+        reject(f"Registry result file #{position} kind does not match publisher kind")
+    if item["package_name"] != PACKAGE_NAMES[item_kind]:
         reject(f"Registry result file #{position} has an invalid package name")
     registry_file = safe_leaf(item["registry_file"], f"Registry result file #{position} registry_file")
     local_parts = safe_relative_path(item["local_path"], f"Registry result file #{position} local_path")
@@ -181,17 +175,53 @@ for path in targets:
         if path != other and len(path) < len(other) and other[:len(path)] == path:
             reject(f"Registry result has a file/directory path conflict: {'/'.join(path)}")
 
-endpoint = validate_url(os.environ["GITOPS_FEATURE_NEXTCLOUD_URL"], "Nextcloud endpoint").rstrip("/")
-user = nextcloud_user(os.environ["GITOPS_FEATURE_NEXTCLOUD_USER"])
-password = protected_text(os.environ["GITOPS_FEATURE_NEXTCLOUD_PASSWORD"], "Nextcloud password")
 job_token = protected_text(os.environ["CI_JOB_TOKEN"], "Job Token")
-auth = f"{user}:{password}"
-base = endpoint + "/remote.php/dav/files/" + quote(user, safe="")
+publisher = "/usr/local/bin/simos-ci-publish-resident"
+if not plan:
+    reject("Registry result contains no files")
 directory_parts = (*cloud_parts, build_id)
 
-
-def webdav_url(parts: tuple[str, ...]) -> str:
-    return base + "/" + "/".join(quote(part, safe="") for part in parts)
+# Reconstruct the formal server publisher input from verified local paths.
+incoming_targets = set()
+for item in plan:
+    parts = safe_relative_path(item["local_path"], "local path")[1:]
+    if kind == "deb" and parts and parts[0] in {"deb_packages", "deb-packages"}:
+        parts = ("deb-packages", *parts[1:])
+    if not parts or parts in incoming_targets:
+        reject("duplicate incoming path")
+    incoming_targets.add(parts)
+    item["incoming_parts"] = parts
+    # The server removes the package directory and retains only its supported
+    # resident sidecars. Other build metadata remains available in Registry.
+    if parts[0] == f"{kind}-packages" and len(parts) > 1:
+        if kind == "deb" or parts[-1] in {
+            "resident.tar.gz", "simos.config", "deploy.sh", "remote_run.sh",
+            "checksum.md5", "resident.md5", "build-info.json",
+        } and len(parts) in {2, 3}:
+            item["published_path"] = "/".join((kind, *parts[1:]))
+for path in incoming_targets:
+    if any(path[:depth] in incoming_targets for depth in range(1, len(path))):
+        reject("incoming file/directory conflict")
+if not any("published_path" in item for item in plan):
+    reject("Registry result contains no publishable package files")
+if kind == "resident":
+    package_paths = {path for path in incoming_targets if path[0] == "resident-packages"}
+    variants = {path[1:-1] for path in package_paths}
+    required = {"resident.tar.gz", "simos.config", "deploy.sh", "remote_run.sh", "checksum.md5"}
+    if not variants or any(len(variant) > 1 for variant in variants):
+        reject("invalid resident package layout")
+    for variant in variants:
+        if not all(("resident-packages", *variant, name) in package_paths for name in required):
+            reject("resident package is missing required files")
+try:
+    capability = subprocess.run(
+        ["sudo", "-n", publisher, "--capability", "feature-package-v1"],
+        capture_output=True, text=True,
+    )
+except OSError:
+    reject("cannot execute server publisher through sudo")
+if capability.returncode != 0 or capability.stdout.strip() != "feature-package-v1":
+    reject("server publisher requires feature-package-v1 and passwordless Runner sudo")
 
 
 def curl_value(value: str) -> str:
@@ -216,26 +246,13 @@ def run_curl(config_path: Path):
         raise SystemExit("feature Nextcloud publication cannot execute curl") from None
 
 
-def mkcol(parts: tuple[str, ...], config_path: Path) -> None:
-    # 201 means created; 405 means the directory was already present. Both are
-    # successful, idempotent outcomes for a retryable Feature publication.
-    completed = run_curl(write_curl_config(
-        config_path,
-        url=webdav_url(parts),
-        options=[("user", auth), ("request", "MKCOL"), ("output", "/dev/null"), ("write-out", "%{http_code}")],
-        flags=("silent", "show-error"),
-    ))
-    status = completed.stdout.strip()
-    if completed.returncode != 0 or status not in {"201", "405"}:
-        raise SystemExit(f"feature Nextcloud publication failed to create {'/'.join(parts)} (HTTP {status or 'unknown'})")
-
-
 result_path.parent.mkdir(parents=True, exist_ok=True)
 with tempfile.TemporaryDirectory(prefix=".feature-package-nextcloud-", dir=result_path.parent) as temporary:
     staging = Path(temporary)
     staging.chmod(0o700)
     registry_curl_config = staging / "registry-curl.conf"
-    webdav_curl_config = staging / "webdav-curl.conf"
+    incoming = staging / "incoming"
+    incoming.mkdir()
     # Download and verify the entire trusted Registry plan before issuing a
     # single Nextcloud write. This prevents a later corrupt download from
     # leaving a partially published package layout.
@@ -254,31 +271,41 @@ with tempfile.TemporaryDirectory(prefix=".feature-package-nextcloud-", dir=resul
             raise SystemExit(f"feature Nextcloud publication rejected downloaded Registry file: {item['registry_file']}")
         item["staged_path"] = local
 
-    made_directories: set[tuple[str, ...]] = set()
     for item in plan:
-        full_path = (*directory_parts, *item["nextcloud_parts"])
-        for depth in range(1, len(full_path)):
-            parent = full_path[:depth]
-            if parent not in made_directories:
-                mkcol(parent, webdav_curl_config)
-                made_directories.add(parent)
-        completed = run_curl(write_curl_config(
-            webdav_curl_config,
-            url=webdav_url(full_path),
-            options=[("user", auth), ("upload-file", str(item["staged_path"])), ("write-out", "%{http_code}")],
-            flags=("fail", "silent", "show-error"),
-        ))
-        if completed.returncode != 0 or completed.stdout.strip() not in {"200", "201", "204"}:
-            raise SystemExit(f"feature Nextcloud publication failed to upload Registry file: {item['registry_file']}")
+        target = incoming.joinpath(*item["incoming_parts"])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(item["staged_path"]), target)
+    source = context.get("source") or {}
+    command = [
+        "sudo", "-n", publisher,
+        "--incoming", str(incoming.resolve()),
+        "--feature-build-id", build_id,
+        "--tag", build_id, "--version", build_id,
+        "--date", f"{build_id[1:5]}-{build_id[5:7]}-{build_id[7:9]}",
+        "--category", "/".join(cloud_parts),
+        "--project", registry_target["project"],
+        "--commit-sha", str(source.get("sha") or ""),
+        "--pipeline-id", os.environ.get("CI_PIPELINE_ID", ""),
+        "--job-id", os.environ.get("CI_JOB_ID", ""),
+        "--pipeline-url", os.environ.get("CI_PIPELINE_URL", ""),
+    ]
+    if kind == "deb":
+        command.append("--deb-only")
+    completed = subprocess.run(command, check=False)
+    if completed.returncode:
+        raise SystemExit(f"feature server publication failed (exit {completed.returncode})")
 
-published_files = [{key: value for key, value in item.items() if key not in {"nextcloud_parts", "staged_path"}} for item in plan]
+published_files = [
+    {**{key: item[key] for key in ITEM_KEYS}, "nextcloud_path": item["published_path"]}
+    for item in plan if "published_path" in item
+]
 result = {
     "status": "success",
     "build_id": build_id,
     "components": context.get("components", []),
     "registry": registry,
     "nextcloud": {
-        "cloud_dir": "/".join((*directory_parts, kind)),
+        "cloud_dir": "/public/Versions/" + "/".join((*directory_parts, kind)),
         "files": published_files,
     },
 }

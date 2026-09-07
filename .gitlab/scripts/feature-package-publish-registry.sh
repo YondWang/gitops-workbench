@@ -2,7 +2,9 @@
 set -euo pipefail
 kind=${1:?kind required}; context_path=${2:?context required}; output_dir=${3:?output required}; publish_dir=${4:?publish directory required}
 case "$kind" in resident|deb) ;; *) echo "feature Registry: kind must be resident or deb" >&2; exit 2;; esac
-: "${CI_API_V4_URL:?CI_API_V4_URL is required}"; : "${GITOPS_FEATURE_SIMOS_PROJECT_ID:?GITOPS_FEATURE_SIMOS_PROJECT_ID is required}"; : "${CI_JOB_TOKEN:?CI_JOB_TOKEN is required}"
+: "${CI_API_V4_URL:?CI_API_V4_URL is required}"; : "${CI_PROJECT_ID:?CI_PROJECT_ID is required}"; : "${CI_PROJECT_PATH:?CI_PROJECT_PATH is required}"; : "${CI_JOB_TOKEN:?CI_JOB_TOKEN is required}"
+command -v python3 >/dev/null 2>&1 || { echo "feature Registry: python3 is required in the build image" >&2; exit 1; }
+command -v curl >/dev/null 2>&1 || { echo "feature Registry: curl is required in the build image" >&2; exit 1; }
 python3 - "$kind" "$context_path" "$output_dir" "$publish_dir" <<'PY'
 import hashlib,json,os,re,subprocess,sys
 from pathlib import Path
@@ -48,8 +50,8 @@ if c.get('schema')!=3 or 'config_source' in c: reject('context must be schema 3 
 bid=str(c.get('build_id') or '')
 if not re.fullmatch(r'T\d{14}_[A-Za-z0-9.-]+',bid): reject('invalid Feature build id')
 reg=c.get('registry') or {}; project=reg.get('project')
-if not isinstance(project,str) or not project: reject('invalid Registry target')
-pkg,mname=(('simos-resident','package-registry-result.json') if kind=='resident' else ('simos-debs','deb-package-registry-result.json'))
+if project != os.environ['CI_PROJECT_PATH']: reject('Registry target must be the Workbench project')
+pkg,mname=(('feature-resident','package-registry-result.json') if kind=='resident' else ('feature-debs','deb-package-registry-result.json'))
 plans=[]
 d=root/kind; mp=d/mname
 try: m=json.loads(mp.read_text())
@@ -75,8 +77,41 @@ for e in entries:
     fallback_name = rel.replace('/', '-')
     name=safe(e.get('registry_file') or fallback_name)
     plans.append({'package_name':pkg,'registry_file':name,'local_path':str(p.relative_to(root)),'kind':kind,'size':size,'md5':md5,'sha256':sha,'nextcloud_path':f'{kind}/{rel}'})
+
+# The formal SimOS entrypoints always emit metadata beside the package files
+# (for example deb-package-info/build-info.json and the copied registry
+# manifest).  Those files are part of the trusted build output and must be
+# published as well; treating them as unexpected files makes every successful
+# deb build fail before the first upload.  Add them deterministically using a
+# path-derived Registry leaf so nested build-info.json files cannot collide.
+for p in sorted(d.rglob('*')):
+    if not p.is_file() or p.is_symlink() or p == mp or p in listed:
+        continue
+    relp = p.relative_to(d)
+    is_metadata = (
+        'metadata' in relp.parts
+        or p.suffix in {'.json', '.txt', '.md5', '.sha256', '.xml', '.env'}
+        or 'build-info' in p.name
+        or 'checksum' in p.name
+        or p.name in {'vehicle.info', 'version.info', 'software.yaml'}
+    )
+    if not is_metadata:
+        continue
+    listed.add(p)
+    size, md5, sha = dig(p)
+    name = safe(str(relp).replace('/', '-'))
+    plans.append({
+        'package_name': pkg,
+        'registry_file': name,
+        'local_path': str(p.relative_to(root)),
+        'kind': kind,
+        'size': size,
+        'md5': md5,
+        'sha256': sha,
+        'nextcloud_path': f'{kind}/{relp.as_posix()}',
+    })
 for p in d.rglob('*'):
-    if p.is_file() and p not in listed and p.name!=mname:
+    if p.is_file() and p not in listed and p != mp:
         relp = p.relative_to(d)
         is_metadata = 'metadata' in relp.parts or p.suffix in {'.json', '.txt', '.md5', '.sha256', '.xml', '.env'} or 'build-info' in p.name or 'checksum' in p.name
         is_package = p.suffix in ('.deb', '.ddeb', '.zip') or p.name.endswith('.tar.gz')
@@ -86,11 +121,21 @@ seen=set()
 for i in plans:
     k=(i['package_name'],i['registry_file'])
     if k in seen: reject(f'duplicate Registry target: {k}')
-    seen.add(k); i['registry_url']=f"{os.environ['CI_API_V4_URL'].rstrip('/')}/projects/{os.environ['GITOPS_FEATURE_SIMOS_PROJECT_ID']}/packages/generic/{i['package_name']}/{bid}/{i['registry_file']}"
+    seen.add(k); i['registry_url']=f"{os.environ['CI_API_V4_URL'].rstrip('/')}/projects/{os.environ['CI_PROJECT_ID']}/packages/generic/{i['package_name']}/{bid}/{i['registry_file']}"
 for i in plans:
     confined(root/i['local_path'])
 for i in plans:
-    subprocess.run(['curl','--fail','--silent','--show-error','--location','--header',f"JOB-TOKEN: {os.environ['CI_JOB_TOKEN']}",'--upload-file',str(confined(root/i['local_path'])),i['registry_url']],check=True)
+    local = confined(root / i['local_path'])
+    print(f"feature Registry: uploading {i['kind']} {i['local_path']} -> {i['registry_file']}", flush=True)
+    try:
+        subprocess.run([
+            'curl', '--fail', '--silent', '--show-error', '--location',
+            '--retry', '3', '--retry-delay', '2',
+            '--header', f"JOB-TOKEN: {os.environ['CI_JOB_TOKEN']}",
+            '--upload-file', str(local), i['registry_url'],
+        ], check=True)
+    except subprocess.CalledProcessError as exc:
+        reject(f"Registry upload failed for {i['local_path']} (curl exit {exc.returncode})")
 pub_path.mkdir(parents=True,exist_ok=True)
 (pub_path/'registry-result.json').write_text(json.dumps({'build_id':bid,'project':project,'kind':kind,kind:{'package_name':pkg,'package_version':bid},'files':plans},ensure_ascii=False,indent=2)+'\n')
 PY

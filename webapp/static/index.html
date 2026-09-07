@@ -168,7 +168,7 @@
                 <code id="featurePackageVersionPreview">选择 Feature 分支后计算</code>
               </div>
               <p class="field-hint">构建只冻结当前 Feature 的提交快照并在临时工作区注入 T 版本；不会创建远端分支、Tag、提交或 MR，也不会上传 OTA。</p>
-              <button class="primary">创建测试包</button>
+              <button class="primary" id="createFeaturePackageBtn" type="submit">创建测试包</button>
             </form>
           </article>
           </div>
@@ -179,8 +179,8 @@
             </div>
             <div class="table-wrap">
               <table>
-                <thead><tr><th>版本</th><th>来源</th><th>状态</th><th>Pipeline</th><th>云盘</th></tr></thead>
-                <tbody id="featurePackageRunsBody"><tr><td colspan="5">暂无构建记录</td></tr></tbody>
+                <thead><tr><th>版本</th><th>来源</th><th>状态</th><th>Pipeline</th><th>云盘</th><th data-admin-only>操作</th></tr></thead>
+                <tbody id="featurePackageRunsBody"><tr><td colspan="6">暂无构建记录</td></tr></tbody>
               </table>
             </div>
           </article>
@@ -704,6 +704,18 @@
         </article>
       </section>
     </main>
+
+    <div id="featurePackageResultModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="featurePackageResultTitle" hidden>
+      <div class="modal-backdrop" data-modal-close></div>
+      <div class="modal-card" tabindex="-1">
+        <div id="featurePackageResultIcon" class="modal-status" aria-hidden="true"></div>
+        <h2 id="featurePackageResultTitle">Feature 测试包创建结果</h2>
+        <p id="featurePackageResultMessage"></p>
+        <div id="featurePackageResultVersion" class="modal-detail"></div>
+        <a id="featurePackageResultPipeline" class="modal-link" target="_blank" rel="noopener noreferrer" hidden>查看流水线</a>
+        <div class="modal-actions"><button id="featurePackageResultClose" type="button">知道了</button></div>
+      </div>
+    </div>
 
     <script src="/app.js"></script>
   </body>

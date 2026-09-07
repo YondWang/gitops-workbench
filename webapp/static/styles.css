@@ -18,6 +18,26 @@
   box-sizing: border-box;
 }
 
+body.modal-open { overflow: hidden; }
+
+.modal[hidden] { display: none; }
+.modal { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 20px; }
+.modal-backdrop { position: absolute; inset: 0; background: rgba(15, 23, 42, .52); }
+.modal-card { position: relative; width: min(100%, 480px); padding: 28px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: 0 24px 70px rgba(15, 23, 42, .28); overflow-wrap: anywhere; }
+.modal-card h2 { margin: 0 0 12px; }
+.modal-card p { margin: 0 0 12px; line-height: 1.6; }
+.modal-status { display: grid; place-items: center; width: 42px; height: 42px; margin-bottom: 14px; border-radius: 50%; color: #fff; font-size: 25px; font-weight: 700; }
+.modal-success .modal-status { background: #15803d; }
+.modal-error .modal-status { background: var(--danger); }
+.modal-detail { margin: 10px 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-all; }
+.modal-link { display: inline-block; margin-top: 4px; color: var(--primary-strong); font-weight: 600; }
+.modal-actions { display: flex; justify-content: flex-end; margin-top: 22px; }
+
+@media (max-width: 560px) {
+  .modal { padding: 12px; }
+  .modal-card { padding: 22px; }
+}
+
 body {
   margin: 0;
   min-height: 100vh;
