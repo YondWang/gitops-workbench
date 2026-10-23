@@ -15,6 +15,13 @@ if ! id "$APP_USER" >/dev/null 2>&1; then
   exit 1
 fi
 
+APP_HOME="$(getent passwd "$APP_USER" | cut -d: -f6)"
+if [ -n "$APP_HOME" ] && [ "$APP_HOME" != "/" ] && [ ! -d "$APP_HOME" ]; then
+  mkdir -p "$APP_HOME"
+  chown "$APP_USER:$APP_USER" "$APP_HOME"
+  echo "Created missing home directory: $APP_HOME"
+fi
+
 mkdir -p "$APP_DIR" "$DATA_DIR/data" "$DATA_DIR/certs" "$DATA_DIR/logs"
 chown -R "$APP_USER:$APP_USER" "$APP_DIR" "$DATA_DIR"
 chmod 750 "$DATA_DIR/certs"

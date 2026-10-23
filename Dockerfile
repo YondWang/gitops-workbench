@@ -20,7 +20,7 @@ RUN sed -i \
         -o Acquire::https::Timeout=30 \
         -o Acquire::Retries=3 \
         update \
-    && apt-get install -y --no-install-recommends git ca-certificates \
+    && apt-get install -y --no-install-recommends git ca-certificates openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 COPY webapp/ /app/

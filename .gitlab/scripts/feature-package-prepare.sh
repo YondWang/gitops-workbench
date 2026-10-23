@@ -3,10 +3,11 @@ set -euo pipefail
 context_path=${1:?context JSON required}
 workspace=${2:?workspace required}
 rm -rf "$workspace"
-python3 - "$context_path" "$workspace" <<'PY'
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+python3 - "$context_path" "$workspace" "$script_dir" <<'PY'
 import json, os, subprocess, sys
+import importlib.util
 from pathlib import Path
-from urllib.parse import quote
 
 context = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 root = Path(sys.argv[2])
@@ -17,20 +18,15 @@ if not server_url:
 server_host = os.environ.get("CI_SERVER_HOST", "").strip()
 if not server_host:
     raise SystemExit("CI_SERVER_HOST is required to rewrite Feature submodule URLs")
-job_token = quote(os.environ["CI_JOB_TOKEN"], safe="")
-base = f"{server_url.split('://', 1)[0]}://gitlab-ci-token:{job_token}@{server_url.split('://', 1)[1]}/"
+auth_spec = importlib.util.spec_from_file_location("feature_git_auth", Path(sys.argv[3]) / "feature-package-git-auth.py")
+auth = importlib.util.module_from_spec(auth_spec)
+auth_spec.loader.exec_module(auth)
+base = auth.configure(server_url, server_host, os.environ["CI_JOB_TOKEN"])
 def run(*args, cwd=None): subprocess.run(args, cwd=cwd, check=True)
 
 # SimOS records SSH submodules, while this isolated K8s Job must fetch them
 # over the GitLab HTTPS endpoint. CI_SERVER_URL retains the non-default :9900
 # port; CI_SERVER_HOST alone does not.
-for old_url in (
-    f"https://{server_host}/",
-    f"http://{server_host}/",
-    f"ssh://git@{server_host}:22222/",
-    f"git@{server_host}:",
-):
-    run("git", "config", "--global", "--add", f"url.{base}.insteadOf", old_url)
 run("git", "clone", "--no-checkout", base + source["project"] + ".git", str(root))
 run("git", "checkout", "--detach", source["sha"], cwd=root)
 if subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip() != source["sha"]:

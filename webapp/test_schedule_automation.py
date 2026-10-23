@@ -61,6 +61,7 @@ class FakeClient:
         self._tag_names: list[str] = []
         self._merge_requests: list[dict[str, Any]] = []
         self.branch_commit = {"id": f"{repo_id}-new", "short_id": f"{repo_id}-new", "parent_ids": []}
+        self.version_info = VERSION_INFO
         self.software_yaml = 'version: "3.1.24.019"\ncomponents:\n'
 
     def project(self) -> dict[str, Any]:
@@ -85,7 +86,7 @@ class FakeClient:
     def get_file_text(self, file_path: str, ref: str) -> str:
         self.calls.append(("get_file_text", file_path, ref))
         if file_path == "version.info":
-            return VERSION_INFO
+            return self.version_info
         if file_path == "pkg.info":
             return "version:3.1.24.0\n"
         if file_path == "software.yaml":
@@ -206,31 +207,58 @@ class ScheduleAutomationTest(unittest.TestCase):
             [("SIMBOT_R6_A", "360", True), ("SIMBOT_R6_B", "360s", True)],
         )
 
+    def test_single_config_selection_survives_version_mr_and_pipeline_creation(self) -> None:
+        self.client.create_pipeline = Mock(return_value={"id": 42})
+        self.app.save_schedule({
+            "id": "single-config-release",
+            "default_ref": "fix",
+            "config_matrix_enabled": False,
+            "config_ref": "feature/v3.2_x86ci",
+            # The browser submits the hidden matrix checkboxes too.
+            "config_matrix": [
+                {"config_ref": "SIMBOT_R6_A", "label": "360", "enabled": True},
+                {"config_ref": "SIMBOT_R6_B", "label": "360s", "enabled": True},
+            ],
+        })
+        started = self.app.schedule_run_now("single-config-release", now="2026-07-04T16:00:00+08:00")
+        run = started["run"]
+        self.assertEqual(run["status"], "merging_version_mr")
+        self.assertEqual(run["config_matrix"], [{"config_ref": "feature/v3.2_x86ci", "label": "feature-v3.2_x86ci"}])
+        self.client._merge_requests[0]["state"] = "merged"
+        self.client.branch_commit = {"id": "version-commit", "short_id": "version", "parent_ids": ["simos-new"]}
+        continued = self.app.continue_release_run(run["id"])
+        self.assertEqual(continued["run"]["status"], "building")
+        variables = self.client.create_pipeline.call_args.args[1]
+        self.assertEqual(variables["SIMOS_CONFIG_MODE"], "single")
+        self.assertEqual(variables["SIMOS_CONFIG_MATRIX"], "feature/v3.2_x86ci:feature-v3.2_x86ci")
+        self.assertEqual(variables["SIMOS_CONFIG_REF"], "feature/v3.2_x86ci")
+
     def test_dry_run_resolves_tag_without_creating_it(self) -> None:
         result = self.app.schedule_dry_run("daily-simos-resident-release", now="2026-07-03T16:00:00+08:00")
 
         self.assertTrue(result["ok"])
-        self.assertEqual(result["plan"]["version"], "V3.1.25.019")
+        self.assertEqual(result["plan"]["version"], "V3.1.24.020")
         self.assertEqual(result["plan"]["version_prefix"], "V")
         self.assertEqual(result["plan"]["ref"], "fix")
-        self.assertEqual(result["plan"]["tag_name"], "fix_V3.1.25.019_202607031600")
+        self.assertEqual(result["plan"]["tag_name"], "fix_V3.1.24.020_202607031600")
         self.assertEqual(result["plan"]["cloud_category"], "车机/CI自动构建")
         self.assertNotIn("effective_cloud_category", result["plan"])
-        self.assertEqual(result["plan"]["cloud_dir"], "/public/Versions/2026-07-03_V3.1.25.019/车机/CI自动构建")
+        self.assertEqual(result["plan"]["cloud_dir"], "/public/Versions/2026-07-03_V3.1.24.020/车机/CI自动构建")
         self.assertIn("SIMOS_CLOUD_CATEGORY=车机/CI自动构建", result["plan"]["message"])
         self.assertIn("SIMOS_CONFIG_MATRIX=SIMBOT_R6_A:360,SIMBOT_R6_B:360s", result["plan"]["message"])
-        self.assertTrue(result["plan"]["requires_weekly_version_confirmation"])
+        self.assertFalse(result["plan"].get("requires_weekly_version_confirmation", False))
+        self.assertEqual(result["plan"]["weekly_version"]["reason"], "branch_version_only")
         self.assertFalse(any(call[0] == "create_tag" for call in self.client.calls))
 
-    def test_run_now_waits_for_friday_weekly_version_confirmation(self) -> None:
+    def test_run_now_uses_branch_version_without_weekly_tag_policy(self) -> None:
         result = self.app.schedule_run_now("daily-simos-resident-release", now="2026-07-03T16:00:00+08:00")
 
         self.assertTrue(result["ok"])
-        self.assertEqual(result["run"]["status"], "waiting_weekly_version_confirmation")
-        self.assertFalse(any(call[0] == "create_merge_request" for call in self.client.calls))
+        self.assertEqual(result["run"]["status"], "merging_version_mr")
+        self.assertTrue(any(call[0] == "create_merge_request" for call in self.client.calls))
         self.assertFalse(any(call[0] == "create_tag" for call in self.client.calls))
         runs = self.app.schedule_runs("daily-simos-resident-release")
-        self.assertEqual(runs["runs"][0]["tag_name"], "fix_V3.1.25.019_202607031600")
+        self.assertEqual(runs["runs"][0]["tag_name"], "fix_V3.1.24.020_202607031600")
 
     def test_full_release_plan_and_run_preserve_component_resolution_snapshot(self) -> None:
         result = self.app.schedule_run_now("daily-simos-resident-release", now="2026-07-04T16:00:00+08:00")
@@ -334,13 +362,45 @@ commits:
             [],
         )
 
-    def test_continue_after_weekly_confirmation_creates_version_mr(self) -> None:
+    def test_release_version_increments_branch_version_instead_of_component_mask(self) -> None:
+        business_repo = RepositoryConfig(
+            id="business", name="business", base_url="https://gitlab.example", project="OS/business", token_env="BUSINESS_TOKEN"
+        )
+        localization_repo = RepositoryConfig(
+            id="localization", name="localization", base_url="https://gitlab.example", project="OS/localization", token_env="LOCALIZATION_TOKEN"
+        )
+        pnc_repo = RepositoryConfig(
+            id="pnc", name="pnc", base_url="https://gitlab.example", project="OS/pnc", token_env="PNC_TOKEN"
+        )
+        clients = {"simos": FakeClient("simos")}
+        clients["simos"].version_info = 'Version:V3.2.8.057\nNextVersion:""\nPreVersion:V3.2.8.056\n'
+        clients["simos"].software_yaml = (
+            'version: "V3.2.8.057"\ncommits:\n'
+            '  main: "simos-sha"\n  business: "business-sha"\n  localization: "localization-sha"\n  pnc: "pnc-sha"\n'
+        )
+        clients["business"] = FakeClient("business")
+        clients["localization"] = FakeClient("localization")
+        clients["pnc"] = FakeClient("pnc")
+        self.app.store = FakeStore([self.repo, business_repo, localization_repo, pnc_repo])  # type: ignore[assignment]
+        self.app.client_for = lambda repo: clients[repo.id]  # type: ignore[method-assign]
+
+        normal = self.app.manual_release_preview({"source_ref": "fix", "now": "2026-11-11T16:27:00+08:00"})
+        self.assertEqual(normal["current_version"], "3.2.8.057")
+        self.assertEqual(normal["version"], "V3.2.8.058")
+        self.assertEqual(normal["tag_name"], "fix_V3.2.8.058_202611111627")
+
+        weekly = self.app.manual_release_preview(
+            {"source_ref": "fix", "force_week_bump": True, "now": "2026-11-11T16:27:00+08:00"}
+        )
+        self.assertEqual(weekly["version"], "V3.2.9.038")
+
+    def test_continue_release_run_requests_version_merge(self) -> None:
         self.app.save_schedule({"id": "daily-simos-resident-release", "config_ref": "SIMBOT_R6_B"})
         result = self.app.schedule_run_now("daily-simos-resident-release", now="2026-07-03T16:00:00+08:00")
         continued = self.app.continue_release_run(result["run"]["id"])
 
         self.assertEqual(continued["run"]["status"], "merging_version_mr")
-        self.assertEqual(continued["run"]["tag_name"], "fix_V3.1.25.019_202607031600")
+        self.assertEqual(continued["run"]["tag_name"], "fix_V3.1.24.020_202607031600")
         self.assertTrue(any(call[0] == "create_merge_request" for call in self.client.calls))
         self.assertIn(("accept_merge_request", 7), self.client.calls)
         self.assertFalse(any(call[0] == "create_tag" for call in self.client.calls))
@@ -663,12 +723,12 @@ commits:
         self.assertIn('manualReleaseCalculateBtn")?.addEventListener("click", refreshManualReleasePreview)', app_js)
         self.assertIn("待点击“计算版本”", app_js)
 
-    def test_same_week_existing_third_only_bumps_fourth(self) -> None:
+    def test_existing_same_week_tags_do_not_override_branch_version(self) -> None:
         self.client._tag_names.append("fix_V3.1.25.020_202607031600")
         result = self.app.schedule_dry_run("daily-simos-resident-release", now="2026-07-04T16:00:00+08:00")
 
-        self.assertEqual(result["plan"]["version"], "V3.1.25.021")
-        self.assertEqual(result["plan"]["tag_name"], "fix_V3.1.25.021_202607041600")
+        self.assertEqual(result["plan"]["version"], "V3.1.24.020")
+        self.assertEqual(result["plan"]["tag_name"], "fix_V3.1.24.020_202607041600")
         self.assertFalse(result["plan"].get("requires_weekly_version_confirmation", False))
 
     def test_schedule_crud_supports_multiple_tasks(self) -> None:
@@ -770,7 +830,7 @@ commits:
         result = self.app.schedule_run_now("daily-simos-resident-release", now="2026-07-04T16:00:00+08:00")
         continued = self.app.continue_release_run(result["run"]["id"])
 
-        self.assertEqual(continued["run"]["cloud_dir"], "/public/Versions/2026-07-04_V3.1.25.021/车机/夜间构建")
+        self.assertEqual(continued["run"]["cloud_dir"], "/public/Versions/2026-07-04_V3.1.24.020/车机/夜间构建")
         self.assertTrue(any(call[0] == "create_merge_request" for call in self.client.calls))
         payload_message = continued["run"]["create_tag_payload"]["message"]
         self.assertIn("SIMOS_CLOUD_CATEGORY=车机/夜间构建", payload_message)
@@ -807,7 +867,7 @@ commits:
         tagged = self.app.continue_release_run(result["run"]["id"])
 
         self.assertEqual(tagged["run"]["status"], "building")
-        tag_name = "fix_V3.1.25.021_202607041600"
+        tag_name = "fix_V3.1.24.020_202607041600"
         message = tagged["run"]["create_tag_payload"]["message"]
         self.assertIn("SIMOS_CONFIG_MATRIX=SIMBOT_R6_B:360s", message)
         self.assertIn("SIMOS_CONFIG_REFS=SIMBOT_R6_B", message)

@@ -7,7 +7,7 @@
 - 页面中添加、编辑、启用、停用多个 GitLab 仓库。
 - 读取并分组展示当前仓库的远端分支和 Tag。
 - `admin` 可从指定来源分支或 Tag 创建唯一 `release` 分支。
-- `user` 和 `admin` 可从 `release`、`bugfix/<版本号>` 或迁移期 `fix` 创建 `feature/{来源}_{功能描述}`，任务号可选。
+- `user` 和 `admin` 可从 `release`、`bugfix/<版本号>`、迁移期 `fix` 或已有 `feature/*` 创建 `feature/{来源}_{功能描述}`，任务号可选；目标仓库支持勾选 `config`，也可仅选择 `config`。
 - `admin` 可从指定来源分支或 Tag 创建版本级长期分支 `bugfix/<版本号>`。
 - Web 工具创建的 `release`、`bugfix/<版本号>` 默认设置为 GitLab 保护分支。
 - `admin` 可基于分支创建 Tag，默认命名为 `<来源>-<yyyyMMddHHmmss>`；来源分支中的 `/` 会替换为 `-`。
@@ -33,8 +33,9 @@ bugfix/<版本号>
 规则摘要：
 
 - `release` 只有一个，是下一版本功能集成和提测分支。
-- `feature/*` 可以从 `release`、`bugfix/<版本号>` 或迁移期 `fix` 拉出。
+- `feature/*` 可以从 `release`、`bugfix/<版本号>`、迁移期 `fix` 或已有 `feature/*` 拉出；来源列表仅显示所勾选仓库共有的这些分支。
 - `feature/*` 分支名称需要简洁体现来源分支；任务号可选，功能描述必填。
+- 从已有 Feature 拉出时沿用来源命名规则，例如来源 `feature/release_login`、功能描述 `payment` 生成 `feature/feature-release_login_payment`。
 - `feature/*` 必须遵循“从哪拉出，就合入到哪”的原则。
 - `bugfix/<版本号>` 是版本级长期维护分支，不是个人问题级短分支。
 - `bugfix/<版本号>` 稳定节点在自身分支打 Tag 进行提测或发版。
@@ -74,7 +75,7 @@ Nextcloud 发布器只下载已验证的 Registry 清单，校验大小、MD5 �
 - 仅发布流水线只运行 `feature_republish`，从本项目指定 Job 下载两份清单，再从 Registry 下载包，不执行编译。构建 artifact 必须尚未过期，指定 Job 的类型必须与 kind 一致。结果 artifact 属于新流水线，原流水线状态不会因此变绿，Workbench 原构建记录也不会自动更新。
 - 三个发布 Job 均通过 `after_script` 为提前失败生成不含凭据的失败结果；这不会改变 Job 的失败状态。补发布下载仅接受 GitLab 端点的 HTTP 200；artifact 已过期、权限不足或端点返回重定向时会失败，不会继续发布。
 
-Feature 打包使用 schema 3 签名上下文。Config 是可选的普通仓库；启用后与其他子库使用相同的 Feature/基线分支解析并冻结 SHA，不再使用 `SIMBOT_R6_A/B` 矩阵。每次 Pipeline 仅生成一个 resident 和一个 deb，阶段为 `package`、`publish`。`TyyyyMMddHHmmss_描述` 仅作为构建 ID、Generic Package 版本及 Nextcloud 目录名，不是 Git Tag；Feature 流程不会创建 Tag、分支、MR、release note 或 OTA 任务。
+Feature 打包使用 schema 3 签名上下文，并且基线分支必填：勾选的仓库冻结到各自的 Feature 分支，未勾选但属于 SimOS 子模块/Config 的仓库统一冻结到基线分支（resident 镜像是完整快照，Config 总是自动纳入以保证 `install/share/config` 媒体内容完整），不再使用 `SIMBOT_R6_A/B` 矩阵。每次 Pipeline 仅生成一个 resident 和一个 deb，阶段为 `package`、`publish`。`TyyyyMMddHHmmss_描述` 仅作为构建 ID、Generic Package 版本及 Nextcloud 目录名，不是 Git Tag；Feature 流程不会创建 Tag、分支、MR、release note 或 OTA 任务。
 
 版本号按精确 SimOS 来源分支独立维护：`fix`、`release`、`feature/ABC` 与 `feature/XYZ` 的版本文件和版本兜底值互不共享。
 
@@ -105,6 +106,10 @@ GITLAB_TOKEN=replace-with-a-gitlab-token
 ```
 
 Token 需要具备 `api` scope，并至少拥有目标项目 Maintainer 权限。新增仓库时可以复用 `GITLAB_TOKEN`，也可以在 `.env.local` 中添加新的 Token 变量，例如 `GITLAB_TOKEN_OTHER`，然后在页面的 `token_env` 填写该变量名。
+
+GitLab Personal Access Token 有有效期。若日志出现 `GitLab API 返回 401：invalid_token` 和 `Token is expired`，需要重新生成 Token、更新 `.env.local`（生产环境为 `/opt/gitops-workbench/.env`）并重启服务。
+
+Personal Access Token 必须以 `glpat-` 开头。`glft-` 开头的是 GitLab Feed Token，只能用于 RSS/Atom 订阅，调用 GitLab API 会返回 `401 Unauthorized`。
 
 发版任务会为版本号更新创建 MR，并立即通过 GitLab API 请求合入；只有 GitLab 实际报告该 MR 已合入后，系统才会继续创建 Tag。请确保 SimOS 仓库所使用的 Token 同时具备 `api` scope 和该项目的 MR 合入权限。GitLab 的保护分支、审批和可合并性限制仍然有效；若 GitLab 拒绝合入，页面会显示原因并允许在自动重试次数耗尽后执行“一键重试自动合并”。
 

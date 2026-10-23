@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+# 云盘发布 helper（运行在 192.168.110.17 宿主机）。
+# 与现有 simos-ci-publish-resident 隔离，避免影响 resident/deb 既有发布链路。
+# 支持：
+#   --sim-only        发布 incoming/sim-x86 下的 x86 仿真包
+#   --sim-report-only 发布 incoming/sim-test-report 下的测试报告
+set -Eeuo pipefail
+
+ARTIFACT_ROOT="${SIMOS_PUBLISH_ARTIFACT_ROOT:-/data/simos-ci/artifacts}"
+NEXTCLOUD_VERSIONS_ROOT="${SIMOS_PUBLISH_NEXTCLOUD_VERSIONS_ROOT:-/home/data/nextcloud/app/data/__groupfolders/1/files/Versions}"
+NEXTCLOUD_PUBLIC_ROOT="${SIMOS_PUBLISH_NEXTCLOUD_PUBLIC_ROOT:-/public/Versions}"
+NEXTCLOUD_CONTAINER="${SIMOS_PUBLISH_NEXTCLOUD_CONTAINER:-envs-app-1}"
+NEXTCLOUD_GROUPFOLDER_ID="${SIMOS_PUBLISH_NEXTCLOUD_GROUPFOLDER_ID:-1}"
+SKIP_OCC="${SIMOS_PUBLISH_SKIP_OCC:-false}"
+PUBLISHER_CAPABILITY="sim-package-v1"
+
+usage() {
+  cat <<'USAGE'
+usage:
+  simos-ci-publish-sim --capability sim-package-v1
+  simos-ci-publish-sim --sim-only --incoming DIR --tag TAG --version VERSION --date YYYY-MM-DD --category CATEGORY [options]
+  simos-ci-publish-sim --sim-report-only --incoming DIR --tag TAG --version VERSION --date YYYY-MM-DD --category CATEGORY --task-id TASK [options]
+
+Options:
+  --project PROJECT
+  --commit-sha SHA
+  --pipeline-id ID
+  --job-id ID
+  --pipeline-url URL
+USAGE
+}
+
+die() {
+  echo "[sim-publish] ERROR: $*" >&2
+  exit 2
+}
+
+if [[ "${1:-}" == "--capability" ]]; then
+  [[ "${2:-}" == "$PUBLISHER_CAPABILITY" && "$#" -eq 2 ]] || die "unsupported publisher capability: ${2:-}"
+  printf '%s\n' "$2"
+  exit 0
+fi
+
+safe_ref() {
+  [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]]
+}
+
+safe_version() {
+  [[ "$1" =~ ^[VvFfTt]?[0-9]+([.][0-9]+)+$ ]]
+}
+
+safe_date() {
+  [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
+}
+
+safe_category() {
+  local value="$1"
+  [[ -n "$value" && "$value" != /* && "$value" != *".."* && "$value" != *"//"* ]]
+}
+
+safe_task_id() {
+  [[ "$1" =~ ^SIMTEST-[0-9]{14}-[0-9a-f]{6}$ ]]
+}
+
+fix_permissions() {
+  local artifact_dir="$1"
+  local version_target="$2"
+  if [[ "$(id -u)" -eq 0 ]]; then
+    chown -R gitlab-runner:docker "$artifact_dir" 2>/dev/null || true
+    chown -R www-data:www-data "$version_target" 2>/dev/null || true
+  fi
+  find "$version_target" -type d -exec chmod 0755 {} + 2>/dev/null || true
+  find "$version_target" -type f -exec chmod 0644 {} + 2>/dev/null || true
+}
+
+scan_nextcloud() {
+  local cloud_relative="$1"
+  if [[ "$SKIP_OCC" != "true" ]]; then
+    docker exec --user www-data "$NEXTCLOUD_CONTAINER" php occ groupfolders:scan "$NEXTCLOUD_GROUPFOLDER_ID" --path="/Versions/${cloud_relative}"
+  fi
+}
+
+write_manifest() {
+  local stage="$1"
+  local manifest_name="$2"
+  local cloud_dir="$3"
+  local tag="$4"
+  local version="$5"
+  local task_id="${6:-}"
+  stage="$stage" manifest_name="$manifest_name" CLOUD_DIR="$cloud_dir" TAG="$tag" VERSION="$version" TASK_ID="$task_id" \
+    python3 - <<'PY' > "$stage/$manifest_name"
+import hashlib
+import json
+import os
+from pathlib import Path
+
+stage = Path(os.environ["STAGE"])
+files = []
+for path in sorted(stage.rglob("*")):
+    if not path.is_file() or path.name == os.environ["MANIFEST_NAME"]:
+        continue
+    rel = path.relative_to(stage)
+    data = path.read_bytes()
+    files.append({
+        "file": path.name,
+        "path": str(rel),
+        "size": len(data),
+        "md5": hashlib.md5(data).hexdigest(),
+        "sha256": hashlib.sha256(data).hexdigest(),
+    })
+payload = {
+    "tag": os.environ["TAG"],
+    "version": os.environ["VERSION"],
+    "cloud_dir": os.environ["CLOUD_DIR"],
+    "task_id": os.environ.get("TASK_ID", ""),
+    "files": files,
+    "published_at": os.environ.get("PUBLISHED_AT", ""),
+}
+print(json.dumps(payload, ensure_ascii=False, indent=2))
+PY
+}
+
+MODE=""
+INCOMING=""
+TAG=""
+VERSION=""
+DATE_VALUE=""
+CATEGORY=""
+PROJECT="OS/simos"
+COMMIT_SHA=""
+PIPELINE_ID=""
+JOB_ID=""
+PIPELINE_URL=""
+TASK_ID=""
+
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --sim-only) MODE="sim"; shift ;;
+    --sim-report-only) MODE="sim-report"; shift ;;
+    --incoming) INCOMING="${2:-}"; shift 2 ;;
+    --tag) TAG="${2:-}"; shift 2 ;;
+    --version) VERSION="${2:-}"; shift 2 ;;
+    --date) DATE_VALUE="${2:-}"; shift 2 ;;
+    --category) CATEGORY="${2:-}"; shift 2 ;;
+    --project) PROJECT="${2:-}"; shift 2 ;;
+    --commit-sha) COMMIT_SHA="${2:-}"; shift 2 ;;
+    --pipeline-id) PIPELINE_ID="${2:-}"; shift 2 ;;
+    --job-id) JOB_ID="${2:-}"; shift 2 ;;
+    --pipeline-url) PIPELINE_URL="${2:-}"; shift 2 ;;
+    --task-id) TASK_ID="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "$MODE" ]] || die "one of --sim-only or --sim-report-only is required"
+[[ -d "$INCOMING" ]] || die "incoming directory not found: $INCOMING"
+safe_ref "$TAG" || die "invalid tag: $TAG"
+safe_version "$VERSION" || die "invalid version: $VERSION"
+safe_date "$DATE_VALUE" || die "invalid date: $DATE_VALUE"
+safe_category "$CATEGORY" || die "invalid category: $CATEGORY"
+if [[ -n "$TASK_ID" ]]; then
+  safe_task_id "$TASK_ID" || die "invalid task id: $TASK_ID"
+fi
+
+PUBLISH_ROOT_NAME="${DATE_VALUE}_${VERSION}"
+CLOUD_RELATIVE="${PUBLISH_ROOT_NAME}/${CATEGORY}"
+CLOUD_DIR="${NEXTCLOUD_PUBLIC_ROOT}/${CLOUD_RELATIVE}"
+ARTIFACT_DIR="$ARTIFACT_ROOT/$TAG"
+VERSION_TARGET="$NEXTCLOUD_VERSIONS_ROOT/$PUBLISH_ROOT_NAME"
+CLOUD_TARGET="$NEXTCLOUD_VERSIONS_ROOT/$CLOUD_RELATIVE"
+
+mkdir -p "$ARTIFACT_ROOT" "$(dirname "$CLOUD_TARGET")"
+
+publish_sim() {
+  local source_dir="$INCOMING/sim-x86"
+  [[ -d "$source_dir" ]] || die "sim-x86 not found: $source_dir"
+  if ! find "$source_dir" -type f | grep -q .; then
+    die "sim-x86 is empty"
+  fi
+  local stage
+  stage="$(mktemp -d "$ARTIFACT_ROOT/.sim-stage-${TAG}-${JOB_ID:-manual}.XXXXXX")"
+  trap 'rm -rf "$stage"' RETURN
+  cp -a "$source_dir/." "$stage/"
+  local published_at
+  published_at="$(date -Iseconds)"
+  export TAG VERSION CLOUD_DIR PUBLISHED_AT="$published_at" STAGE="$stage" MANIFEST_NAME="manifest.json" TASK_ID=""
+  write_manifest "$stage" "manifest.json" "${CLOUD_DIR}/sim-x86" "$TAG" "$VERSION" ""
+  local artifact_target="${ARTIFACT_DIR}/sim-x86"
+  local cloud_target="${CLOUD_TARGET}/sim-x86"
+  rm -rf "$artifact_target" "$cloud_target"
+  mkdir -p "$artifact_target" "$cloud_target"
+  cp -a "$stage/." "$artifact_target/"
+  cp -a "$stage/." "$cloud_target/"
+  fix_permissions "$artifact_target" "$VERSION_TARGET"
+  scan_nextcloud "${CLOUD_RELATIVE}/sim-x86"
+  echo "[sim-publish] sim artifact_dir=$artifact_target"
+  echo "[sim-publish] sim cloud_dir=${CLOUD_DIR}/sim-x86"
+}
+
+publish_report() {
+  local source_dir="$INCOMING/sim-test-report"
+  [[ -n "$TASK_ID" ]] || die "--task-id is required for --sim-report-only"
+  [[ -d "$source_dir" ]] || die "sim-test-report not found: $source_dir"
+  if ! find "$source_dir" -type f | grep -q .; then
+    die "sim-test-report is empty"
+  fi
+  local stage
+  stage="$(mktemp -d "$ARTIFACT_ROOT/.sim-report-stage-${TASK_ID}-${JOB_ID:-manual}.XXXXXX")"
+  trap 'rm -rf "$stage"' RETURN
+  cp -a "$source_dir/." "$stage/"
+  local published_at
+  published_at="$(date -Iseconds)"
+  export TAG VERSION CLOUD_DIR PUBLISHED_AT="$published_at" STAGE="$stage" MANIFEST_NAME="manifest.json" TASK_ID="$TASK_ID"
+  write_manifest "$stage" "manifest.json" "${CLOUD_DIR}/sim-test-report/${TASK_ID}" "$TAG" "$VERSION" "$TASK_ID"
+  local artifact_target="${ARTIFACT_DIR}/sim-test/${TASK_ID}/report"
+  local cloud_target="${CLOUD_TARGET}/sim-test-report/${TASK_ID}"
+  rm -rf "$artifact_target" "$cloud_target"
+  mkdir -p "$artifact_target" "$cloud_target"
+  cp -a "$stage/." "$artifact_target/"
+  cp -a "$stage/." "$cloud_target/"
+  fix_permissions "$artifact_target" "$VERSION_TARGET"
+  scan_nextcloud "${CLOUD_RELATIVE}/sim-test-report/${TASK_ID}"
+  echo "[sim-publish] report artifact_dir=$artifact_target"
+  echo "[sim-publish] report cloud_dir=${CLOUD_DIR}/sim-test-report/${TASK_ID}"
+}
+
+case "$MODE" in
+  sim) publish_sim ;;
+  sim-report) publish_report ;;
+  *) die "invalid mode: $MODE" ;;
+esac

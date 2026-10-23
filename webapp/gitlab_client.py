@@ -17,12 +17,25 @@ class GitLabError(RuntimeError):
         self.payload = payload
 
 
+NON_API_TOKEN_PREFIXES = {
+    "glft-": "Feed Token（仅用于 RSS/Atom 订阅）",
+    "glrt-": "Runner 认证 Token",
+    "glptt-": "Pipeline Trigger Token",
+    "gldt-": "Deploy Token（仅用于 Git/Registry）",
+    "glcbt-": "CI Build Token",
+    "glagent-": "Kubernetes Agent Token",
+    "glsoat-": "SCIM OAuth Token",
+    "glffct-": "Feature Flags Client Token",
+}
+
+
 @dataclass(frozen=True)
 class GitLabConfig:
     base_url: str
     project: str
     token: str
     ssl_verify: bool = True
+    token_env: str = ""
 
     @property
     def project_id(self) -> str:
@@ -57,6 +70,12 @@ class GitLabClient:
             raise GitLabError("缺少 GITLAB_PROJECT 配置")
         if not self.config.token:
             raise GitLabError("缺少 GITLAB_TOKEN 配置")
+        for prefix, label in NON_API_TOKEN_PREFIXES.items():
+            if self.config.token.startswith(prefix):
+                raise GitLabError(
+                    f"GitLab Token 类型错误：{prefix} 是{label}，不能调用 GitLab API；"
+                    "请使用 glpat- 开头的 Personal Access Token 并授予 api scope"
+                )
 
         url = f"{self.config.base_url.rstrip('/')}/api/v4{path}"
         if query:
@@ -281,10 +300,16 @@ class GitLabClient:
             },
         )
 
-    @staticmethod
-    def _format_error(status: int, payload: Any) -> str:
+    def _format_error(self, status: int, payload: Any) -> str:
         if isinstance(payload, dict):
             message = payload.get("message") or payload.get("error") or payload
+            description = payload.get("error_description")
+            if description and str(description) not in str(message):
+                message = f"{message}（{description}）"
         else:
             message = payload or "未知错误"
-        return f"GitLab API 返回 {status}：{message}"
+        text = f"GitLab API 返回 {status}：{message}"
+        if status == 401:
+            env_name = self.config.token_env or "GITLAB_TOKEN"
+            text += f"。GitLab Token 无效或已过期，请更新环境变量 {env_name} 后重启服务"
+        return text

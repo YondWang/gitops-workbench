@@ -8,6 +8,8 @@ import hmac
 import json
 import os
 import re
+import secrets
+import shlex
 import shutil
 import ssl
 import subprocess
@@ -21,7 +23,9 @@ from functools import wraps
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import parse_qs, urlparse, urlunparse
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, quote, urlparse, urlunparse
+from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 from auth import AuthManager, login_cookie, logout_cookie, parse_cookie
@@ -31,6 +35,7 @@ from branch_policy import (
     default_tag_name,
     feature_branch,
     require_ref_name,
+    safe_ref_name,
     require_version,
     tag_source_name,
 )
@@ -50,6 +55,11 @@ RELEASE_TASKS_PATH = Path(os.environ.get("GITOPS_RELEASE_TASKS_PATH", str(DATA_R
 RELEASE_RUNS_PATH = Path(os.environ.get("GITOPS_RELEASE_RUNS_PATH", str(DATA_ROOT / "release_runs.json")))
 FEATURE_PACKAGE_RUNS_PATH = Path(os.environ.get("GITOPS_FEATURE_PACKAGE_RUNS_PATH", str(DATA_ROOT / "feature_package_runs.json")))
 ACCOUNTS_PATH = Path(os.environ.get("GITOPS_ACCOUNTS_PATH", str(DATA_ROOT / "users.json")))
+SIM_TEST_TASKS_PATH = Path(os.environ.get("GITOPS_SIM_TEST_TASKS_PATH", str(DATA_ROOT / "sim_test_tasks.json")))
+SIM_TEST_REPORT_ROOT = Path(os.environ.get("GITOPS_SIM_TEST_REPORT_ROOT", "/data/simos-ci/sim-test-reports"))
+DEFAULT_SIM_TEST_TIMEOUT_HOURS = 24.0
+SIM_TEST_TARGETS = ("sim", "vehicle", "both")
+SIM_TEST_STATUSES = frozenset({"queued", "building", "packaged", "notified", "running", "passed", "failed", "timeout", "notify_failed"})
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "gitlab": {
@@ -143,6 +153,7 @@ VERSION_MERGE_MAX_ATTEMPTS = 6
 RELEASE_RUNS_LOCK = threading.RLock()
 FEATURE_PACKAGE_LOCK = threading.RLock()
 FEATURE_PACKAGE_RUNS_LOCK = threading.RLock()
+SIM_TEST_TASKS_LOCK = threading.RLock()
 
 
 def release_runs_locked(method: Callable[..., Any]) -> Callable[..., Any]:
@@ -185,9 +196,17 @@ DEFAULT_SCHEDULE: dict[str, Any] = {
     # package, but omits every OTA upload job from the SimOS pipeline.
     "ota_target_envs": [],
     "execution_type": "full_release",
+    # x86 仿真包只跟随单配置发版；双配置任务保存时会被拒绝。
+    "build_sim_package": False,
+    "sim_test_target": "both",
+    "sim_test_note": "",
 }
 
 OTA_TARGET_ENVIRONMENTS = frozenset({"dev", "test", "prod"})
+
+
+class SimTestNotFound(ValueError):
+    """自动化测试任务不存在，HTTP 层映射为 404。"""
 
 
 @dataclass(frozen=True)
@@ -211,6 +230,9 @@ class GitOpsApp:
             "version_update": load_version_settings(),
             "package_cloud_categories": self.package_cloud_categories(),
             "default_package_cloud_category": self.default_package_cloud_category(),
+            "sim_package_enabled": sim_package_enabled(),
+            "sim_test_timeout_hours": sim_test_default_timeout_hours(),
+            "sim_test_targets": list(SIM_TEST_TARGETS),
             "roles": {
                 "user": ["view", "create_feature", "create_feature_package"],
                 "admin": ["view", "create_feature", "create_feature_package", "create_release", "create_bugfix", "create_tag", "admin"],
@@ -314,8 +336,8 @@ class GitOpsApp:
             # a product's common source branch calculation.
             targets = [self.target(repo_id) for repo_id in self.release_repository_ids()]
         else:
-            # Ref discovery is read-only; Feature package selection may include
-            # the optional config repository. Write operations still reject it.
+            # Feature creation and packaging may include the config repository
+            # when calculating refs shared by the selected repositories.
             targets = []
             ci_repo_id = str(self.config.get("feature_package_ci", {}).get("repository_id") or "")
             for repo_id in repository_ids:
@@ -338,7 +360,7 @@ class GitOpsApp:
         tag_names = sorted(set.intersection(*(set(items) for items in tag_maps))) if tag_maps else []
         branches = [branch_maps[0][name] for name in branch_names]
         tags = [tag_maps[0][name] for name in tag_names]
-        feature_sources = [branch for branch in branches if branch["kind"] in {"release", "bugfix"}]
+        feature_sources = [branch for branch in branches if branch["kind"] in {"release", "bugfix", "feature"}]
         feature_branches = [branch for branch in branches if branch["kind"] == "feature"]
         return {
             "ok": True,
@@ -395,6 +417,439 @@ class GitOpsApp:
         self.refresh_building_release_runs()
         return {"ok": True, "tasks": load_release_tasks(), "runs": load_release_runs()}
 
+    def simos_repository(self) -> RepositoryConfig | None:
+        for repo in self.store.enabled():
+            if is_simos_repo(repo):
+                return repo
+        return None
+
+    def sim_test_tasks(self) -> dict[str, Any]:
+        self.refresh_sim_test_tasks()
+        tasks = sorted(load_sim_test_tasks(), key=lambda item: str(item.get("created_at") or ""), reverse=True)
+        return {"ok": True, "tasks": tasks}
+
+    def sim_test_task(self, task_id: str) -> dict[str, Any]:
+        task_id = require_sim_test_id(task_id)
+        self.refresh_sim_test_tasks()
+        task = next((item for item in load_sim_test_tasks() if item.get("id") == task_id), None)
+        if task is None:
+            raise SimTestNotFound(f"自动化测试任务不存在：{task_id}")
+        return {"ok": True, "task": task}
+
+    def delete_sim_test_task(self, task_id: str) -> dict[str, Any]:
+        task_id = require_sim_test_id(task_id)
+        with SIM_TEST_TASKS_LOCK:
+            tasks = load_sim_test_tasks()
+            if not any(item.get("id") == task_id for item in tasks):
+                raise SimTestNotFound(f"自动化测试任务不存在：{task_id}")
+            save_sim_test_tasks([item for item in tasks if item.get("id") != task_id])
+        # 只清理 webapp 本地报告目录；GitLab pipeline、Tag、registry/云盘产物均保留。
+        report_dir = SIM_TEST_REPORT_ROOT / task_id
+        if report_dir.is_dir():
+            shutil.rmtree(report_dir, ignore_errors=True)
+        return {"ok": True, "deleted": task_id}
+
+    def create_sim_test_task(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not sim_package_enabled():
+            raise ValueError("x86 仿真包功能未启用")
+        tag = require_resident_tag(str(payload.get("tag") or ""))
+        test_target = normalize_sim_test_target(payload.get("test_target"))
+        note = normalize_sim_test_note(payload.get("note"))
+        tag_item = self.simos_tag_item(tag)
+        message = str(tag_item.get("message") or "")
+        if not sim_tag_supports_package(message):
+            raise ValueError("该 Tag 是双配置发版，不支持 x86 仿真包；请选择单配置 Tag")
+        if not self.simos_tag_supports_x86_package(tag, tag_item):
+            raise ValueError(
+                "该 Tag 的 CI 不支持 x86 仿真包（缺少 sim_package_x86）；"
+                "请将 simos x86 CI 合入 Tag 来源分支后重新创建 Tag，或改选支持 x86 的 Tag"
+            )
+        task_id = new_sim_test_id()
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        task = new_sim_test_task_record(
+            task_id=task_id,
+            tag=tag,
+            version=version_hint_from_ref(tag),
+            test_target=test_target,
+            note=note,
+            trigger="panel",
+            release_run_id="",
+            now=now,
+        )
+        save_sim_test_task(task)
+        sim_task = {
+            "task_id": task_id,
+            "mode": "only",
+            "test_target": test_target,
+            "note": note,
+            "trigger": "panel",
+            "release_run_id": "",
+        }
+        try:
+            pipeline = self.start_simos_pipeline(
+                tag,
+                None,
+                None,
+                sim_task,
+                config_matrix_from_tag_message(message),
+            )
+        except (ValueError, GitLabError) as exc:
+            task = {
+                **task,
+                "test_status": "failed",
+                "error": f"启动仿真包 Pipeline 失败：{exc}",
+                "updated_at": now.isoformat(),
+                "finished_at": now.isoformat(),
+                "events": list(task.get("events") or []) + [{"status": "failed", "at": now.isoformat(), "source": "webapp"}],
+            }
+            save_sim_test_task(task)
+            return {"ok": False, "error": str(exc), "task": task, "pipeline": {}}
+        task = update_sim_task_pipeline(task, pipeline, now)
+        save_sim_test_task(task)
+        return {"ok": True, "task": task, "pipeline": pipeline}
+
+    def simos_tag_item(self, tag: str) -> dict[str, Any]:
+        target = self.optional_simos_target()
+        if target is None:
+            raise ValueError("自动化测试需要启用 simos 仓库")
+        for item in target.client.tags(tag):
+            if str(item.get("name") or "") == tag:
+                return item
+        raise ValueError(f"simos Tag 不存在：{tag}")
+
+    def simos_tag_supports_x86_package(self, tag: str, tag_item: dict[str, Any] | None = None) -> bool:
+        """Tag pipeline uses the CI file frozen in that tag; old tags cannot build x86."""
+        target = self.optional_simos_target()
+        if target is None:
+            raise ValueError("自动化测试需要启用 simos 仓库")
+        get_file_text = getattr(target.client, "get_file_text", None)
+        if not callable(get_file_text):
+            return True
+        item = tag_item if tag_item is not None else self.simos_tag_item(tag)
+        refs = [tag]
+        commit_id = str((item.get("commit") or {}).get("id") or item.get("target") or "")
+        if commit_id and commit_id != tag:
+            refs.append(commit_id)
+        for ref in refs:
+            try:
+                text = str(get_file_text(".gitlab-ci.yml", ref) or "")
+            except GitLabError as exc:
+                if exc.status == 404:
+                    continue
+                raise
+            return "sim_package_x86" in text and "SIMOS_X86_PACKAGE" in text
+        return False
+
+    def apply_sim_test_result(
+        self,
+        payload: dict[str, Any],
+        report_file: tuple[str, bytes] | None = None,
+    ) -> dict[str, Any]:
+        task_id = require_sim_test_id(str(payload.get("task_id") or ""))
+        status = str(payload.get("status") or "").lower()
+        if status not in {"running", "passed", "failed"}:
+            raise ValueError("status 只能是 running、passed 或 failed")
+        summary = str(payload.get("summary") or "")
+        report_url = str(payload.get("report_url") or "")
+        finished_at = str(payload.get("finished_at") or "")
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        with SIM_TEST_TASKS_LOCK:
+            tasks = load_sim_test_tasks()
+            task = next((item for item in tasks if item.get("id") == task_id), None)
+            if task is None:
+                raise SimTestNotFound(f"自动化测试任务不存在：{task_id}")
+            report = dict(task.get("report") or {})
+            if report_url:
+                report["url"] = report_url
+            if summary:
+                report["summary"] = summary
+            if report_file is not None:
+                local_path = write_sim_report_file(task_id, report_file[0], report_file[1])
+                report["local_path"] = str(local_path)
+            elif report_url and not report.get("local_path"):
+                try:
+                    local_path = download_sim_report(task_id, report_url)
+                    if local_path:
+                        report["local_path"] = str(local_path)
+                except Exception as exc:
+                    task["error"] = f"报告下载失败：{exc}"
+            updated = {
+                **task,
+                "test_status": status,
+                "report": report,
+                "updated_at": now.isoformat(),
+            }
+            if status in {"passed", "failed"}:
+                updated["finished_at"] = finished_at or now.isoformat()
+            if status == "running":
+                # 平台定时回调 running 表示任务仍在推进，重置等待截止时间。
+                updated["deadline_at"] = (now + timedelta(hours=normalize_sim_timeout_hours(updated.get("timeout_hours")))).isoformat()
+            if report.get("local_path") and os.environ.get("GITOPS_CLOUD_UPLOAD_SSH_KEY", "").strip():
+                try:
+                    report["cloud_dir"] = upload_sim_report_to_cloud(updated, Path(str(report["local_path"])))
+                except Exception as exc:
+                    updated["error"] = f"报告云盘上传失败：{exc}"
+            updated["report"] = report
+            updated["events"] = append_sim_task_event(updated, status, now.isoformat(), "callback")
+            save_sim_test_tasks([updated if item.get("id") == task_id else item for item in tasks])
+            return {"ok": True, "task": updated}
+
+    def adjust_sim_test_timeout(self, task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        task_id = require_sim_test_id(task_id)
+        timeout_hours = normalize_sim_timeout_hours(payload.get("timeout_hours"))
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        with SIM_TEST_TASKS_LOCK:
+            tasks = load_sim_test_tasks()
+            task = next((item for item in tasks if item.get("id") == task_id), None)
+            if task is None:
+                raise SimTestNotFound(f"自动化测试任务不存在：{task_id}")
+            updated = {
+                **task,
+                "timeout_hours": timeout_hours,
+                "deadline_at": (now + timedelta(hours=timeout_hours)).isoformat(),
+                "updated_at": now.isoformat(),
+            }
+            updated["events"] = append_sim_task_event(updated, "timeout_adjusted", now.isoformat(), "webapp")
+            save_sim_test_tasks([updated if item.get("id") == task_id else item for item in tasks])
+            return {"ok": True, "task": updated}
+
+    def renotify_sim_test_task(self, task_id: str, remark: bool = False) -> dict[str, Any]:
+        task_id = require_sim_test_id(task_id)
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        with SIM_TEST_TASKS_LOCK:
+            tasks = load_sim_test_tasks()
+            task = next((item for item in tasks if item.get("id") == task_id), None)
+            if task is None:
+                raise SimTestNotFound(f"自动化测试任务不存在：{task_id}")
+            payload = self.build_sim_notify_payload(task)
+            targets = load_sim_notify_targets()
+            if not targets:
+                raise ValueError("GITOPS_SIM_NOTIFY_TARGETS 未配置可用的通知目标")
+            results = post_sim_notify_targets(payload, targets)
+            any_success = any(item.get("status") == "success" for item in results)
+            notify_status = "success" if all(item.get("status") == "success" for item in results) else "partial" if any_success else "failed"
+            timeout_hours = normalize_sim_timeout_hours(task.get("timeout_hours"))
+            stored_payload = copy_json_value(payload)
+            if isinstance(stored_payload.get("callback"), dict):
+                stored_payload["callback"]["token"] = "***"
+            updated = {
+                **task,
+                "notify": {"status": notify_status, "targets": results},
+                "payload": stored_payload,
+                "test_status": "notified" if any_success else "notify_failed",
+                "updated_at": now.isoformat(),
+                "deadline_at": (now + timedelta(hours=timeout_hours)).isoformat() if any_success else task.get("deadline_at", ""),
+                "error": "" if any_success else "通知目标全部失败",
+            }
+            action = "remark" if remark else "renotify"
+            updated["events"] = append_sim_task_event(updated, action, now.isoformat(), "webapp")
+            save_sim_test_tasks([updated if item.get("id") == task_id else item for item in tasks])
+            return {"ok": any_success, "task": updated, "targets": results}
+
+    def reupload_sim_test_report(self, task_id: str) -> dict[str, Any]:
+        task_id = require_sim_test_id(task_id)
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        with SIM_TEST_TASKS_LOCK:
+            tasks = load_sim_test_tasks()
+            task = next((item for item in tasks if item.get("id") == task_id), None)
+            if task is None:
+                raise SimTestNotFound(f"自动化测试任务不存在：{task_id}")
+            report = dict(task.get("report") or {})
+            local_path = Path(str(report.get("local_path") or ""))
+            if not local_path.is_file() and report.get("url"):
+                local_path = download_sim_report(task_id, str(report["url"])) or local_path
+                if local_path.is_file():
+                    report["local_path"] = str(local_path)
+            if not local_path.is_file():
+                raise ValueError("报告文件不存在，且没有可下载的 report_url")
+            cloud_dir = upload_sim_report_to_cloud(task, local_path)
+            report["cloud_dir"] = cloud_dir
+            updated = {
+                **task,
+                "report": report,
+                "updated_at": now.isoformat(),
+                "events": append_sim_task_event(task, "report_reuploaded", now.isoformat(), "webapp"),
+            }
+            save_sim_test_tasks([updated if item.get("id") == task_id else item for item in tasks])
+            return {"ok": True, "task": updated, "cloud_dir": cloud_dir}
+
+    def build_sim_notify_payload(self, task: dict[str, Any]) -> dict[str, Any]:
+        payload = copy_json_value(task.get("payload"))
+        if not isinstance(payload, dict) or not payload:
+            payload = {
+                "event": "sim_test_task_created",
+                "task_id": task.get("id", ""),
+                "tag": task.get("tag", ""),
+                "version": task.get("version", ""),
+                "commit": "",
+                "test_target": task.get("test_target", "both"),
+                "note": task.get("note", ""),
+                "packages": {"x86": None, "arm": None},
+                "pipeline": {"id": task.get("pipeline_id", ""), "url": task.get("pipeline_url", "")},
+                "callback": {},
+            }
+        packages = payload.get("packages") if isinstance(payload.get("packages"), dict) else {}
+        if not packages.get("x86"):
+            packages["x86"] = copy_json_value((task.get("packages") or {}).get("x86"))
+        if not packages.get("arm"):
+            packages["arm"] = copy_json_value((task.get("packages") or {}).get("arm"))
+        payload["packages"] = packages
+        payload["task_id"] = payload.get("task_id") or task.get("id", "")
+        payload["tag"] = payload.get("tag") or task.get("tag", "")
+        payload["version"] = payload.get("version") or task.get("version", "")
+        payload["test_target"] = payload.get("test_target") or task.get("test_target", "both")
+        payload["note"] = payload.get("note") or task.get("note", "")
+        payload.setdefault("pipeline", {"id": task.get("pipeline_id", ""), "url": task.get("pipeline_url", "")})
+        callback = payload.get("callback") if isinstance(payload.get("callback"), dict) else {}
+        callback["result_url"] = callback.get("result_url") or sim_callback_url()
+        token = sim_callback_token()
+        if token and callback.get("token") in {"", "***", None}:
+            callback["token"] = token
+        if callback.get("token") in {"", "***", None}:
+            raise ValueError("SIMOS_SIM_NOTIFY_CALLBACK_TOKEN 未配置，无法重发通知")
+        callback.setdefault("instruction", "测试结束后 POST {task_id, status, report_url|report 文件} 至 result_url")
+        payload["callback"] = callback
+        return payload
+
+    def refresh_sim_test_tasks(self, now: datetime | None = None) -> list[dict[str, Any]]:
+        current = now or datetime.now(ZoneInfo("Asia/Shanghai"))
+        tasks = load_sim_test_tasks()
+        refreshed: dict[str, dict[str, Any]] = {}
+        originals: dict[str, str] = {}
+        for task in tasks:
+            task_id = str(task.get("id") or "")
+            if not task_id:
+                continue
+            originals[task_id] = str(task.get("updated_at") or "")
+            refreshed[task_id] = self.refresh_sim_test_task(task, current)
+        with SIM_TEST_TASKS_LOCK:
+            latest = load_sim_test_tasks()
+            merged: list[dict[str, Any]] = []
+            changed = False
+            for task in latest:
+                task_id = str(task.get("id") or "")
+                updated = refreshed.get(task_id)
+                # 回调可能在本轮刷新期间写入；只有快照未变化时才覆盖。
+                if updated is not None and originals.get(task_id) == str(task.get("updated_at") or ""):
+                    if updated != task:
+                        changed = True
+                    merged.append(updated)
+                else:
+                    merged.append(task)
+            if changed:
+                save_sim_test_tasks(merged)
+            return merged
+
+    def refresh_sim_test_task(self, task: dict[str, Any], now: datetime) -> dict[str, Any]:
+        updated = merge_sim_test_artifacts(task, self.simos_repository())
+        status = str(updated.get("test_status") or "queued")
+        if status in {"queued", "building", "packaged"}:
+            updated = self.refresh_sim_pipeline_state(updated, now)
+            status = str(updated.get("test_status") or status)
+        if status in {"notified", "running"}:
+            updated = self.poll_sim_test_platform(updated, now)
+            deadline_at = str(updated.get("deadline_at") or "")
+            if not deadline_at:
+                base = str(updated.get("updated_at") or updated.get("created_at") or now.isoformat())
+                try:
+                    base_time = datetime.fromisoformat(base)
+                except ValueError:
+                    base_time = now
+                deadline_at = (base_time + timedelta(hours=normalize_sim_timeout_hours(updated.get("timeout_hours")))).isoformat()
+                updated = {**updated, "deadline_at": deadline_at}
+            if deadline_at:
+                try:
+                    deadline = datetime.fromisoformat(deadline_at)
+                    if now >= deadline:
+                        updated = set_sim_task_status(updated, "timeout", now, "timeout")
+                except ValueError:
+                    pass
+        return updated
+
+    def refresh_sim_pipeline_state(self, task: dict[str, Any], now: datetime) -> dict[str, Any]:
+        pipeline_id = str(task.get("pipeline_id") or "")
+        tag = str(task.get("tag") or "")
+        if not pipeline_id or not tag:
+            return task
+        target = self.optional_simos_target()
+        if target is None:
+            return task
+        pipelines = getattr(target.client, "pipelines", None)
+        jobs_api = getattr(target.client, "pipeline_jobs", None)
+        if not callable(pipelines):
+            return task
+        try:
+            pipeline = next((item for item in pipelines(ref=tag) if str(item.get("id") or item.get("pipeline_id") or "") == pipeline_id), None)
+        except Exception:
+            return task
+        if not pipeline:
+            return task
+        pipeline_status = str(pipeline.get("status") or "").lower()
+        if pipeline_status in {"pending", "created", "waiting_for_resource", "preparing"}:
+            return set_sim_task_status(task, "building", now, "pipeline")
+        if pipeline_status in {"failed", "canceled", "cancelled"}:
+            return set_sim_task_status(task, "failed", now, "pipeline", error=f"Pipeline 状态：{pipeline_status}")
+        jobs: list[dict[str, Any]] = []
+        if callable(jobs_api):
+            try:
+                jobs = list(jobs_api(pipeline_id))
+            except Exception:
+                jobs = []
+        job_map = {str(item.get("name") or ""): item for item in jobs}
+        sim_job = job_map.get("sim_package_x86") or {}
+        notify_job = job_map.get("notify_sim_test") or {}
+        sim_status = str(sim_job.get("status") or "").lower()
+        notify_status = str(notify_job.get("status") or "").lower()
+        if sim_status == "failed":
+            return set_sim_task_status(task, "failed", now, "pipeline", error="sim_package_x86 失败")
+        if notify_status == "failed":
+            return set_sim_task_status(task, "notify_failed", now, "pipeline", error="notify_sim_test 失败，可重发通知")
+        if notify_status == "success":
+            notified = set_sim_task_status(task, "notified", now, "pipeline")
+            if not notified.get("deadline_at"):
+                notified["deadline_at"] = (now + timedelta(hours=normalize_sim_timeout_hours(notified.get("timeout_hours")))).isoformat()
+            return notified
+        if pipeline_status == "running" and sim_status in {"running", "pending", "created"}:
+            return set_sim_task_status(task, "building", now, "pipeline")
+        if sim_status == "success":
+            return set_sim_task_status(task, "packaged", now, "pipeline")
+        if pipeline_status == "success":
+            return set_sim_task_status(task, "packaged", now, "pipeline")
+        return task
+
+    def poll_sim_test_platform(self, task: dict[str, Any], now: datetime) -> dict[str, Any]:
+        url_template = os.environ.get("SIMOS_TEST_PLATFORM_STATUS_URL", "").strip()
+        if not url_template:
+            return task
+        interval = sim_status_poll_seconds()
+        last = str(task.get("status_polled_at") or "")
+        if last:
+            try:
+                if (now - datetime.fromisoformat(last)).total_seconds() < interval:
+                    return task
+            except ValueError:
+                pass
+        task = {**task, "status_polled_at": now.isoformat()}
+        url = url_template.replace("{task_id}", quote(str(task.get("id") or ""), safe=""))
+        token = sim_callback_token()
+        headers = {"Accept": "application/json"}
+        if token:
+            headers["X-Sim-Test-Token"] = token
+        try:
+            request = Request(url, headers=headers, method="GET")
+            context = None if sim_status_ssl_verify() else ssl._create_unverified_context()
+            with urlopen(request, timeout=10, context=context) as response:
+                data = json.loads(response.read().decode("utf-8") or "{}")
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OSError):
+            return task
+        if not isinstance(data, dict):
+            return task
+        status = str(data.get("status") or "").lower()
+        if status not in {"running", "passed", "failed"}:
+            return task
+        updated = apply_sim_status_payload(task, data, now, "poll")
+        return updated
+
     def feature_package_runs(self) -> dict[str, Any]:
         self.refresh_feature_package_runs()
         runs = sorted(load_feature_package_runs(), key=lambda item: str(item.get("started_at") or ""), reverse=True)
@@ -423,6 +878,7 @@ class GitOpsApp:
 
     def save_release_task(self, payload: dict[str, Any]) -> dict[str, Any]:
         task = normalize_release_task(payload)
+        validate_release_task_sim(task)
         tasks = load_release_tasks()
         next_tasks = [item for item in tasks if item["id"] != task["id"]]
         next_tasks.append(task)
@@ -519,8 +975,12 @@ class GitOpsApp:
                 "force_week_bump": truthy(payload.get("force_week_bump", False)),
                 "cloud_category": str(payload.get("cloud_category") or DEFAULT_SCHEDULE["cloud_category"]),
                 "ota_target_envs": payload.get("ota_target_envs", payload.get("ota_target_env", DEFAULT_SCHEDULE["ota_target_envs"])),
+                "build_sim_package": payload.get("build_sim_package", False),
+                "sim_test_target": payload.get("sim_test_target", DEFAULT_SCHEDULE["sim_test_target"]),
+                "sim_test_note": payload.get("sim_test_note", DEFAULT_SCHEDULE["sim_test_note"]),
             }
         )
+        validate_release_task_sim(task)
         plan = self.resolve_release_plan(task, str(payload.get("now") or "") or None)
         run = self.start_full_release_run(task, plan, trigger="manual")
         return {"ok": True, "task": task, "plan": plan, "run": run}
@@ -838,23 +1298,20 @@ class GitOpsApp:
         component_resolutions = self.resolve_full_release_components(ref, feature_fallback_ref)
         version_prefix = resolve_version_prefix(ref, schedule)
         version_number = self.resolve_release_version_number(schedule, ref, version_prefix, component_resolutions)
+        # 版本号只以目标分支的 version.info/software.yaml 为基准，
+        # 不再读取本周历史 Tag 或网页侧保存的基线，避免被遗留版本号带偏。
         if str(schedule.get("version_source") or "simos_version_info") == "manual":
-            weekly_version = {
-                "version_number": version_number,
-                "requires_confirmation": False,
-                "reason": "manual_version",
-                "week": week_key(local_now),
-            }
+            version_reason = "manual_version"
         elif truthy(schedule.get("force_week_bump", False)):
-            weekly_version = {
-                "version_number": version_number,
-                "requires_confirmation": False,
-                "reason": "manual_weekly_third_bump",
-                "week": week_key(local_now),
-            }
+            version_reason = "manual_weekly_third_bump"
         else:
-            weekly_version = resolve_weekly_version_policy(target.client.tag_names(), version_number, local_now)
-            version_number = weekly_version["version_number"]
+            version_reason = "branch_version_only"
+        weekly_version = {
+            "version_number": version_number,
+            "requires_confirmation": False,
+            "reason": version_reason,
+            "week": week_key(local_now),
+        }
         release_version = apply_version_prefix(version_number, version_prefix)
         stamp = local_now.strftime("%Y%m%d%H%M")
         source_ref_slug = tag_source_name(ref)
@@ -892,10 +1349,12 @@ class GitOpsApp:
             "repositories": [repo.public_dict(self.token_loaded(repo)) for repo in self.release_repositories()],
             "weekly_version": weekly_version,
             "force_week_bump": bool(schedule.get("force_week_bump", False)),
+            "build_sim_package": bool(schedule.get("build_sim_package", False)),
+            "sim_test_target": normalize_sim_test_target(schedule.get("sim_test_target")),
+            "sim_test_note": normalize_sim_test_note(schedule.get("sim_test_note")),
         }
-        if weekly_version.get("requires_confirmation"):
-            plan["requires_weekly_version_confirmation"] = True
-            plan["confirmation_message"] = "周五首次发版需要人工确认第三位版本号变更"
+        if plan["build_sim_package"] and len(config_matrix) > 1:
+            raise ValueError("双配置发版不支持 x86 仿真包；请关闭双配置矩阵并选择单配置分支")
         return plan
 
     def resolve_schedule_ref(self, schedule: dict[str, Any], target: OperationTarget) -> str:
@@ -944,21 +1403,35 @@ class GitOpsApp:
         current_version = normalize_version_number(
             require_existing_version(parse_version_info(simos_target.client.get_file_text(VERSION_INFO_PATH, ref)))
         )
+        if not truthy(schedule.get("force_week_bump", False)):
+            # 普通发版：直接在目标分支当前版本上第四位 +1，保证版本号只增不减。
+            return normalize_version_number(bump_version(current_version))
+        # 新一周首次发版：第三位 +1，第四位使用本版本变更组件的修订位组合作为周基线。
         changed = changed_components_from_software_baseline(
             component_resolutions or [], software_yaml_component_commits(software_yaml)
         )
         version = dynamic_version_from_changed_components(
             current_version, changed, repository_revision_bits(self.release_repositories())
         )
-        if truthy(schedule.get("force_week_bump", False)):
-            version = bump_week_version(version)
-        return normalize_version_number(version)
+        return normalize_version_number(bump_week_version(version))
 
     def create_schedule_tag(self, schedule: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
         return self.start_full_release_run(schedule, plan, trigger="manual")
 
     @release_runs_locked
     def start_full_release_run(self, task: dict[str, Any], plan: dict[str, Any], trigger: str) -> dict[str, Any]:
+        run_id = new_release_run_id("release")
+        sim_task = None
+        if bool(plan.get("build_sim_package", False)):
+            sim_task = {
+                "task_id": new_sim_test_id(),
+                "mode": "with_release",
+                "test_target": normalize_sim_test_target(plan.get("sim_test_target")),
+                "note": normalize_sim_test_note(plan.get("sim_test_note")),
+                "trigger": trigger,
+                "release_run_id": run_id,
+            }
+            plan = {**plan, "sim_task": sim_task}
         payload = {
             "repository_ids": self.release_repository_ids(),
             "ref": plan["source_ref"],
@@ -972,6 +1445,8 @@ class GitOpsApp:
             "component_resolutions": list(plan.get("component_resolutions") or []),
             "ota_target_envs": plan.get("ota_target_envs"),
             "cloud_category": plan.get("cloud_category"),
+            "config_matrix": list(plan.get("config_matrix") or []),
+            "sim_task": sim_task,
         }
         if bool(plan.get("config_matrix_enabled", True)) and not plan.get("config_matrix"):
             result = {
@@ -982,23 +1457,11 @@ class GitOpsApp:
                 "tag_name": plan.get("tag_name", ""),
                 "results": [],
             }
-            run = self.release_run_from_result(task, plan, result, trigger)
-            append_release_run(run)
-            return run
-        if plan.get("requires_weekly_version_confirmation") and not plan.get("weekly_version_confirmed"):
-            result = {
-                "ok": False,
-                "operation": "create_tag",
-                "phase": "waiting_weekly_version_confirmation",
-                "blocked": True,
-                "tag_name": plan["tag_name"],
-                "message": plan.get("confirmation_message") or "等待人工确认周版本号",
-            }
-            run = self.release_run_from_result(task, plan, result, trigger)
+            run = self.release_run_from_result(task, plan, result, trigger, run_id=run_id)
             append_release_run(run)
             return run
         result = self.create_tag(payload)
-        run = self.release_run_from_result(task, plan, result, trigger)
+        run = self.release_run_from_result(task, plan, result, trigger, run_id=run_id)
         if isinstance(run.get("version_merge"), dict):
             append_release_run(run)
             run = self.request_version_merge(run, self.release_run_now(run))
@@ -1048,6 +1511,10 @@ class GitOpsApp:
             "tag_name": plan.get("tag_name", ""),
             "cloud_dir": plan.get("cloud_dir", ""),
             "ota_target_envs": list(plan.get("ota_target_envs") or []),
+            "build_sim_package": bool(plan.get("build_sim_package", False)),
+            "sim_test_target": normalize_sim_test_target(plan.get("sim_test_target")),
+            "sim_test_note": normalize_sim_test_note(plan.get("sim_test_note")),
+            "sim_task_id": str(result.get("sim_task_id") or (result.get("sim_task") or {}).get("id") or ""),
             "started_at": plan.get("planned_at", now),
             "updated_at": now,
             "finished_at": now if status in {"failed", "precheck_failed"} else "",
@@ -1068,6 +1535,8 @@ class GitOpsApp:
                 "component_resolutions": list(plan.get("component_resolutions") or []),
                 "ota_target_envs": list(plan.get("ota_target_envs") or []),
                 "cloud_category": plan.get("cloud_category", ""),
+                "config_matrix": list(plan.get("config_matrix") or []),
+                "sim_task": copy_json_value(plan.get("sim_task")),
             },
         }
         pipeline = result.get("pipeline") if isinstance(result.get("pipeline"), dict) else {}
@@ -1465,8 +1934,8 @@ class GitOpsApp:
         ticket = str(payload.get("ticket", ""))
         desc = str(payload.get("desc", ""))
         ref = require_ref_name(str(payload.get("ref", "release") or "release"), "来源分支")
-        if ref != "release" and classify_branch(ref) != "bugfix":
-            raise ValueError("Feature 分支只能从 release、bugfix/<版本号> 或迁移期 fix 拉出")
+        if classify_branch(ref) not in {"release", "bugfix", "feature"}:
+            raise ValueError("Feature 分支只能从 release、bugfix/<版本号>、迁移期 fix 或 feature/* 拉出")
         branch = feature_branch(ticket, desc, ref)
 
         def precheck(target: OperationTarget) -> dict[str, Any]:
@@ -1503,6 +1972,9 @@ class GitOpsApp:
 
     def create_tag(self, payload: dict[str, Any]) -> dict[str, Any]:
         ref = require_ref_name(str(payload.get("ref", "")), "Tag 来源")
+        sim_task_payload = payload.get("sim_task") if isinstance(payload.get("sim_task"), dict) else None
+        if truthy(payload.get("build_sim_package", False)) and not sim_task_payload:
+            raise ValueError("直接创建 Tag 不支持 x86 仿真包；请使用发版任务或自动化测试页面")
         update_version = truthy(payload.get("update_version", False))
         base_version = normalize_optional_version(str(payload.get("base_version", ""))) if update_version else ""
         base_version_is_final = truthy(payload.get("base_version_is_final", payload.get("version_number_is_final", False))) if update_version else False
@@ -1563,12 +2035,56 @@ class GitOpsApp:
         if not any(is_simos_repo(target.repo) for target in self.targets(payload)):
             return result
         ota_target_envs = normalize_optional_ota_target_envs(payload.get("ota_target_envs", payload.get("ota_target_env")))
+        sim_task = None
+        if sim_task_payload:
+            sim_task = {
+                "task_id": require_sim_test_id(str(sim_task_payload.get("task_id") or "")),
+                "mode": str(sim_task_payload.get("mode") or "with_release"),
+                "test_target": normalize_sim_test_target(sim_task_payload.get("test_target")),
+                "note": normalize_sim_test_note(sim_task_payload.get("note")),
+                "trigger": str(sim_task_payload.get("trigger") or "release"),
+                "release_run_id": str(sim_task_payload.get("release_run_id") or ""),
+            }
+            if sim_task["mode"] not in {"with_release", "only"}:
+                raise ValueError("仿真包模式只能是 with_release 或 only")
+            now = datetime.now(ZoneInfo("Asia/Shanghai"))
+            task = next((item for item in load_sim_test_tasks() if item.get("id") == sim_task["task_id"]), None)
+            if task is None:
+                task = new_sim_test_task_record(
+                    task_id=sim_task["task_id"],
+                    tag=tag_name,
+                    version=version_hint_from_ref(tag_name),
+                    test_target=sim_task["test_target"],
+                    note=sim_task["note"],
+                    trigger=sim_task["trigger"],
+                    release_run_id=sim_task["release_run_id"],
+                    now=now,
+                )
+            else:
+                task = {
+                    **task,
+                    "tag": tag_name,
+                    "version": task.get("version") or version_hint_from_ref(tag_name),
+                    "test_target": sim_task["test_target"],
+                    "note": sim_task["note"],
+                    "release_run_id": sim_task["release_run_id"] or task.get("release_run_id", ""),
+                    "updated_at": now.isoformat(),
+                }
+            save_sim_test_task(task)
         try:
             result["pipeline"] = self.start_simos_pipeline(
                 tag_name,
                 ota_target_envs,
                 self.require_package_cloud_category(payload.get("cloud_category")),
+                sim_task,
+                normalize_config_matrix_items(payload.get("config_matrix") or []) or config_matrix_from_tag_message(message),
             )
+            if sim_task:
+                now = datetime.now(ZoneInfo("Asia/Shanghai"))
+                task = update_sim_task_pipeline(task, result["pipeline"], now)
+                save_sim_test_task(task)
+                result["sim_task_id"] = task["id"]
+                result["sim_task"] = task
         except (ValueError, GitLabError) as exc:
             result.update(
                 {
@@ -1578,6 +2094,19 @@ class GitOpsApp:
                     "pipeline_start_error": str(exc),
                 }
             )
+            if sim_task:
+                now = datetime.now(ZoneInfo("Asia/Shanghai"))
+                task = {
+                    **task,
+                    "test_status": "failed",
+                    "error": f"启动 API Pipeline 失败：{exc}",
+                    "updated_at": now.isoformat(),
+                    "finished_at": now.isoformat(),
+                    "events": append_sim_task_event(task, "failed", now.isoformat(), "webapp"),
+                }
+                save_sim_test_task(task)
+                result["sim_task_id"] = task["id"]
+                result["sim_task"] = task
         return result
 
     def start_simos_pipeline(
@@ -1585,6 +2114,8 @@ class GitOpsApp:
         tag_name: str,
         ota_target_envs: list[str] | None = None,
         cloud_category: str | None = None,
+        sim_task: dict[str, Any] | None = None,
+        config_matrix: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         simos_target = self.optional_simos_target()
         if simos_target is None:
@@ -1593,11 +2124,29 @@ class GitOpsApp:
         if not callable(create_pipeline):
             # Older test doubles do not implement the GitLab Pipeline API.
             return {"status": "not_started", "message": "GitLab client does not support Pipeline API"}
+        if config_matrix is None:
+            # Existing-Tag reruns must select the same CI job layout as the original release.
+            tag_item = next((item for item in simos_target.client.tags(tag_name)
+                             if str(item.get("name") or "") == tag_name), {})
+            config_matrix = config_matrix_from_tag_message(str(tag_item.get("message") or ""))
         variables: dict[str, str] = {}
         if ota_target_envs:
             variables["SIMOS_OTA_TARGET_ENVS"] = ",".join(ota_target_envs)
         if cloud_category:
             variables["SIMOS_CLOUD_CATEGORY"] = cloud_category
+        if config_matrix:
+            # Select the job layout before GitLab creates jobs, then pass the exact config selection.
+            variables["SIMOS_CONFIG_MODE"] = "single" if len(config_matrix) == 1 else "matrix"
+            variables["SIMOS_CONFIG_MATRIX"] = config_matrix_value(config_matrix)
+            variables["SIMOS_CONFIG_REFS"] = config_refs_value(config_matrix)
+            variables["SIMOS_CONFIG_REF"] = str(config_matrix[0].get("config_ref") or "")
+        if sim_task:
+            variables["SIMOS_X86_PACKAGE"] = str(sim_task.get("mode") or "with_release")
+            variables["SIMOS_SIM_TASK_ID"] = str(sim_task.get("task_id") or "")
+            variables["SIMOS_SIM_TEST_TARGET"] = normalize_sim_test_target(sim_task.get("test_target"))
+            note = normalize_sim_test_note(sim_task.get("note"))
+            if note:
+                variables["SIMOS_SIM_TEST_NOTE"] = note
         return create_pipeline(tag_name, variables or None)
 
     @release_runs_locked
@@ -1631,7 +2180,11 @@ class GitOpsApp:
             if simos_target is None:
                 raise ValueError("Feature 包需要启用 simos 仓库")
             baseline_ref = normalize_optional_baseline_ref(payload.get("baseline_ref"))
-            resolutions = self.resolve_feature_package_components(ref, baseline_ref, [target.repo for target in targets])
+            ci_repo_id = str(self.config.get("feature_package_ci", {}).get("repository_id") or "")
+            enabled_repos = [repo for repo in self.store.enabled() if repo.id != ci_repo_id]
+            resolutions = self.resolve_feature_package_components(
+                ref, baseline_ref, enabled_repos, {target.repo.id for target in targets}
+            )
             source_version = require_existing_version(
                 parse_version_info(simos_target.client.get_file_text(VERSION_INFO_PATH, ref))
             )
@@ -1661,10 +2214,13 @@ class GitOpsApp:
         ref: str,
         baseline_ref: str,
         repositories: list[RepositoryConfig],
+        selected_repository_ids: set[str],
     ) -> list[dict[str, str]]:
         simos_repository = next((repository for repository in repositories if is_simos_repo(repository)), None)
         if simos_repository is None:
             raise ValueError("Feature 包需要启用 simos 仓库")
+        if not baseline_ref:
+            raise ValueError("Feature 包必须填写基线分支")
         # Resolve the SimOS commit first, then read .gitmodules from that exact
         # commit. Reading .gitmodules from a moving branch can race with a
         # branch update and produce a context whose component paths do not
@@ -1682,33 +2238,41 @@ class GitOpsApp:
         # The selected SimOS commit is the source of truth for submodule
         # directory names. Repository IDs are not paths: mapengine, PnC and
         # localization demonstrate why deriving src/<repository-id> is wrong.
-        feature_paths = feature_submodule_paths(simos_client, simos_sha, repositories)
-        if baseline_ref:
-            resolutions = self.resolve_full_release_components(ref, baseline_ref, repositories)
-            for item in resolutions:
-                if is_simos_repo(next(repository for repository in repositories if repository.id == item["repository_id"])):
-                    item["submodule_path"] = ""
-                elif item["repository_id"] in feature_paths:
-                    item["submodule_path"] = feature_paths[item["repository_id"]]
-            return resolutions
+        subscribed_project_paths = set(simos_submodule_paths(simos_client.get_file_text(".gitmodules", simos_sha)))
+        candidate_repositories = [
+            repository for repository in repositories
+            if is_config_repo(repository)
+            or repository.id in selected_repository_ids
+            or (repository.project or "").strip("/") in subscribed_project_paths
+        ]
+        feature_paths = feature_submodule_paths(simos_client, simos_sha, candidate_repositories)
         resolutions: list[dict[str, str]] = []
-        for repository in repositories:
+        for repository in candidate_repositories:
             target = self.target(repository.id)
             target.client.project()
-            if ref not in set(target.client.branch_names()):
-                raise ValueError(f"{repository.id} 不存在 Feature 分支 {ref}；请填写基线分支或先创建同名 Feature 分支")
-            commit = target.client.branch(ref).get("commit") or {}
+            if is_simos_repo(repository):
+                resolved_ref = ref
+                resolution = "simos_source"
+            elif repository.id in selected_repository_ids:
+                resolved_ref = ref
+                resolution = "requested_ref"
+            else:
+                resolved_ref = baseline_ref
+                resolution = "baseline_ref"
+            if resolved_ref not in set(target.client.branch_names()):
+                raise ValueError(f"{repository.id} 不存在分支 {resolved_ref}")
+            commit = target.client.branch(resolved_ref).get("commit") or {}
             commit_id = str(commit.get("id") or commit.get("short_id") or "")
             if not commit_id:
-                raise ValueError(f"{repository.id} 未读取到 {ref} 的 commit")
+                raise ValueError(f"{repository.id} 未读取到 {resolved_ref} 的 commit")
             resolutions.append({
                 "repository_id": repository.id,
                 "repository_name": repository.name,
                 "component": version_component(repository),
-                "submodule_path": feature_paths.get(repository.id, ""),
+                "submodule_path": "" if is_simos_repo(repository) else feature_paths.get(repository.id, ""),
                 "requested_ref": ref,
-                "resolved_ref": ref,
-                "resolution": "simos_source" if is_simos_repo(repository) else "requested_ref",
+                "resolved_ref": resolved_ref,
+                "resolution": resolution,
                 "commit_id": commit_id,
             })
         return resolutions
@@ -1741,17 +2305,12 @@ class GitOpsApp:
         if simos_target is None:
             raise ValueError("Feature 包需要启用 simos 仓库")
         baseline_ref = normalize_optional_baseline_ref(payload.get("baseline_ref"))
-        # An omitted baseline is only meaningful for an all-repository package:
-        # in that mode every selected component must provide the same Feature
-        # branch.  Partial packages must explicitly identify their baseline.
-        if not baseline_ref:
-            ci_repo_id = str(self.config.get("feature_package_ci", {}).get("repository_id") or "")
-            all_package_repo_ids = {repo.id for repo in self.store.enabled() if repo.id != ci_repo_id}
-            selected_repo_ids = {target.repo.id for target in targets}
-            if selected_repo_ids != all_package_repo_ids:
-                raise ValueError("未选择全部仓库时必须填写基线分支")
         cloud_category = self.require_package_cloud_category(payload.get("cloud_category"))
-        resolutions = self.resolve_feature_package_components(ref, baseline_ref, [target.repo for target in targets])
+        ci_repo_id = str(self.config.get("feature_package_ci", {}).get("repository_id") or "")
+        enabled_repos = [repo for repo in self.store.enabled() if repo.id != ci_repo_id]
+        resolutions = self.resolve_feature_package_components(
+            ref, baseline_ref, enabled_repos, {target.repo.id for target in targets}
+        )
         resolution_by_repo = {item["repository_id"]: item for item in resolutions}
         simos_resolution = resolution_by_repo.get(simos_target.repo.id)
         if simos_resolution is None:
@@ -2504,7 +3063,7 @@ class GitOpsApp:
         precheck: Callable[[OperationTarget], dict[str, Any]],
         execute: Callable[[OperationTarget, dict[str, Any]], dict[str, Any]],
     ) -> dict[str, Any]:
-        targets = self.targets(payload)
+        targets = self.targets(payload, allow_config=operation == "create_feature")
         precheck_results: list[dict[str, Any]] = []
         contexts: dict[str, dict[str, Any]] = {}
         for target in targets:
@@ -2539,7 +3098,7 @@ class GitOpsApp:
     def release_repository_ids(self) -> list[str]:
         return [repo.id for repo in self.release_repositories()]
 
-    def targets(self, payload: dict[str, Any]) -> list[OperationTarget]:
+    def targets(self, payload: dict[str, Any], *, allow_config: bool = False) -> list[OperationTarget]:
         if any(key in payload for key in ("scope", "repository_id", "repo_id")):
             raise ValueError("写操作必须显式提交 repository_ids，旧 scope/repository_id 参数已废弃")
         raw_ids = payload.get("repository_ids")
@@ -2555,15 +3114,14 @@ class GitOpsApp:
             repo = self.store.get(repo_id)
             if not repo.enabled:
                 raise ValueError(f"仓库未启用：{repo_id}")
-            if is_config_repo(repo) or repo.id == str(self.config.get("feature_package_ci", {}).get("repository_id") or ""):
+            if (is_config_repo(repo) and not allow_config) or repo.id == str(self.config.get("feature_package_ci", {}).get("repository_id") or ""):
                 raise ValueError(f"不能作为业务写入目标：{repo_id}")
             targets.append(OperationTarget(repo=repo, client=self.client_for(repo)))
         return targets
 
     def feature_package_targets(self, payload: dict[str, Any]) -> list[OperationTarget]:
-        # Feature packaging is the sole workflow that may *select* config as
-        # a read-only component snapshot. Other write operations continue to
-        # use targets(), which rejects config.
+        # Feature packaging may select config as a read-only component snapshot.
+        # It also requires SimOS and validates component submodule paths.
         raw_ids = payload.get("repository_ids")
         if not isinstance(raw_ids, list) or not raw_ids:
             raise ValueError("repository_ids 必须是非空数组")
@@ -2605,6 +3163,7 @@ class GitOpsApp:
                 project=repo.project,
                 token=token,
                 ssl_verify=repo.ssl_verify,
+                token_env=repo.token_env,
             )
         )
 
@@ -2637,6 +3196,7 @@ def summarize_tag(item: dict[str, Any]) -> dict[str, Any]:
         "target": item.get("target") or "",
         "commit_id": commit.get("short_id") or commit.get("id", "")[:12],
         "commit_title": commit.get("title", ""),
+        "created_at": item.get("created_at") or commit.get("created_at") or "",
     }
 
 
@@ -2767,41 +3327,6 @@ def normalize_version_prefix(value: str) -> str:
     return prefix
 
 
-def resolve_weekly_version_policy(tag_names: list[str], computed_version_number: str, local_now: datetime) -> dict[str, Any]:
-    version_number = normalize_version_number(computed_version_number)
-    parts = version_number.split(".")
-    if len(parts) < 4:
-        return {"version_number": version_number, "requires_confirmation": False, "reason": "version_has_less_than_four_parts"}
-    current = [int(part) for part in parts[:4]]
-    fourth_width = max(len(parts[3]), 3)
-    week_versions = versions_from_tags_in_week(tag_names, local_now)
-    if week_versions:
-        third = max(item[2] for item in week_versions)
-        fourth = max(item[3] for item in week_versions if item[2] == third) + 1
-        current[2] = third
-        current[3] = fourth
-        return {
-            "version_number": format_four_part_version(current, fourth_width),
-            "requires_confirmation": False,
-            "reason": "current_week_existing_third",
-            "week": week_key(local_now),
-        }
-    if local_now.weekday() == 4:
-        current[2] += 1
-        return {
-            "version_number": format_four_part_version(current, fourth_width),
-            "requires_confirmation": True,
-            "reason": "friday_first_weekly_third_bump",
-            "week": week_key(local_now),
-        }
-    return {
-        "version_number": version_number,
-        "requires_confirmation": False,
-        "reason": "not_friday_no_weekly_bump",
-        "week": week_key(local_now),
-    }
-
-
 def require_feature_package_ref(value: str) -> str:
     ref = require_ref_name(value, "Feature 包来源")
     if not ref.startswith("feature/") or len(ref) <= len("feature/"):
@@ -2907,8 +3432,24 @@ def resolve_version_prefix(ref: str, task: dict[str, Any] | None = None) -> str:
     return "V"
 
 
+def default_config_label_for_ref(ref: str) -> str:
+    config_ref = str(ref or "").strip()
+    if config_ref == "SIMBOT_R6_A":
+        return "360"
+    if config_ref == "SIMBOT_R6_B":
+        return "360s"
+    # config 分支可以包含 /，但 label 会用于残留路径和 package 文件名，
+    # 因此派生 label 时统一转成文件系统安全的形式。
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", config_ref).strip("-._") or "config"
+
+
+def safe_config_label(value: Any) -> str:
+    label = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "").strip())
+    return label.strip("-._") or "config"
+
+
 def config_matrix_value(config_matrix: list[dict[str, Any]]) -> str:
-    return ",".join(f"{item['config_ref']}:{item['label']}" for item in config_matrix)
+    return ",".join(f"{item['config_ref']}:{safe_config_label(item['label'])}" for item in config_matrix)
 
 
 def config_refs_value(config_matrix: list[dict[str, Any]]) -> str:
@@ -3424,7 +3965,7 @@ def normalize_config_matrix_items(items: Any) -> list[dict[str, Any]]:
     for item in items:
         if isinstance(item, str):
             config_ref = item.strip()
-            label = "360" if config_ref == "SIMBOT_R6_A" else "360s" if config_ref == "SIMBOT_R6_B" else config_ref
+            label = default_config_label_for_ref(config_ref)
             enabled = True
         elif isinstance(item, dict):
             config_ref = str(item.get("config_ref") or item.get("ref") or item.get("id") or "").strip()
@@ -3435,9 +3976,9 @@ def normalize_config_matrix_items(items: Any) -> list[dict[str, Any]]:
         if not config_ref:
             continue
         config_ref = require_ref_name(config_ref, "config 分支")
-        label = label or ("360" if config_ref == "SIMBOT_R6_A" else "360s" if config_ref == "SIMBOT_R6_B" else config_ref)
-        if not re.match(r"^[A-Za-z0-9._-]+$", label):
-            raise ValueError("config label 只能包含字母、数字、点、下划线和横线")
+        label = label or default_config_label_for_ref(config_ref)
+        if not safe_ref_name(label):
+            raise ValueError("config label 只能包含字母、数字、点、下划线、横线和斜线，且不能以 / 开头或结尾")
         normalized.append({"config_ref": config_ref, "label": label, "enabled": enabled})
     return normalized
 
@@ -3445,7 +3986,7 @@ def normalize_config_matrix_items(items: Any) -> list[dict[str, Any]]:
 def resolve_config_matrix(task: dict[str, Any]) -> list[dict[str, str]]:
     if not truthy(task.get("config_matrix_enabled", True)):
         config_ref = str(task.get("config_ref") or "").strip()
-        return [{"config_ref": require_ref_name(config_ref, "config 分支"), "label": config_ref}] if config_ref else []
+        return [{"config_ref": require_ref_name(config_ref, "config 分支"), "label": default_config_label_for_ref(config_ref)}] if config_ref else []
     matrix = normalize_config_matrix_items(task.get("config_matrix"))
     if not matrix:
         legacy_ref = str(task.get("config_ref") or "").strip()
@@ -3497,8 +4038,662 @@ def normalize_release_task(payload: dict[str, Any]) -> dict[str, Any]:
     task["cloud_category"] = normalize_cloud_category(task.get("cloud_category") or DEFAULT_SCHEDULE["cloud_category"])
     task["ota_target_envs"] = normalize_ota_target_envs(task.get("ota_target_envs", task.get("ota_target_env")))
     task.pop("ota_target_env", None)
+    task["build_sim_package"] = truthy(task.get("build_sim_package", False))
+    task["sim_test_target"] = normalize_sim_test_target(task.get("sim_test_target"))
+    task["sim_test_note"] = normalize_sim_test_note(task.get("sim_test_note"))
     task["execution_type"] = "full_release"
     return task
+
+
+def sim_package_enabled() -> bool:
+    return truthy(os.environ.get("GITOPS_SIM_PACKAGE_ENABLED", "true"))
+
+
+def sim_test_default_timeout_hours() -> float:
+    return normalize_sim_timeout_hours(os.environ.get("GITOPS_SIM_TEST_TIMEOUT_HOURS"))
+
+
+def normalize_sim_timeout_hours(value: Any) -> float:
+    default = 24.0
+    raw = value
+    if raw in (None, ""):
+        raw = os.environ.get("GITOPS_SIM_TEST_TIMEOUT_HOURS", default)
+    try:
+        hours = float(raw)
+    except (TypeError, ValueError):
+        hours = default
+    if hours < 0.1:
+        hours = 0.1
+    if hours > 720:
+        hours = 720
+    return round(hours, 2)
+
+
+def sim_callback_token() -> str:
+    return os.environ.get("SIMOS_SIM_NOTIFY_CALLBACK_TOKEN", os.environ.get("GITOPS_SIM_TEST_CALLBACK_TOKEN", "")).strip()
+
+
+def validate_sim_callback_token(provided: str) -> bool:
+    expected = sim_callback_token()
+    if not expected:
+        return False
+    return bool(provided) and hmac.compare_digest(provided, expected)
+
+
+def sim_callback_url() -> str:
+    return os.environ.get("GITOPS_SIM_RESULT_URL", os.environ.get("SIMOS_SIM_NOTIFY_CALLBACK_URL", "")).strip()
+
+
+def sim_status_poll_seconds() -> int:
+    try:
+        return max(10, int(os.environ.get("GITOPS_SIM_STATUS_POLL_SECONDS", "60")))
+    except ValueError:
+        return 60
+
+
+def sim_status_ssl_verify() -> bool:
+    return truthy(os.environ.get("GITOPS_SIM_TEST_SSL_VERIFY", "true"))
+
+
+def normalize_sim_test_target(value: Any) -> str:
+    target = str(value or "both").strip().lower()
+    if target not in SIM_TEST_TARGETS:
+        raise ValueError("测试目标只能是 sim、vehicle 或 both")
+    return target
+
+
+def normalize_sim_test_note(value: Any) -> str:
+    note = str(value or "").strip()
+    if len(note) > 200:
+        raise ValueError("任务备注不能超过 200 字")
+    return note
+
+
+def require_sim_test_id(value: str) -> str:
+    task_id = str(value or "").strip()
+    if not re.fullmatch(r"SIMTEST-[0-9]{14}-[0-9a-f]{6}", task_id):
+        raise ValueError("自动化任务 ID 格式非法")
+    return task_id
+
+
+def new_sim_test_id() -> str:
+    stamp = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d%H%M%S")
+    return f"SIMTEST-{stamp}-{secrets.token_hex(3)}"
+
+
+def copy_json_value(value: Any) -> Any:
+    if value is None:
+        return None
+    return json.loads(json.dumps(value, ensure_ascii=False))
+
+
+def config_matrix_from_tag_message(message: str) -> list[dict[str, str]]:
+    """从 Tag message 提取单/双配置矩阵；未声明时返回空，由 CI 使用固定 config。"""
+    fields = {}
+    for raw_line in str(message or "").splitlines():
+        line = raw_line.strip()
+        match = re.match(r"^(SIMOS_CONFIG_MATRIX|SIMOS_CONFIG_REFS|SIMOS_CONFIG_REF)\s*[:=]\s*(.+)$", line)
+        if not match:
+            continue
+        fields.setdefault(match.group(1), match.group(2).strip())
+    for key in ("SIMOS_CONFIG_MATRIX", "SIMOS_CONFIG_REFS", "SIMOS_CONFIG_REF"):
+        value = fields.get(key, "")
+        if not value:
+            continue
+        if value.lower() in {"none", "off", "disabled", "false"}:
+            return []
+        if key != "SIMOS_CONFIG_MATRIX":
+            refs = [item.strip() for item in value.split(",") if item.strip()]
+            return [{"config_ref": ref, "label": default_config_label_for_ref(ref)} for ref in refs]
+        matrix: list[dict[str, str]] = []
+        for entry in value.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            config_ref, label = entry.split(":", 1) if ":" in entry else (entry, entry)
+            if config_ref:
+                matrix.append({"config_ref": config_ref, "label": label})
+        return matrix
+    return []
+
+
+def sim_tag_supports_package(message: str) -> bool:
+    """Tag message 显式声明多个 config 时不允许仿真包；未声明时使用 Tag 固定的 config。"""
+    text = str(message or "")
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = re.match(r"^(SIMOS_CONFIG_MATRIX|SIMOS_CONFIG_REFS|SIMOS_CONFIG_REF)\s*[:=]\s*(.+)$", line)
+        if not match:
+            continue
+        value = match.group(2).strip()
+        if value.lower() in {"none", "off", "disabled", "false"}:
+            continue
+        refs = [item.strip() for item in value.split(",") if item.strip()]
+        if len(refs) > 1:
+            return False
+    return True
+
+
+def validate_release_task_sim(task: dict[str, Any]) -> None:
+    if not truthy(task.get("build_sim_package", False)):
+        return
+    if truthy(task.get("config_matrix_enabled", True)):
+        raise ValueError("双配置发版不支持 x86 仿真包；请关闭双配置矩阵并选择单配置分支")
+    matrix = resolve_config_matrix(task)
+    if len(matrix) != 1:
+        raise ValueError("x86 仿真包需要且只能需要一个 config 分支")
+
+
+def new_sim_test_task_record(
+    task_id: str,
+    tag: str,
+    version: str,
+    test_target: str,
+    note: str,
+    trigger: str,
+    release_run_id: str,
+    now: datetime,
+) -> dict[str, Any]:
+    stamp = now.isoformat()
+    return {
+        "id": task_id,
+        "tag": tag,
+        "version": version,
+        "test_target": normalize_sim_test_target(test_target),
+        "note": normalize_sim_test_note(note),
+        "trigger": str(trigger or "panel"),
+        "release_run_id": str(release_run_id or ""),
+        "pipeline_id": "",
+        "pipeline_url": "",
+        "packages": {"x86": None, "arm": None},
+        "notify": {"status": "", "targets": []},
+        "test_status": "queued",
+        "report": {"local_path": "", "cloud_dir": "", "url": "", "summary": ""},
+        "timeout_hours": sim_test_default_timeout_hours(),
+        "deadline_at": "",
+        "payload": None,
+        "events": [{"status": "queued", "at": stamp, "source": "webapp"}],
+        "created_at": stamp,
+        "updated_at": stamp,
+        "finished_at": "",
+        "error": "",
+    }
+
+
+def normalize_sim_test_task(task: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(task)
+    normalized["id"] = str(normalized.get("id") or "")
+    normalized["tag"] = str(normalized.get("tag") or "")
+    try:
+        hinted_version = version_hint_from_ref(normalized["tag"])
+    except ValueError:
+        hinted_version = ""
+    normalized["version"] = str(normalized.get("version") or hinted_version)
+    try:
+        normalized["test_target"] = normalize_sim_test_target(normalized.get("test_target"))
+    except ValueError:
+        normalized["test_target"] = "both"
+    try:
+        normalized["note"] = normalize_sim_test_note(normalized.get("note"))
+    except ValueError:
+        normalized["note"] = str(normalized.get("note") or "")[:200]
+    normalized["trigger"] = str(normalized.get("trigger") or "panel")
+    normalized["release_run_id"] = str(normalized.get("release_run_id") or "")
+    normalized["pipeline_id"] = str(normalized.get("pipeline_id") or "")
+    normalized["pipeline_url"] = str(normalized.get("pipeline_url") or "")
+    packages = normalized.get("packages") if isinstance(normalized.get("packages"), dict) else {}
+    normalized["packages"] = {"x86": packages.get("x86"), "arm": packages.get("arm")}
+    notify = normalized.get("notify") if isinstance(normalized.get("notify"), dict) else {}
+    normalized["notify"] = {
+        "status": str(notify.get("status") or ""),
+        "targets": list(notify.get("targets") or []),
+    }
+    status = str(normalized.get("test_status") or "queued")
+    normalized["test_status"] = status if status in SIM_TEST_STATUSES else "queued"
+    report = normalized.get("report") if isinstance(normalized.get("report"), dict) else {}
+    normalized["report"] = {
+        "local_path": str(report.get("local_path") or ""),
+        "cloud_dir": str(report.get("cloud_dir") or ""),
+        "url": str(report.get("url") or ""),
+        "summary": str(report.get("summary") or ""),
+    }
+    normalized["timeout_hours"] = normalize_sim_timeout_hours(normalized.get("timeout_hours"))
+    normalized["deadline_at"] = str(normalized.get("deadline_at") or "")
+    normalized["payload"] = normalized.get("payload") if isinstance(normalized.get("payload"), dict) else None
+    normalized["events"] = list(normalized.get("events") or [])
+    normalized["created_at"] = str(normalized.get("created_at") or "")
+    normalized["updated_at"] = str(normalized.get("updated_at") or normalized["created_at"])
+    normalized["finished_at"] = str(normalized.get("finished_at") or "")
+    normalized["error"] = str(normalized.get("error") or "")
+    return normalized
+
+
+def load_sim_test_tasks() -> list[dict[str, Any]]:
+    with SIM_TEST_TASKS_LOCK:
+        try:
+            raw = json.loads(SIM_TEST_TASKS_PATH.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return []
+        if isinstance(raw, dict):
+            items = raw.get("tasks", [])
+        elif isinstance(raw, list):
+            items = raw
+        else:
+            items = []
+        return [normalize_sim_test_task(item) for item in items if isinstance(item, dict)]
+
+
+def save_sim_test_tasks(tasks: list[dict[str, Any]]) -> None:
+    with SIM_TEST_TASKS_LOCK:
+        SIM_TEST_TASKS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        normalized = [normalize_sim_test_task(item) for item in tasks][-500:]
+        temporary = SIM_TEST_TASKS_PATH.with_suffix(".tmp")
+        temporary.write_text(json.dumps(normalized, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(SIM_TEST_TASKS_PATH)
+
+
+def save_sim_test_task(task: dict[str, Any]) -> None:
+    with SIM_TEST_TASKS_LOCK:
+        tasks = [item for item in load_sim_test_tasks() if item.get("id") != task.get("id")]
+        save_sim_test_tasks(tasks + [normalize_sim_test_task(task)])
+
+
+def update_sim_task_pipeline(task: dict[str, Any], pipeline: dict[str, Any], now: datetime) -> dict[str, Any]:
+    pipeline = pipeline if isinstance(pipeline, dict) else {}
+    return {
+        **task,
+        "pipeline_id": str(pipeline.get("id") or pipeline.get("pipeline_id") or task.get("pipeline_id") or ""),
+        "pipeline_url": str(pipeline.get("web_url") or pipeline.get("pipeline_url") or task.get("pipeline_url") or ""),
+        "updated_at": now.isoformat(),
+    }
+
+
+def append_sim_task_event(task: dict[str, Any], status: str, at: str, source: str) -> list[dict[str, str]]:
+    events = list(task.get("events") or [])
+    if events and events[-1].get("status") == status and events[-1].get("source") == source:
+        return events
+    events.append({"status": str(status), "at": str(at), "source": str(source)})
+    return events[-100:]
+
+
+SIM_STATUS_RANK = {
+    "queued": 0,
+    "building": 1,
+    "packaged": 2,
+    "notify_failed": 2,
+    "notified": 3,
+    "running": 4,
+    "passed": 5,
+    "failed": 5,
+    "timeout": 5,
+}
+
+
+def set_sim_task_status(task: dict[str, Any], status: str, now: datetime, source: str, error: str = "") -> dict[str, Any]:
+    status = str(status or "").strip()
+    if status not in SIM_TEST_STATUSES:
+        return task
+    current = str(task.get("test_status") or "queued")
+    if current in {"passed", "failed", "timeout"} and current != status:
+        return task
+    if SIM_STATUS_RANK.get(status, 0) < SIM_STATUS_RANK.get(current, 0):
+        return task
+    updated = {
+        **task,
+        "test_status": status,
+        "updated_at": now.isoformat(),
+    }
+    if error:
+        updated["error"] = error
+    elif status in {"passed", "failed", "notified"}:
+        updated["error"] = ""
+    if status in {"passed", "failed", "timeout"}:
+        updated["finished_at"] = now.isoformat()
+    if status in {"notified", "running"} and not updated.get("deadline_at"):
+        updated["deadline_at"] = (now + timedelta(hours=normalize_sim_timeout_hours(updated.get("timeout_hours")))).isoformat()
+    if current != status:
+        updated["events"] = append_sim_task_event(updated, status, now.isoformat(), source)
+    return updated
+
+
+def apply_sim_status_payload(task: dict[str, Any], data: dict[str, Any], now: datetime, source: str) -> dict[str, Any]:
+    status = str(data.get("status") or "").lower()
+    if status not in {"running", "passed", "failed"}:
+        return task
+    report = dict(task.get("report") or {})
+    if data.get("report_url"):
+        report["url"] = str(data["report_url"])
+    if data.get("summary"):
+        report["summary"] = str(data["summary"])
+    updated = set_sim_task_status(task, status, now, source)
+    updated["report"] = report
+    if status in {"passed", "failed"}:
+        updated["finished_at"] = str(data.get("finished_at") or now.isoformat())
+    if status == "running":
+        updated["deadline_at"] = (now + timedelta(hours=normalize_sim_timeout_hours(updated.get("timeout_hours")))).isoformat()
+    return updated
+
+
+def sim_registry_url(repo: RepositoryConfig | None, package_name: str, tag: str, file_name: str) -> str:
+    if repo is None:
+        return ""
+    project = repo.project.strip("/")
+    return f"{repo.base_url.rstrip('/')}/api/v4/projects/{quote(project, safe='')}/packages/generic/{package_name}/{tag}/{file_name}"
+
+
+def merge_sim_test_artifacts(task: dict[str, Any], repo: RepositoryConfig | None = None) -> dict[str, Any]:
+    updated = copy_json_value(task)
+    tag = str(updated.get("tag") or "")
+    task_id = str(updated.get("id") or "")
+    if not tag or not task_id:
+        return updated
+    root = RESIDENT_ARTIFACT_ROOT / tag
+    notify_dir = root / "sim-test" / task_id
+    payload_path = notify_dir / "notify-payload.json"
+    result_path = notify_dir / "notify-result.json"
+    try:
+        payload = json.loads(payload_path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            updated["payload"] = payload
+            payload_packages = payload.get("packages") if isinstance(payload.get("packages"), dict) else {}
+            packages = dict(updated.get("packages") or {})
+            if not packages.get("x86") and payload_packages.get("x86"):
+                packages["x86"] = payload_packages["x86"]
+            if not packages.get("arm") and payload_packages.get("arm"):
+                packages["arm"] = payload_packages["arm"]
+            updated["packages"] = packages
+    except (OSError, json.JSONDecodeError):
+        pass
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        if isinstance(result, dict):
+            updated["notify"] = {
+                "status": str(result.get("status") or ""),
+                "targets": list(result.get("targets") or []),
+            }
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    packages = dict(updated.get("packages") or {"x86": None, "arm": None})
+    sim_manifest_path = root / "sim-x86" / "manifest.json"
+    try:
+        sim_manifest = json.loads(sim_manifest_path.read_text(encoding="utf-8"))
+        package_name = f"simos_x86_sim_{tag}.tar.gz"
+        item = next((entry for entry in sim_manifest.get("files", []) if entry.get("file") == package_name), None)
+        if item:
+            packages["x86"] = {
+                "name": package_name,
+                "size": item.get("size", 0),
+                "md5": item.get("md5", ""),
+                "sha256": item.get("sha256", ""),
+                "registry_url": sim_registry_url(repo, "simos-sim-x86", tag, package_name),
+                "cloud_dir": str(sim_manifest.get("cloud_dir") or ""),
+            }
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    if not packages.get("arm") or not isinstance(packages.get("arm"), dict):
+        resident_manifest_path = root / "resident" / "manifest.json"
+        deb_manifest_path = root / "deb" / "deb-package-manifest.json"
+        try:
+            resident_manifest = json.loads(resident_manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            resident_manifest = {}
+        try:
+            deb_manifest = json.loads(deb_manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            deb_manifest = {}
+        resident_cloud_dir = str(resident_manifest.get("cloud_dir") or "")
+        deb_cloud_dir = str(deb_manifest.get("cloud_dir") or "")
+        resident_variants = []
+        for variant in resident_manifest.get("config_variants") or []:
+            label = str(variant.get("label") or "").strip()
+            if not label:
+                continue
+            registry_file = str((variant.get("registry_files") or {}).get("resident") or f"{label}-resident.tar.gz")
+            resident_variants.append({
+                "label": label,
+                "name": registry_file,
+                "registry_url": sim_registry_url(repo, "simos-resident", tag, registry_file),
+                "cloud_dir": f"{resident_cloud_dir}/{label}" if resident_cloud_dir else "",
+                "sha256": str(variant.get("sha256") or ""),
+                "md5": str(variant.get("md5") or ""),
+            })
+        resident_primary = next((item for item in resident_variants if item["label"] == "360"), resident_variants[0] if resident_variants else None)
+        if resident_primary:
+            resident_primary = {key: value for key, value in resident_primary.items() if key != "label"}
+        deb_items = []
+        for variant in deb_manifest.get("config_variants") or []:
+            label = str(variant.get("label") or "").strip()
+            if not label:
+                continue
+            zip_item = None
+            for item in variant.get("files") or []:
+                file_name = str(item.get("file") or "")
+                path_parts = str(item.get("path") or "").split("/")
+                registry_file = f"{label}-{file_name}" if len(path_parts) >= 3 and path_parts[-2] == label else file_name
+                if re.fullmatch(rf"{re.escape(label)}-simos_.+\.zip", registry_file):
+                    zip_item = item
+                    break
+            if not zip_item:
+                continue
+            file_name = str(zip_item.get("file") or "")
+            path_parts = str(zip_item.get("path") or "").split("/")
+            # manifest 里的 path 形如 deb/360/simos_xxx.zip，registry 文件名带 label 前缀。
+            registry_file = f"{label}-{file_name}" if len(path_parts) >= 3 and path_parts[-2] == label else file_name
+            deb_items.append({
+                "label": label,
+                "name": registry_file,
+                "registry_url": sim_registry_url(repo, "simos-debs", tag, registry_file),
+                "cloud_dir": f"{deb_cloud_dir}/{label}" if deb_cloud_dir else "",
+            })
+        if resident_primary or deb_items:
+            packages["arm"] = {
+                "resident": resident_primary,
+                "resident_variants": resident_variants,
+                "debs": deb_items,
+            }
+    updated["packages"] = packages
+    return updated
+
+
+def write_sim_report_file(task_id: str, filename: str, data: bytes) -> Path:
+    if len(data) > 100 * 1024 * 1024:
+        raise ValueError("报告文件超过 100MB 限制")
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(str(filename or "report.bin")).name).strip("._") or "report.bin"
+    safe_name = safe_name[:120]
+    target_dir = SIM_TEST_REPORT_ROOT / require_sim_test_id(task_id)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / safe_name
+    target.write_bytes(data)
+    return target
+
+
+def download_sim_report(task_id: str, report_url: str) -> Path | None:
+    parsed = urlparse(str(report_url or ""))
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("report_url 必须是 http/https 地址")
+    request = Request(str(report_url), headers={"Accept": "application/octet-stream"}, method="GET")
+    context = None if sim_status_ssl_verify() else ssl._create_unverified_context()
+    with urlopen(request, timeout=60, context=context) as response:
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > 100 * 1024 * 1024:
+                raise ValueError("报告文件超过 100MB 限制")
+            chunks.append(chunk)
+    filename = Path(parsed.path).name or "report.bin"
+    return write_sim_report_file(task_id, filename, b"".join(chunks))
+
+
+def upload_sim_report_to_cloud(task: dict[str, Any], local_path: Path) -> str:
+    key_value = os.environ.get("GITOPS_CLOUD_UPLOAD_SSH_KEY", "").strip()
+    if not key_value:
+        raise ValueError("GITOPS_CLOUD_UPLOAD_SSH_KEY 未配置，无法上传报告到云盘")
+    host = os.environ.get("GITOPS_CLOUD_UPLOAD_HOST", "192.168.110.17")
+    user = os.environ.get("GITOPS_CLOUD_UPLOAD_USER", "simos-ci-uploader")
+    port = os.environ.get("GITOPS_CLOUD_UPLOAD_PORT", "22")
+    incoming_base = os.environ.get("GITOPS_CLOUD_UPLOAD_BASE", "/data/simos-ci/incoming")
+    category = os.environ.get("GITOPS_CLOUD_CATEGORY", "车机/CI自动构建")
+    publisher = os.environ.get("GITOPS_SIM_SERVER_PUBLISHER", "/usr/local/bin/simos-ci-publish-sim")
+    tag = str(task.get("tag") or "")
+    task_id = require_sim_test_id(str(task.get("id") or ""))
+    # 云盘目录沿用发版脚本从 Tag 解析的版本字符串（保留 V/F/T 前缀），
+    # 保证仿真包与测试报告落在同一个版本目录下。
+    version = ""
+    match = re.search(r"_([VvFfTt]?[0-9]+(?:[.][0-9]+)+)_[0-9]{12}$", tag)
+    if match:
+        version = match.group(1)
+    if not version:
+        version = str(task.get("version") or "") or version_hint_from_ref(tag)
+    if not version:
+        raise ValueError("任务缺少版本号，无法上传报告")
+    publish_date = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+    remote_root = f"{incoming_base}/{tag}/{task_id}"
+    remote_dir = f"{remote_root}/sim-test-report"
+    cloud_dir = f"/public/Versions/{publish_date}_{version}/{category}/sim-test-report/{task_id}"
+    ssh_dir = Path(tempfile.mkdtemp(prefix="gitops-sim-report-"))
+    key_file = ssh_dir / "id_simos_ci_upload"
+    try:
+        key_is_file = False
+        if "\n" not in key_value and "\r" not in key_value:
+            try:
+                key_is_file = Path(key_value).is_file()
+            except OSError:
+                key_is_file = False
+        if key_is_file:
+            shutil.copyfile(key_value, key_file)
+        else:
+            key_file.write_text(key_value + "\n", encoding="utf-8")
+        key_file.chmod(0o600)
+        ssh_opts = [
+            "-i", str(key_file),
+            "-p", str(port),
+            "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+        ]
+        scp_opts = [
+            "-i", str(key_file),
+            "-P", str(port),
+            "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+        ]
+        target = f"{user}@{host}"
+        subprocess.run(["ssh", *ssh_opts, target, f"mkdir -p {shlex.quote(remote_dir)}"], check=True, capture_output=True, timeout=60)
+        report_files = sorted(path for path in local_path.parent.rglob("*") if path.is_file() and path.name != "manifest.json")
+        subprocess.run(
+            ["scp", *scp_opts, *[str(path) for path in report_files], f"{target}:{remote_dir}/"],
+            check=True,
+            capture_output=True,
+            timeout=120,
+        )
+        remote_command = " ".join(
+            [
+                "sudo", "-n", shlex.quote(publisher),
+                "--sim-report-only",
+                "--incoming", shlex.quote(remote_root),
+                "--tag", shlex.quote(tag),
+                "--version", shlex.quote(version),
+                "--date", shlex.quote(publish_date),
+                "--category", shlex.quote(category),
+                "--task-id", shlex.quote(task_id),
+                "--job-id", "webapp",
+                "--project", "OS/simos",
+            ]
+        )
+        subprocess.run(["ssh", *ssh_opts, target, remote_command], check=True, capture_output=True, timeout=180)
+        manifest_files = []
+        for path in report_files:
+            data = path.read_bytes()
+            manifest_files.append({
+                "file": path.name,
+                "size": len(data),
+                "md5": hashlib.md5(data).hexdigest(),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            })
+        (local_path.parent / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "task_id": task_id,
+                    "tag": tag,
+                    "version": version,
+                    "cloud_dir": cloud_dir,
+                    "files": manifest_files,
+                    "published_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return cloud_dir
+    finally:
+        shutil.rmtree(ssh_dir, ignore_errors=True)
+
+
+def load_sim_notify_targets() -> list[dict[str, str]]:
+    raw = os.environ.get("GITOPS_SIM_NOTIFY_TARGETS", "").strip()
+    if not raw:
+        return []
+    try:
+        items = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"GITOPS_SIM_NOTIFY_TARGETS 不是合法 JSON：{exc}") from exc
+    if not isinstance(items, list):
+        raise ValueError("GITOPS_SIM_NOTIFY_TARGETS 必须是 JSON 数组")
+    targets: list[dict[str, str]] = []
+    for item in items:
+        if not isinstance(item, dict) or not truthy(item.get("enabled", True)):
+            continue
+        url = str(item.get("url") or "").strip()
+        if not url:
+            continue
+        targets.append({
+            "name": str(item.get("name") or "target"),
+            "url": url,
+            "token": str(item.get("token") or ""),
+        })
+    return targets
+
+
+def post_sim_notify_targets(payload: dict[str, Any], targets: list[dict[str, str]]) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    for target in targets:
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if target.get("token"):
+            headers["Authorization"] = f"Bearer {target['token']}"
+        status = "failed"
+        http_code = ""
+        error = ""
+        try:
+            request = Request(target["url"], data=body, headers=headers, method="POST")
+            context = None if sim_status_ssl_verify() else ssl._create_unverified_context()
+            with urlopen(request, timeout=30, context=context) as response:
+                http_code = str(getattr(response, "status", "") or response.getcode())
+                status = "success" if http_code.startswith("2") else "failed"
+        except HTTPError as exc:
+            http_code = str(exc.code)
+            error = str(exc)
+        except (URLError, TimeoutError, OSError) as exc:
+            error = str(exc)
+        results.append({
+            "name": target.get("name", "target"),
+            "status": status,
+            "http_code": http_code,
+            "attempts": 1,
+            "error": error,
+        })
+    return results
 
 
 def normalize_cloud_category(value: Any) -> str:
@@ -3739,11 +4934,12 @@ def start_schedule_worker(app: GitOpsApp) -> None:
 
 
 def schedule_worker_tick(app: GitOpsApp, now: datetime | None = None) -> dict[str, list[dict[str, Any]]]:
-    return {
-        "builds": app.refresh_building_release_runs(now),
-        "resumed": app.resume_pending_release_runs(now),
-        "due": app.run_due_schedules(now),
-    }
+    builds = app.refresh_building_release_runs(now)
+    resumed = app.resume_pending_release_runs(now)
+    due = app.run_due_schedules(now)
+    # 仿真测试任务复用同一个后台线程；返回值保持既有结构，避免影响既有调用方。
+    app.refresh_sim_test_tasks(now)
+    return {"builds": builds, "resumed": resumed, "due": due}
 
 
 def load_dotenv(path: Path) -> None:
@@ -3847,6 +5043,10 @@ def make_handler(app: GitOpsApp):
             path = parsed.path
             query = {key: values[0] for key, values in parse_qs(parsed.query).items()}
 
+            sim_report_id = match_sim_test_report_path(path)
+            if sim_report_id:
+                self.serve_sim_test_report(sim_report_id)
+                return
             routes: dict[str, tuple[str, Callable[[], Any]]] = {
                 "/api/session": ("public", lambda: {"ok": True, "session": self.current_session()}),
                 "/api/config": ("view", app.public_config),
@@ -3863,6 +5063,7 @@ def make_handler(app: GitOpsApp):
                 "/api/release-tasks": ("view", app.release_tasks),
                 "/api/release-task-previews": ("view", app.release_task_previews),
                 "/api/release-runs": ("view", lambda: {"ok": True, "runs": load_release_runs()}),
+                "/api/sim-test-tasks": ("view", app.sim_test_tasks),
                 "/api/feature-package/runs": ("view", app.feature_package_runs),
                 "/api/accounts": ("admin", app.auth.accounts),
                 "/api/release-runs/manual-preview": (
@@ -3899,6 +5100,9 @@ def make_handler(app: GitOpsApp):
             release_task_route = match_release_task_path(path)
             if release_task_route and release_task_route[1] == "runs":
                 routes[path] = ("view", lambda task_id=release_task_route[0]: app.schedule_runs(task_id))
+            sim_task_route = match_sim_test_task_path(path)
+            if sim_task_route and not sim_task_route[1]:
+                routes[path] = ("view", lambda task_id=sim_task_route[0]: app.sim_test_task(task_id))
             release_run_id = match_release_run_path(path)
             if release_run_id and path not in routes:
                 routes[path] = ("view", lambda run_id=release_run_id: {"ok": True, "run": next((item for item in load_release_runs() if item.get("id") == run_id), None)})
@@ -3919,6 +5123,9 @@ def make_handler(app: GitOpsApp):
 
         def do_POST(self) -> None:
             path = urlparse(self.path).path
+            if path == "/api/sim-test-results":
+                self.handle_sim_test_result()
+                return
             payload = self.read_json()
             routes: dict[str, tuple[str, Callable[[], Any]]] = {
                 "/api/login": ("public", lambda: self.login(payload)),
@@ -3938,6 +5145,7 @@ def make_handler(app: GitOpsApp):
                 "/api/accounts": ("admin", lambda: app.auth.add_user(payload.get("username", ""), payload.get("role", "user"), payload.get("password", ""))),
                 "/api/release-runs/manual": ("create_tag", lambda: app.manual_release_run(payload)),
                 "/api/release-runs/rerun-tag": ("create_tag", lambda: app.rerun_tag_release(payload)),
+                "/api/sim-test-tasks/create": ("create_tag", lambda: app.create_sim_test_task(payload)),
             }
             schedule_route = match_schedule_path(path)
             if schedule_route:
@@ -3960,6 +5168,17 @@ def make_handler(app: GitOpsApp):
                     routes[path] = ("create_tag", lambda run_id=run_id: app.continue_release_run(run_id))
                 elif action == "retry-version-merge":
                     routes[path] = ("create_tag", lambda run_id=run_id: app.retry_version_merge(run_id))
+            sim_task_route = match_sim_test_task_path(path)
+            if sim_task_route and sim_task_route[1]:
+                task_id, action = sim_task_route
+                if action == "renotify":
+                    routes[path] = ("create_tag", lambda task_id=task_id: app.renotify_sim_test_task(task_id))
+                elif action == "remark":
+                    routes[path] = ("create_tag", lambda task_id=task_id: app.renotify_sim_test_task(task_id, remark=True))
+                elif action == "report/reupload":
+                    routes[path] = ("create_tag", lambda task_id=task_id: app.reupload_sim_test_report(task_id))
+                elif action == "timeout":
+                    routes[path] = ("create_tag", lambda task_id=task_id: app.adjust_sim_test_timeout(task_id, payload))
             self.dispatch_route(path, routes)
 
         def do_PUT(self) -> None:
@@ -4035,6 +5254,11 @@ def make_handler(app: GitOpsApp):
                 task_id = release_task_route[0]
                 self.handle_api("admin", lambda task_id=task_id: app.delete_release_task(task_id))
                 return
+            sim_task_route = match_sim_test_task_path(path)
+            if sim_task_route and not sim_task_route[1]:
+                task_id = sim_task_route[0]
+                self.handle_api("create_tag", lambda task_id=task_id: app.delete_sim_test_task(task_id))
+                return
             repo_id = match_repository_path(path)
             if not repo_id:
                 json_response(self, 404, {"ok": False, "error": "Unknown endpoint."})
@@ -4053,6 +5277,8 @@ def make_handler(app: GitOpsApp):
                 if permission != "public":
                     app.auth.require(self.token(), permission)
                 json_response(self, 200, action())
+            except SimTestNotFound as exc:
+                json_response(self, 404, {"ok": False, "error": str(exc)})
             except PermissionError as exc:
                 status = 401 if str(exc) == "请先登录" else 403
                 json_response(self, status, {"ok": False, "error": str(exc)})
@@ -4093,6 +5319,85 @@ def make_handler(app: GitOpsApp):
             if length == 0:
                 return {}
             return json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+
+        def serve_sim_test_report(self, task_id: str) -> None:
+            try:
+                app.auth.require(self.token(), "view")
+                task = app.sim_test_task(task_id)["task"]
+                local_path = Path(str((task.get("report") or {}).get("local_path") or ""))
+                if not local_path.is_file():
+                    json_response(self, 404, {"ok": False, "error": "本地报告文件不存在"})
+                    return
+                content_types = {
+                    ".html": "text/html; charset=utf-8",
+                    ".htm": "text/html; charset=utf-8",
+                    ".json": "application/json; charset=utf-8",
+                    ".txt": "text/plain; charset=utf-8",
+                    ".log": "text/plain; charset=utf-8",
+                    ".xml": "application/xml; charset=utf-8",
+                    ".pdf": "application/pdf",
+                    ".zip": "application/zip",
+                }
+                text_response(self, 200, content_types.get(local_path.suffix.lower(), "application/octet-stream"), local_path.read_bytes())
+            except PermissionError as exc:
+                status = 401 if str(exc) == "请先登录" else 403
+                json_response(self, status, {"ok": False, "error": str(exc)})
+            except SimTestNotFound as exc:
+                json_response(self, 404, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                json_response(self, 500, {"ok": False, "error": str(exc)})
+
+        def handle_sim_test_result(self) -> None:
+            expected = sim_callback_token()
+            if not expected:
+                json_response(self, 503, {"ok": False, "error": "SIMOS_SIM_NOTIFY_CALLBACK_TOKEN 未配置"})
+                return
+            provided = self.headers.get("X-Sim-Test-Token", "")
+            if not validate_sim_callback_token(provided):
+                json_response(self, 401, {"ok": False, "error": "回调 token 无效"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length) if length else b""
+                payload, report_file = self.parse_sim_test_result_body(body, self.headers.get("Content-Type", ""))
+                result = app.apply_sim_test_result(payload, report_file=report_file)
+                json_response(self, 200, result)
+            except SimTestNotFound as exc:
+                json_response(self, 404, {"ok": False, "error": str(exc)})
+            except ValueError as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                json_response(self, 500, {"ok": False, "error": str(exc)})
+
+        @staticmethod
+        def parse_sim_test_result_body(body: bytes, content_type: str) -> tuple[dict[str, Any], tuple[str, bytes] | None]:
+            content_type = str(content_type or "")
+            if content_type.startswith("application/json"):
+                data = json.loads(body.decode("utf-8") or "{}")
+                if not isinstance(data, dict):
+                    raise ValueError("回调 body 必须是 JSON 对象")
+                return data, None
+            if not content_type.startswith("multipart/form-data"):
+                raise ValueError("回调 Content-Type 必须是 application/json 或 multipart/form-data")
+            from email.parser import BytesParser
+            from email.policy import default as email_policy
+
+            header = f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8")
+            message = BytesParser(policy=email_policy).parsebytes(header + body)
+            fields: dict[str, Any] = {}
+            report_file: tuple[str, bytes] | None = None
+            for part in message.iter_parts():
+                name = part.get_param("name", header="content-disposition")
+                if not name:
+                    continue
+                data = part.get_payload(decode=True) or b""
+                filename = part.get_filename()
+                if filename:
+                    if name == "report":
+                        report_file = (filename, data)
+                else:
+                    fields[str(name)] = data.decode("utf-8", errors="replace")
+            return fields, report_file
 
         def serve_static(self, path: str) -> None:
             target = "index.html" if path in ("", "/") else path.lstrip("/")
@@ -4171,6 +5476,24 @@ def match_release_run_action_path(path: str) -> tuple[str, str] | None:
     if len(parts) == 4 and parts[0] == "api" and parts[1] == "release-runs":
         return parts[2], parts[3]
     return None
+
+
+def match_sim_test_task_path(path: str) -> tuple[str, str] | None:
+    parts = [item for item in path.split("/") if item]
+    if len(parts) == 3 and parts[0] == "api" and parts[1] == "sim-test-tasks":
+        return parts[2], ""
+    if len(parts) == 4 and parts[0] == "api" and parts[1] == "sim-test-tasks":
+        return parts[2], parts[3]
+    if len(parts) == 5 and parts[0] == "api" and parts[1] == "sim-test-tasks" and parts[3] == "report":
+        return parts[2], f"report/{parts[4]}"
+    return None
+
+
+def match_sim_test_report_path(path: str) -> str:
+    parts = [item for item in path.split("/") if item]
+    if len(parts) == 4 and parts[0] == "api" and parts[1] == "sim-test-tasks" and parts[3] == "report":
+        return parts[2]
+    return ""
 
 
 def json_response(handler: BaseHTTPRequestHandler, status: int, payload: Any) -> None:

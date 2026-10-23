@@ -203,11 +203,36 @@ class FeaturePackageTest(unittest.TestCase):
             variables = clients["gitops-workbench"].calls[-1][2]
             self.assertFalse(any(name.startswith("SIMOS_OTA") for name in variables))
 
-    def test_blank_baseline_requires_all_component_feature_branches(self):
-        app, clients = make_feature_app(); clients["business"].branch_map.pop("feature/release_login")
+    def test_blank_baseline_is_rejected(self):
+        app, clients = make_feature_app()
         result = app.create_feature_package(self.package_payload(baseline_ref=""))
-        self.assertFalse(result["ok"]); self.assertIn("不存在 Feature 分支", result["error"])
+        self.assertFalse(result["ok"]); self.assertIn("必须填写基线分支", result["error"])
         self.assertFalse(clients["gitops-workbench"].created_pipelines)
+
+    def test_unselected_config_resolves_from_baseline(self):
+        repos = [
+            RepositoryConfig("simos", "simos", "https://gitlab.test", "OS/simos", True, "main"),
+            RepositoryConfig("business", "business", "https://gitlab.test", "group/business", True, "main", submodule_path="src/business"),
+            RepositoryConfig("config", "config", "https://gitlab.test", "os/config", True, "main", submodule_path="src/config"),
+            RepositoryConfig("gitops-workbench", "workbench", "https://gitlab.test", "software_hmi_app/gitops-control", False, "main"),
+        ]
+        clients = {
+            "simos": FeatureClient("simos", {"release": "simos-release-abcdef", "feature/release_login": "simos-feature-abcdef"}),
+            "business": FeatureClient("business", {"release": "business-release-abcdef", "feature/release_login": "business-feature-abcdef"}),
+            "config": FeatureClient("config", {"release": "config-release-abcdef", "feature/release_login": "config-feature-abcdef"}),
+            "gitops-workbench": FeatureClient("gitops-workbench", {"ci/feature-package": "trusted-ci-abcdef"}),
+        }
+        config = {**server.DEFAULT_CONFIG, "feature_package_ci": {"repository_id": "gitops-workbench", "ref": "ci/feature-package", "registry_repository_id": "gitops-workbench"}}
+        app = server.GitOpsApp(FeatureStore(repos), auth.AuthManager.from_environment(), config)
+        app.client_for = lambda repo: clients[repo.id]  # type: ignore[method-assign]
+        app.token_loaded = lambda repo: True  # type: ignore[method-assign]
+
+        result = app.feature_package_preview(self.package_payload())
+        self.assertTrue(result["ok"], result)
+        config_result = next(item for item in result["component_resolutions"] if item["repository_id"] == "config")
+        self.assertEqual(config_result["resolved_ref"], "release")
+        self.assertEqual(config_result["resolution"], "baseline_ref")
+        self.assertEqual(config_result["submodule_path"], "src/config")
 
     def test_rejects_non_feature_forged_fields_and_bad_category(self):
         app, clients = make_feature_app()
@@ -241,7 +266,11 @@ class FeaturePackageTest(unittest.TestCase):
         self.assertTrue(only_simos["ok"], only_simos)
         variables = clients["gitops-workbench"].calls[-1][2]
         context = json.loads(base64.urlsafe_b64decode(variables["GITOPS_FEATURE_CONTEXT_B64"]).decode())
-        self.assertEqual([item["repo"] for item in context["components"]], ["simos"])
+        self.assertEqual([item["repo"] for item in context["components"]], ["simos", "business"])
+        business_resolution = next(item for item in context["components"] if item["repo"] == "business")
+        self.assertEqual(business_resolution["resolved_ref"], "release")
+        simos_resolution = next(item for item in context["components"] if item["repo"] == "simos")
+        self.assertEqual(simos_resolution["resolved_ref"], "feature/release_login")
         self.assertEqual(only_simos["run"]["repository_ids"], ["simos"])
 
     def test_feature_build_wrapper_clears_t_id_before_formal_release_gate(self):
@@ -776,6 +805,36 @@ print('200', end='')
                 self.assertNotEqual(rejected.returncode, 0)
                 self.assertIn('source build kind', rejected.stderr)
 
+    def test_feature_git_auth_rewrites_gitlab_https_origin_with_port(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            git_config = root / "gitconfig"
+            helper = server.ROOT.parent / ".gitlab/scripts/feature-package-git-auth.py"
+            env = {**os.environ, "GIT_CONFIG_GLOBAL": str(git_config), "CI_JOB_TOKEN": "test-job-token"}
+            configured = subprocess.run(
+                [sys.executable, str(helper), "https://www.chancee-shanghai.cn:9900", "www.chancee-shanghai.cn"],
+                env=env,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(configured.returncode, 0, configured.stdout + configured.stderr)
+
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+            subprocess.run([
+                "git", "-C", str(repo), "remote", "add", "origin",
+                "https://www.chancee-shanghai.cn:9900/software_hmi_app/business.git",
+            ], check=True)
+            rewritten = subprocess.check_output(
+                ["git", "-C", str(repo), "remote", "get-url", "origin"], env=env, text=True
+            ).strip()
+            self.assertEqual(
+                rewritten,
+                "https://gitlab-ci-token:test-job-token@www.chancee-shanghai.cn:9900/"
+                "software_hmi_app/business.git",
+            )
+
     def test_static_contract_for_trusted_feature_pipeline(self):
         now = server.datetime(2026, 8, 27, 15, 30, 45, tzinfo=server.ZoneInfo("Asia/Shanghai"))
         first = server.allocate_feature_package_build_id("feature/release_login", now, [])
@@ -795,8 +854,9 @@ print('200', end='')
         self.assertIn("GITOPS_FEATURE_CONTEXT_HMAC", verifier)
         prepare = (server.ROOT.parent / ".gitlab" / "scripts" / "feature-package-prepare.sh").read_text(encoding="utf-8")
         self.assertIn('os.environ.get("CI_SERVER_URL", "").rstrip("/")', prepare)
-        self.assertIn('f"ssh://git@{server_host}:22222/"', prepare)
-        self.assertIn('f"git@{server_host}:"', prepare)
+        git_auth = (server.ROOT.parent / ".gitlab/scripts/feature-package-git-auth.py").read_text(encoding="utf-8")
+        self.assertIn('f"ssh://git@{server_host}:22222/"', git_auth)
+        self.assertIn('f"git@{server_host}:"', git_auth)
         self.assertNotIn('CI_SERVER_PROTOCOL", "https"', prepare)
         self.assertIn("The button_* jobs are legacy GitLab Web-operation entry points.", root_ci)
         self.assertIn("if: '$GITOPS_FEATURE_PACKAGE == \"1\"'", root_ci)

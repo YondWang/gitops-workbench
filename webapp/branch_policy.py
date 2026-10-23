@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 
-VERSION_RE = re.compile(r"^[VvFfTt]?(\d{1,4})\.(\d{1,4})\.(\d{1,4})$")
+VERSION_RE = re.compile(r"^[VvFfTt]?(\d{1,4})\.(\d{1,4})$")
 SAFE_REF_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 
 
@@ -20,8 +20,8 @@ def require_version(version: str) -> str:
     value = version.strip()
     match = VERSION_RE.fullmatch(value)
     if not match:
-        raise ValueError("版本号必须是三段式，例如 V1.0.0")
-    return "V{}.{}.{}".format(*(int(item) for item in match.groups()))
+        raise ValueError("版本号必须是两段式，例如 V1.0")
+    return "V{}.{}".format(*(int(item) for item in match.groups()))
 
 
 def safe_ref_name(name: str) -> bool:
@@ -107,6 +107,6 @@ def classify_branch(name: str) -> str:
         return "bugfix"
     if name.startswith("feature/"):
         return "feature"
-    if re.fullmatch(r"bugfix/[Vv]?\d+\.\d+\.\d+", name):
+    if re.fullmatch(r"bugfix/[Vv]?\d+\.\d+", name):
         return "bugfix"
     return "other"

@@ -9,7 +9,10 @@
   <body>
     <section id="loginView" class="login-view">
       <form id="loginForm" class="login-card">
-        <div class="mark">GB</div>
+        <div class="login-badge">
+          <div class="mark">GB</div>
+          <span class="login-badge-line"></span>
+        </div>
         <h1>GitLab Branch Workbench</h1>
         <p>登录后管理多个 GitLab 仓库的分支创建和 Tag。</p>
         <label>
@@ -35,23 +38,58 @@
           </div>
         </div>
         <nav>
-          <button class="nav-item active" data-view="overview">分支总览</button>
-          <button class="nav-item" data-view="release" data-admin-only>Release</button>
-          <button class="nav-item" data-view="feature">Feature</button>
-          <button class="nav-item" data-view="bugfix" data-admin-only>Bugfix</button>
-          <button class="nav-item" data-view="tag" data-admin-only>Tag</button>
-          <button class="nav-item" data-view="schedules" data-admin-only>发版任务</button>
-          <button class="nav-item" data-view="repositories" data-admin-only>仓库管理</button>
-          <button class="nav-item" data-view="accounts" data-admin-only>账号管理</button>
-          <button class="nav-item" data-view="settings">配置</button>
+          <button class="nav-item active" data-view="overview">
+            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="7" height="7" rx="2"/><rect x="13.5" y="3.5" width="7" height="7" rx="2"/><rect x="3.5" y="13.5" width="7" height="7" rx="2"/><rect x="13.5" y="13.5" width="7" height="7" rx="2"/></svg>
+            <span>分支总览</span>
+          </button>
+          <button class="nav-item" data-view="release" data-admin-only>
+            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5" r="2.2"/><circle cx="6" cy="19" r="2.2"/><circle cx="18" cy="9" r="2.2"/><path d="M6 7.2v9.6M18 11.2c0 4-4 4.4-7.4 4.8"/></svg>
+            <span>Release</span>
+          </button>
+          <button class="nav-item" data-view="feature">
+            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" rx="4"/><path d="M12 8v8M8 12h8"/></svg>
+            <span>Feature</span>
+          </button>
+          <button class="nav-item" data-view="bugfix" data-admin-only>
+            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6.5h6a4 4 0 0 1 4 4V15a4 4 0 0 1-4 4H9a4 4 0 0 1-4-4v-4.5a4 4 0 0 1 4-4z"/><path d="M9 3.5 10.5 6M15 3.5 13.5 6M3.5 12H6M18 12h2.5M3.5 17H6M18 17h2.5M12 9v10"/></svg>
+            <span>Bugfix</span>
+          </button>
+          <button class="nav-item" data-view="tag" data-admin-only>
+            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.4 13.6 13 21a2 2 0 0 1-2.8 0L3 13.8V3.5h10.3l7.1 7.1a2.2 2.2 0 0 1 0 3z"/><circle cx="8" cy="8" r="1.4"/></svg>
+            <span>Tag</span>
+          </button>
+          <button class="nav-item" data-view="schedules" data-admin-only>
+            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M10.2 8.8 15.4 12l-5.2 3.2z"/></svg>
+            <span>发版任务</span>
+          </button>
+          <button class="nav-item" data-view="simtests" data-admin-only data-sim-package-ui>
+            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9.5 3.5h5M10.5 3.5v6L5.4 18a1.8 1.8 0 0 0 1.6 2.6h10a1.8 1.8 0 0 0 1.6-2.6L13.5 9.5v-6"/><path d="M8 14.5h8"/></svg>
+            <span>自动化测试</span>
+          </button>
+          <button class="nav-item" data-view="repositories" data-admin-only>
+            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 8.2v7.6a2 2 0 0 1-1.1 1.8l-6.5 3.6a2 2 0 0 1-1.8 0l-6.5-3.6a2 2 0 0 1-1.1-1.8V8.2a2 2 0 0 1 1.1-1.8l6.5-3.6a2 2 0 0 1 1.8 0l6.5 3.6a2 2 0 0 1 1.1 1.8z"/><path d="m3.8 7.2 7.3 4a2 2 0 0 0 1.8 0l7.3-4M12 21.2v-8"/></svg>
+            <span>仓库管理</span>
+          </button>
+          <button class="nav-item" data-view="accounts" data-admin-only>
+            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.6"/><path d="M4.8 20.2a7.2 7.2 0 0 1 14.4 0"/></svg>
+            <span>账号管理</span>
+          </button>
+          <button class="nav-item" data-view="settings">
+            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.2"/><circle cx="9" cy="17" r="2.2"/></svg>
+            <span>配置</span>
+          </button>
         </nav>
+        <div class="sidebar-foot">
+          <span class="dot"></span>
+          <span>GitLab 多仓库发布工作台</span>
+        </div>
       </aside>
 
       <section class="workspace">
         <header class="topbar">
-          <div>
+          <div class="topbar-identity">
             <div class="eyebrow">当前角色</div>
-            <div><strong id="currentUser">-</strong> <span id="currentRole" class="badge muted">-</span></div>
+            <div class="identity-row"><strong id="currentUser">-</strong> <span id="currentRole" class="badge muted">-</span></div>
           </div>
           <div class="actions">
             <input id="branchSearch" class="search" placeholder="搜索远端分支" />
@@ -64,7 +102,10 @@
           <div class="grid two">
             <article class="panel">
               <div class="panel-title">
-                <h2>远端分支</h2>
+                <div>
+                  <div class="eyebrow">Branches</div>
+                  <h2>远端分支</h2>
+                </div>
                 <div class="button-row">
                   <select id="overviewRepositoryFilter" class="compact-select overview-repository-filter" aria-label="按仓库筛选概览"></select>
                   <select id="branchTypeFilter" class="compact-select">
@@ -94,7 +135,10 @@
             </article>
             <article class="panel">
               <div class="panel-title">
-                <h2>Tag</h2>
+                <div>
+                  <div class="eyebrow">Tags</div>
+                  <h2>Tag</h2>
+                </div>
                 <span id="tagCount" class="badge muted">0</span>
               </div>
               <ul id="tagList" class="list"></ul>
@@ -105,7 +149,10 @@
         <section id="release" class="view">
           <article class="panel form-panel" data-admin-only>
             <div class="panel-title">
-              <h2>创建 Release 分支</h2>
+              <div>
+                <div class="eyebrow">Release</div>
+                <h2>创建 Release 分支</h2>
+              </div>
             </div>
             <form id="releaseForm">
               <fieldset class="inline-options repository-selector" id="releaseRepositories"><legend>目标仓库</legend></fieldset>
@@ -126,7 +173,10 @@
           <div class="grid feature-operations-grid">
           <article class="panel form-panel">
             <div class="panel-title">
-              <h2>创建 Feature 分支</h2>
+              <div>
+                <div class="eyebrow">Feature</div>
+                <h2>创建 Feature 分支</h2>
+              </div>
             </div>
             <form id="featureForm">
               <fieldset class="inline-options repository-selector" id="featureRepositories"><legend>目标仓库</legend></fieldset>
@@ -147,7 +197,10 @@
           </article>
           <article class="panel form-panel" data-feature-package-only>
             <div class="panel-title">
-              <h2>创建 Feature 测试包</h2>
+              <div>
+                <div class="eyebrow">Test Package</div>
+                <h2>创建 Feature 测试包</h2>
+              </div>
               <span class="badge muted">T 包</span>
             </div>
             <form id="featurePackageForm">
@@ -157,8 +210,8 @@
                 <select id="featurePackageRef" name="ref" required></select>
               </label>
               <label>
-                基线分支（可选）
-                <input name="baseline_ref" placeholder="留空要求全部组件存在同名 Feature 分支" />
+                基线分支
+                <input id="featurePackageBaselineRef" name="baseline_ref" required placeholder="未勾选的仓库（含 Config）将冻结到该分支" />
               </label>
               <label>
                 云盘分类
@@ -175,13 +228,16 @@
           </div>
           <article class="panel" data-feature-package-only>
             <div class="panel-title">
-              <h2>Feature 构建记录</h2>
+              <div>
+                <div class="eyebrow">Builds</div>
+                <h2>Feature 构建记录</h2>
+              </div>
               <button id="refreshFeaturePackageRunsBtn" type="button">刷新</button>
             </div>
             <div class="table-wrap">
               <table>
-                <thead><tr><th>版本</th><th>来源</th><th>状态</th><th>Pipeline</th><th>云盘</th><th data-admin-only>操作</th></tr></thead>
-                <tbody id="featurePackageRunsBody"><tr><td colspan="6">暂无构建记录</td></tr></tbody>
+                <thead><tr><th>版本</th><th>来源</th><th>操作人</th><th>状态</th><th>Pipeline</th><th>云盘</th><th data-admin-only>操作</th></tr></thead>
+                <tbody id="featurePackageRunsBody"><tr><td colspan="7">暂无构建记录</td></tr></tbody>
               </table>
             </div>
           </article>
@@ -194,7 +250,10 @@
         <section id="bugfix" class="view">
           <article class="panel form-panel" data-admin-only>
             <div class="panel-title">
-              <h2>创建 Bugfix 版本分支</h2>
+              <div>
+                <div class="eyebrow">Bugfix</div>
+                <h2>创建 Bugfix 版本分支</h2>
+              </div>
             </div>
             <form id="bugfixForm">
               <fieldset class="inline-options repository-selector" id="bugfixRepositories"><legend>目标仓库</legend></fieldset>
@@ -204,7 +263,7 @@
               </label>
               <label>
                 固定版本号
-                <input name="version" placeholder="V1.0.0" required />
+                <input name="version" placeholder="V1.0" required />
               </label>
               <button class="primary">创建 bugfix/&lt;版本号&gt;</button>
             </form>
@@ -219,7 +278,10 @@
           <div class="grid two tag-grid">
             <article class="panel form-panel tag-primary-panel" data-admin-only>
               <div class="panel-title">
-                <h2>创建 Tag</h2>
+                <div>
+                  <div class="eyebrow">Tag</div>
+                  <h2>创建 Tag</h2>
+                </div>
               </div>
               <form id="tagForm">
                 <fieldset class="inline-options repository-selector" id="tagRepositories"><legend>目标仓库</legend></fieldset>
@@ -241,7 +303,7 @@
                 </label>
                 <label id="tagBaseVersionField" class="version-base-field hidden">
                   本周基线版本（可选）
-                  <input name="base_version" placeholder="如 3.1.23.0，留空使用默认值" disabled />
+                  <input name="base_version" placeholder="留空则按目标分支 version.info 自动递增" disabled />
                 </label>
                 <label>
                   云盘分类
@@ -263,7 +325,10 @@
             <div class="tag-side-stack" data-admin-only>
               <article class="panel form-panel danger-panel">
                 <div class="panel-title">
-                  <h2>批量删除 Tag</h2>
+                  <div>
+                    <div class="eyebrow">Danger Zone</div>
+                    <h2>批量删除 Tag</h2>
+                  </div>
                 </div>
                 <p class="meta">仅显示已选仓库共有的 Tag。</p>
                 <form id="tagDeleteForm">
@@ -278,7 +343,10 @@
               </article>
               <article id="simosTagPanel" class="panel form-panel danger-panel hidden">
                 <div class="panel-title">
-                  <h2>simos Tag 管理</h2>
+                  <div>
+                    <div class="eyebrow">Danger Zone</div>
+                    <h2>simos Tag 管理</h2>
+                  </div>
                 </div>
                 <p class="meta">单独管理 simos 主库的 Tag，不受当前仓库选择影响。</p>
                 <form id="simosTagDeleteForm">
@@ -299,321 +367,496 @@
           </article>
         </section>
 
-        <section id="schedules" class="view">
-          <div class="grid two">
-            <article class="panel form-panel" data-admin-only>
-              <div class="panel-title">
+        <section id="schedules" class="view release-view">
+          <!-- 自动任务管理：按需求暂时隐藏，DOM 与功能完整保留，请勿删除 -->
+          <article class="panel form-panel legacy-retired" data-admin-only>
+            <div class="panel-title">
+              <div>
+                <div class="eyebrow">Automation</div>
                 <h2>自动任务管理</h2>
-                <span id="scheduleStatus" class="badge muted">未加载</span>
               </div>
-              <form id="scheduleForm">
-                <input type="hidden" name="id" value="daily-simos-resident-release" />
-                <input type="hidden" name="timezone" value="Asia/Shanghai" />
-                <label class="checkline">
-                  <input name="enabled" type="checkbox" checked />
-                  启用自动任务
-                </label>
+              <span id="scheduleStatus" class="badge muted">未加载</span>
+            </div>
+            <form id="scheduleForm">
+              <input type="hidden" name="id" value="daily-simos-resident-release" />
+              <input type="hidden" name="timezone" value="Asia/Shanghai" />
+              <label class="checkline">
+                <input name="enabled" type="checkbox" checked />
+                启用自动任务
+              </label>
+              <label>
+                名称
+                <input name="name" required />
+              </label>
+              <label>
+                每天北京时间
+                <input name="daily_time" type="time" value="16:00" required />
+              </label>
+              <label>
+                来源策略
+                <select name="source_ref_strategy">
+                  <option value="fixed_ref">固定来源 ref</option>
+                  <option value="latest_fix_rc">最新 fix RC</option>
+                  <option value="manual_ref">手动指定 ref</option>
+                </select>
+              </label>
+              <label>
+                代码来源 ref
+                <input name="default_ref" value="fix" required />
+              </label>
+              <label>
+                Feature 缺失时回退分支
+                <input name="feature_fallback_ref" value="release" required />
+              </label>
+              <label class="checkline">
+                <input type="checkbox" name="config_matrix_enabled" checked data-config-matrix-toggle />
+                使用双配置矩阵（SIMBOT_R6_A / SIMBOT_R6_B）
+              </label>
+              <label data-config-single>
+                单配置分支（关闭矩阵时）
+                <input name="config_ref" placeholder="例如 release 或 feature/config_x" />
+              </label>
+              <fieldset class="inline-options" data-config-matrix>
+                <legend>构建配置</legend>
+                <label><input type="checkbox" name="config_matrix" value="SIMBOT_R6_A:360" checked /> SIMBOT_R6_A / 360</label>
+                <label><input type="checkbox" name="config_matrix" value="SIMBOT_R6_B:360s" checked /> SIMBOT_R6_B / 360s</label>
+              </fieldset>
+              <label>
+                版本来源
+                <select name="version_source">
+                  <option value="simos_version_info">按 SimOS version.info 自动计算</option>
+                  <option value="manual">手动版本号</option>
+                </select>
+              </label>
+              <label>
+                手动版本号
+                <input name="manual_version_number" placeholder="3.1.24.020" />
+              </label>
+              <label>
+                版本类型
+                <select name="version_prefix_mode">
+                  <option value="auto">自动：release/fix/bugfix=V</option>
+                  <option value="manual">手动选择</option>
+                </select>
+              </label>
+              <label>
+                手动版本类型
+                <select name="manual_version_prefix">
+                  <option value="V">V 正式/fix</option>
+                  <option value="F">F release</option>
+                  <option value="T">T 临时/定制</option>
+                </select>
+              </label>
+              <label>
+                云盘分类
+                <select class="cloud-category-select" name="cloud_category" required></select>
+              </label>
+              <label>
+                OTA 上传环境
+                <select name="ota_target_envs" multiple>
+                  <option value="dev">开发</option>
+                  <option value="test">测试</option>
+                  <option value="prod">生产</option>
+                </select>
+                <span class="field-hint">可留空；留空时只构建和发布，不创建 OTA 上传阶段。</span>
+              </label>
+              <label class="checkline" data-sim-package-toggle>
+                <input type="checkbox" name="build_sim_package" />
+                编 x86 仿真包（仅单配置）
+              </label>
+              <div class="sim-package-extra" data-sim-package-fields>
                 <label>
-                  名称
-                  <input name="name" required />
-                </label>
-                <label>
-                  每天北京时间
-                  <input name="daily_time" type="time" value="16:00" required />
-                </label>
-                <label>
-                  来源策略
-                  <select name="source_ref_strategy">
-                    <option value="fixed_ref">固定来源 ref</option>
-                    <option value="latest_fix_rc">最新 fix RC</option>
-                    <option value="manual_ref">手动指定 ref</option>
+                  测试目标
+                  <select name="sim_test_target">
+                    <option value="sim">仿真(x86)</option>
+                    <option value="vehicle">实车(arm)</option>
+                    <option value="both" selected>两者</option>
                   </select>
                 </label>
                 <label>
-                  代码来源 ref
-                  <input name="default_ref" value="fix" required />
+                  任务备注
+                  <input name="sim_test_note" maxlength="200" placeholder="如：实车回归-路口场景" />
                 </label>
-                <label>
-                  Feature 缺失时回退分支
-                  <input name="feature_fallback_ref" value="release" required />
-                </label>
-                <label class="checkline">
-                  <input type="checkbox" name="config_matrix_enabled" checked data-config-matrix-toggle />
-                  使用双配置矩阵（SIMBOT_R6_A / SIMBOT_R6_B）
-                </label>
-                <label data-config-single>
-                  单配置分支（关闭矩阵时）
-                  <input name="config_ref" placeholder="例如 release 或 feature/config_x" />
-                </label>
-                <fieldset class="inline-options" data-config-matrix>
-                  <legend>构建配置</legend>
-                  <label><input type="checkbox" name="config_matrix" value="SIMBOT_R6_A:360" checked /> SIMBOT_R6_A / 360</label>
-                  <label><input type="checkbox" name="config_matrix" value="SIMBOT_R6_B:360s" checked /> SIMBOT_R6_B / 360s</label>
-                </fieldset>
-                <label>
-                  版本来源
-                  <select name="version_source">
-                    <option value="simos_version_info">按 SimOS version.info 自动计算</option>
-                    <option value="manual">手动版本号</option>
-                  </select>
-                </label>
-                <label>
-                  手动版本号
-                  <input name="manual_version_number" placeholder="3.1.24.020" />
-                </label>
-                <label>
-                  版本类型
-                  <select name="version_prefix_mode">
-                    <option value="auto">自动：release/fix/bugfix=V</option>
-                    <option value="manual">手动选择</option>
-                  </select>
-                </label>
-                <label>
-                  手动版本类型
-                  <select name="manual_version_prefix">
-                    <option value="V">V 正式/fix</option>
-                    <option value="F">F release</option>
-                    <option value="T">T 临时/定制</option>
-                  </select>
-                </label>
-                <label>
-                  云盘分类
-                  <select class="cloud-category-select" name="cloud_category" required></select>
-                </label>
-                <label>
-                  OTA 上传环境
-                  <select name="ota_target_envs" multiple>
-                    <option value="dev">开发</option>
-                    <option value="test">测试</option>
-                    <option value="prod">生产</option>
-                  </select>
-                  <span class="field-hint">可留空；留空时只构建和发布，不创建 OTA 上传阶段。</span>
-                </label>
-                <div class="readonly-field">
-                  <div class="eyebrow">Tag 预览</div>
-                  <code id="scheduleTagPreview">保存或试运行后显示</code>
-                </div>
-                <div class="button-row">
-                  <button class="primary">保存策略</button>
-                  <button type="button" id="newScheduleBtn">新建任务</button>
-                  <button type="button" id="scheduleDryRunBtn">试运行</button>
-                </div>
-              </form>
-            </article>
-            <article class="panel" data-admin-only>
-              <div class="panel-title">
+              </div>
+              <p class="field-hint" data-sim-package-hint>双配置矩阵下不支持仿真包；关闭矩阵并选择一个 config 分支后才可勾选。</p>
+              <div class="readonly-field">
+                <div class="eyebrow">Tag 预览</div>
+                <code id="scheduleTagPreview">保存或试运行后显示</code>
+              </div>
+              <div class="button-row">
+                <button class="primary">保存策略</button>
+                <button type="button" id="newScheduleBtn">新建任务</button>
+                <button type="button" id="scheduleDryRunBtn">试运行</button>
+              </div>
+            </form>
+          </article>
+
+          <!-- 任务列表：随自动任务一起隐藏，DOM 与功能完整保留，请勿删除 -->
+          <article class="panel legacy-retired" data-admin-only>
+            <div class="panel-title">
+              <div>
+                <div class="eyebrow">Schedules</div>
                 <h2>任务列表</h2>
-                <span id="scheduleCount" class="badge muted">0</span>
               </div>
-              <div class="table-wrap schedule-table">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>任务</th>
-                      <th>时间</th>
-                      <th>来源</th>
-                      <th>下次发布</th>
-                      <th>操作</th>
-                    </tr>
-                  </thead>
-                  <tbody id="scheduleListBody"></tbody>
-                </table>
-              </div>
-              <div class="panel-title">
-                <h2>手动执行</h2>
-              </div>
-              <form id="manualReleaseForm" class="compact-form">
-                <label>
-                  代码来源 ref
-                  <input name="source_ref" value="fix" required />
-                </label>
-                <label>
-                  Feature 缺失时回退分支
-                  <input name="feature_fallback_ref" value="release" required />
-                </label>
-                <p class="field-hint">
-                  SimOS 必须存在代码来源 ref；非 SimOS 仓库缺少该 ref（包括 <code>feature/*</code>）时，使用上方指定的回退分支。
-                </p>
-                <label class="checkline">
-                  <input type="checkbox" name="config_matrix_enabled" checked data-config-matrix-toggle />
-                  使用双配置矩阵（SIMBOT_R6_A / SIMBOT_R6_B）
-                </label>
-                <label data-config-single>
-                  单配置分支（关闭矩阵时）
-                  <input name="config_ref" placeholder="例如 release 或 feature/config_x" />
-                </label>
-                <fieldset class="inline-options" data-config-matrix>
-                  <legend>构建配置</legend>
-                  <label><input type="checkbox" name="config_matrix" value="SIMBOT_R6_A:360" checked /> SIMBOT_R6_A / 360</label>
-                  <label><input type="checkbox" name="config_matrix" value="SIMBOT_R6_B:360s" checked /> SIMBOT_R6_B / 360s</label>
-                </fieldset>
-                <label>
-                  版本来源
-                  <select name="version_source">
-                    <option value="simos_version_info">自动计算</option>
-                    <option value="manual">手动版本号</option>
-                  </select>
-                </label>
-                <label>
-                  手动版本号
-                  <input name="manual_version_number" placeholder="3.1.24.020" />
-                </label>
-                <label>
-                  版本类型
-                  <select name="version_prefix_mode">
-                    <option value="auto">自动</option>
-                    <option value="manual">手动选择</option>
-                  </select>
-                </label>
-                <label>
-                  手动版本类型
-                  <select name="manual_version_prefix">
-                    <option value="V">V</option>
-                    <option value="F">F</option>
-                    <option value="T">T</option>
-                  </select>
-                </label>
-                <label>
-                  云盘分类
-                  <select class="cloud-category-select" name="cloud_category" required></select>
-                </label>
-                <label>
-                  OTA 上传环境
-                  <select name="ota_target_envs" multiple>
-                    <option value="dev">开发</option>
-                    <option value="test">测试</option>
-                    <option value="prod">生产</option>
-                  </select>
-                  <span class="field-hint">可留空；留空时只构建和发布，不创建 OTA 上传阶段。</span>
-                </label>
-                <label class="checkline">
-                  <input name="force_week_bump" type="checkbox" />
-                  周版本号 +1
-                </label>
-                <div class="button-row">
-                  <button id="manualReleaseCalculateBtn" class="secondary" type="button">计算版本</button>
-                  <button class="primary">完整发版构建</button>
+              <span id="scheduleCount" class="badge muted">0</span>
+            </div>
+            <div class="table-wrap schedule-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th>任务</th>
+                    <th>时间</th>
+                    <th>来源</th>
+                    <th>下次发布</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="scheduleListBody"></tbody>
+              </table>
+            </div>
+          </article>
+
+          <div class="release-layout">
+            <div class="release-main">
+              <article class="panel release-hero" data-admin-only>
+                <div class="panel-title release-title">
+                  <div>
+                    <div class="eyebrow">Manual Release</div>
+                    <h2>手动发版</h2>
+                    <p class="panel-subtitle">选择来源分支 → 计算版本 → 触发完整构建并自动打 Tag。</p>
+                  </div>
+                  <span class="badge muted">单次执行</span>
                 </div>
-                <div class="readonly-field">
-                  <div class="eyebrow">本次预计版本</div>
+                <form id="manualReleaseForm" class="release-form">
+                  <label>
+                    代码来源 ref
+                    <input name="source_ref" value="fix" required />
+                  </label>
+                  <label>
+                    Feature 缺失时回退分支
+                    <input name="feature_fallback_ref" value="release" required />
+                  </label>
+                  <p class="field-hint form-span">
+                    SimOS 必须存在代码来源 ref；非 SimOS 仓库缺少该 ref（包括 <code>feature/*</code>）时，使用上方指定的回退分支。
+                  </p>
+                  <label class="checkline">
+                    <input type="checkbox" name="config_matrix_enabled" checked data-config-matrix-toggle />
+                    使用双配置矩阵（SIMBOT_R6_A / SIMBOT_R6_B）
+                  </label>
+                  <label data-config-single>
+                    单配置分支（关闭矩阵时）
+                    <input name="config_ref" placeholder="例如 release 或 feature/config_x" />
+                  </label>
+                  <fieldset class="inline-options form-span" data-config-matrix>
+                    <legend>构建配置</legend>
+                    <label><input type="checkbox" name="config_matrix" value="SIMBOT_R6_A:360" checked /> SIMBOT_R6_A / 360</label>
+                    <label><input type="checkbox" name="config_matrix" value="SIMBOT_R6_B:360s" checked /> SIMBOT_R6_B / 360s</label>
+                  </fieldset>
+                  <label>
+                    版本来源
+                    <select name="version_source">
+                      <option value="simos_version_info">自动计算</option>
+                      <option value="manual">手动版本号</option>
+                    </select>
+                  </label>
+                  <label>
+                    手动版本号
+                    <input name="manual_version_number" placeholder="3.1.24.020" />
+                  </label>
+                  <label>
+                    版本类型
+                    <select name="version_prefix_mode">
+                      <option value="auto">自动</option>
+                      <option value="manual">手动选择</option>
+                    </select>
+                  </label>
+                  <label>
+                    手动版本类型
+                    <select name="manual_version_prefix">
+                      <option value="V">V</option>
+                      <option value="F">F</option>
+                      <option value="T">T</option>
+                    </select>
+                  </label>
+                  <label>
+                    云盘分类
+                    <select class="cloud-category-select" name="cloud_category" required></select>
+                  </label>
+                  <label>
+                    OTA 上传环境
+                    <select name="ota_target_envs" multiple>
+                      <option value="dev">开发</option>
+                      <option value="test">测试</option>
+                      <option value="prod">生产</option>
+                    </select>
+                    <span class="field-hint">可留空；留空时只构建和发布，不创建 OTA 上传阶段。</span>
+                  </label>
+                  <label class="checkline">
+                    <input name="build_sim_package" type="checkbox" data-sim-package-toggle />
+                    编 x86 仿真包（仅单配置）
+                  </label>
+                  <div class="sim-package-extra form-span" data-sim-package-fields>
+                    <label>
+                      测试目标
+                      <select name="sim_test_target">
+                        <option value="sim">仿真(x86)</option>
+                        <option value="vehicle">实车(arm)</option>
+                        <option value="both" selected>两者</option>
+                      </select>
+                    </label>
+                    <label>
+                      任务备注
+                      <input name="sim_test_note" maxlength="200" placeholder="如：实车回归-路口场景" />
+                    </label>
+                  </div>
+                  <p class="field-hint form-span" data-sim-package-hint>双配置矩阵下不支持仿真包；关闭矩阵并选择一个 config 分支后才可勾选。</p>
+                  <label class="checkline form-span">
+                    <input name="force_week_bump" type="checkbox" />
+                    周版本号 +1（第三位递增，第四位按组件修订位重算）
+                  </label>
+                  <div class="button-row form-actions form-span">
+                    <button id="manualReleaseCalculateBtn" class="secondary" type="button">计算版本</button>
+                    <button class="primary">完整发版构建</button>
+                  </div>
+                </form>
+              </article>
+
+              <article class="panel" data-admin-only>
+                <div class="panel-title">
+                  <div>
+                    <div class="eyebrow">Re-run</div>
+                    <h2>重跑已有 Tag</h2>
+                  </div>
+                  <span class="badge muted">不创建新 Tag</span>
+                </div>
+                <form id="rerunTagForm" class="release-form release-form-compact">
+                  <label>
+                    已有 SimOS Tag
+                    <input name="tag_name" placeholder="fix_V3.1.24.020_202607031600" required />
+                  </label>
+                  <label>
+                    OTA 上传环境
+                    <select name="ota_target_envs" multiple>
+                      <option value="dev">开发</option>
+                      <option value="test">测试</option>
+                      <option value="prod">生产</option>
+                    </select>
+                    <span class="field-hint">可留空；留空时只构建和发布，不创建 OTA 上传阶段。</span>
+                  </label>
+                  <div class="button-row form-actions form-span">
+                    <button type="submit">重跑/刷新已有 Tag 构建</button>
+                  </div>
+                </form>
+              </article>
+            </div>
+
+            <aside class="release-side">
+              <article class="panel version-preview-card" data-admin-only>
+                <div class="panel-title">
+                  <div>
+                    <div class="eyebrow">Version</div>
+                    <h2>本次预计版本</h2>
+                  </div>
+                  <span class="badge muted">只读</span>
+                </div>
+                <div class="readonly-field version-preview-field">
                   <code id="manualReleaseVersionPreview">填写来源分支后点击“计算版本”</code>
                 </div>
-              </form>
-              <form id="rerunTagForm" class="compact-form">
-                <label>
-                  已有 SimOS Tag
-                  <input name="tag_name" placeholder="fix_V3.1.24.020_202607031600" required />
-                </label>
-                <label>
-                  OTA 上传环境
-                  <select name="ota_target_envs" multiple>
-                    <option value="dev">开发</option>
-                    <option value="test">测试</option>
-                    <option value="prod">生产</option>
-                  </select>
-                  <span class="field-hint">可留空；留空时只构建和发布，不创建 OTA 上传阶段。</span>
-                </label>
-                <div class="button-row">
-                  <button type="submit">重跑/刷新已有 Tag 构建</button>
+                <p class="field-hint">版本号取自目标分支的 version.info：普通发版第四位 +1；勾选“周版本号 +1”时第三位 +1，第四位按组件修订位重算。</p>
+              </article>
+
+              <article class="panel" data-admin-only>
+                <div class="panel-title">
+                  <div>
+                    <div class="eyebrow">Details</div>
+                    <h2>运行详情</h2>
+                  </div>
                 </div>
-              </form>
-              <div class="panel-title">
+                <pre id="schedulePreview" class="terminal compact">暂无运行结果。</pre>
+                <div id="componentResolutionPanel" class="component-resolution hidden" aria-live="polite">
+                  <div class="eyebrow">本次组件实际来源</div>
+                  <div id="componentResolutionContent"></div>
+                </div>
+              </article>
+            </aside>
+          </div>
+
+          <article class="panel" data-admin-only>
+            <div class="panel-title">
+              <div>
+                <div class="eyebrow">History</div>
                 <h2>最近运行</h2>
-                <div class="title-actions">
-                  <button id="refreshSchedulesBtn" type="button">刷新</button>
-                  <button id="clearScheduleRunsBtn" class="danger small" type="button">清空全部</button>
+              </div>
+              <div class="title-actions">
+                <button id="refreshSchedulesBtn" type="button">刷新</button>
+                <button id="clearScheduleRunsBtn" class="danger small" type="button">清空全部</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>状态</th>
+                    <th>Tag</th>
+                    <th>来源</th>
+                    <th>云盘目录</th>
+                    <th>仿真测试</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="scheduleRunsBody"></tbody>
+              </table>
+            </div>
+            <div id="residentPackagePanel" class="resident-package hidden" aria-live="polite">
+              <div class="panel-title compact-title">
+                <h2>resident 包状态</h2>
+                <span id="residentPackageStatus" class="badge muted">未触发</span>
+              </div>
+              <div class="resident-package-grid">
+                <div>
+                  <div class="eyebrow">Tag</div>
+                  <code id="residentPackageTag">-</code>
+                </div>
+                <div>
+                  <div class="eyebrow">云盘/产物地址</div>
+                  <code id="residentPackagePath">-</code>
+                </div>
+                <div>
+                  <div class="eyebrow">SHA256</div>
+                  <code id="residentPackageSha">-</code>
+                </div>
+                <div>
+                  <div class="eyebrow">构建时间</div>
+                  <span id="residentPackageBuiltAt">-</span>
+                </div>
+                <div>
+                  <div class="eyebrow">Pipeline</div>
+                  <span id="residentPackagePipelineSummary">-</span>
+                </div>
+                <div>
+                  <div class="eyebrow">构建进度</div>
+                  <span id="residentPackageProgress">-</span>
+                </div>
+                <div>
+                  <div class="eyebrow">最近刷新</div>
+                  <span id="residentPackageRefreshedAt">-</span>
                 </div>
               </div>
+              <div class="meta" id="residentPackageMeta"></div>
+              <div class="button-row">
+                <a id="residentPackagePipelineLink" class="secondary button-link hidden" href="#" target="_blank" rel="noreferrer">打开 Pipeline</a>
+                <a id="residentPackageArtifactLink" class="secondary button-link hidden" href="#" target="_blank" rel="noreferrer">打开 Artifact</a>
+              </div>
+              <div class="resident-jobs">
+                <div class="eyebrow">Pipeline Jobs</div>
+                <div class="table-wrap resident-jobs-table">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Job</th>
+                        <th>阶段</th>
+                        <th>状态</th>
+                        <th>时间</th>
+                        <th>链接</th>
+                      </tr>
+                    </thead>
+                    <tbody id="residentPackageJobsBody"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel readonly-panel" data-user-block>
+            <h2>权限不足</h2>
+            <p>手动发版需要 admin 角色。</p>
+          </article>
+        </section>
+
+        <section id="simtests" class="view" data-admin-only data-sim-package-ui>
+          <div class="grid sim-test-grid">
+            <article class="panel form-panel">
+              <div class="panel-title">
+                <div>
+                  <div class="eyebrow">Simulation</div>
+                  <h2>创建自动化测试任务</h2>
+                </div>
+                <span class="badge muted">按版本 Tag 触发</span>
+              </div>
+              <form id="simTestForm">
+                <label>
+                  选择 Tag / 版本
+                  <input id="simTestTagSearch" class="search" placeholder="输入关键字过滤 Tag" />
+                  <select id="simTestTag" name="tag" required></select>
+                </label>
+                <div class="sim-target-chips" role="radiogroup" aria-label="测试目标">
+                  <label class="sim-chip"><input type="radio" name="test_target" value="sim" /> 仿真(x86)</label>
+                  <label class="sim-chip"><input type="radio" name="test_target" value="vehicle" /> 实车(arm)</label>
+                  <label class="sim-chip"><input type="radio" name="test_target" value="both" checked /> 两者</label>
+                </div>
+                <label>
+                  任务备注
+                  <textarea name="note" rows="2" maxlength="200" placeholder="可空，例如：实车回归-路口场景"></textarea>
+                </label>
+                <p class="field-hint">只允许单配置 Tag；双配置 Tag 不支持 x86 仿真包。Tag 固化的 CI 必须包含 sim_package_x86，旧 Tag 需合入 x86 CI 后重新创建。每次触发生成新的 SIMTEST 任务 ID。</p>
+                <button class="primary" id="createSimTestBtn" type="submit">创建自动化任务并触发构建</button>
+              </form>
+              <div id="simTestCreateResult" class="sim-create-result hidden" aria-live="polite"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-title">
+                <div>
+                  <div class="eyebrow">Tasks</div>
+                  <h2>自动化测试任务</h2>
+                </div>
+                <span id="simTestCount" class="badge muted">0</span>
+              </div>
+              <div class="sim-test-toolbar">
+                <select id="simTestStatusFilter" class="compact-select">
+                  <option value="all">全部状态</option>
+                  <option value="queued">排队</option>
+                  <option value="building">构建中</option>
+                  <option value="packaged">已出包</option>
+                  <option value="notified">已通知</option>
+                  <option value="running">测试中</option>
+                  <option value="passed">通过</option>
+                  <option value="failed">失败</option>
+                  <option value="timeout">超时</option>
+                  <option value="notify_failed">通知失败</option>
+                </select>
+                <input id="simTestSearch" class="search" placeholder="搜索任务 ID / Tag" />
+                <button id="refreshSimTestsBtn" type="button">刷新</button>
+              </div>
               <div class="table-wrap">
-                <table>
+                <table class="sim-test-table">
                   <thead>
                     <tr>
-                      <th>状态</th>
-                      <th>Tag</th>
-                      <th>来源</th>
-                      <th>云盘目录</th>
+                      <th>任务 ID</th>
+                      <th>Tag / 版本</th>
+                      <th>测试目标</th>
+                      <th>x86 包</th>
+                      <th>arm 包</th>
+                      <th>通知</th>
+                      <th>测试状态</th>
+                      <th>报告</th>
                       <th>操作</th>
                     </tr>
                   </thead>
-                  <tbody id="scheduleRunsBody"></tbody>
+                  <tbody id="simTestTasksBody"><tr><td colspan="9">暂无自动化测试任务</td></tr></tbody>
                 </table>
-              </div>
-              <pre id="schedulePreview" class="terminal compact">暂无试运行结果。</pre>
-              <div id="componentResolutionPanel" class="component-resolution hidden" aria-live="polite">
-                <div class="eyebrow">本次组件实际来源</div>
-                <div id="componentResolutionContent"></div>
-              </div>
-              <div id="residentPackagePanel" class="resident-package hidden" aria-live="polite">
-                <div class="panel-title compact-title">
-                  <h2>resident 包状态</h2>
-                  <span id="residentPackageStatus" class="badge muted">未触发</span>
-                </div>
-                <div class="resident-package-grid">
-                  <div>
-                    <div class="eyebrow">Tag</div>
-                    <code id="residentPackageTag">-</code>
-                  </div>
-                  <div>
-                    <div class="eyebrow">云盘/产物地址</div>
-                    <code id="residentPackagePath">-</code>
-                  </div>
-                  <div>
-                    <div class="eyebrow">SHA256</div>
-                    <code id="residentPackageSha">-</code>
-                  </div>
-                  <div>
-                    <div class="eyebrow">构建时间</div>
-                    <span id="residentPackageBuiltAt">-</span>
-                  </div>
-                  <div>
-                    <div class="eyebrow">Pipeline</div>
-                    <span id="residentPackagePipelineSummary">-</span>
-                  </div>
-                  <div>
-                    <div class="eyebrow">构建进度</div>
-                    <span id="residentPackageProgress">-</span>
-                  </div>
-                  <div>
-                    <div class="eyebrow">最近刷新</div>
-                    <span id="residentPackageRefreshedAt">-</span>
-                  </div>
-                </div>
-                <div class="meta" id="residentPackageMeta"></div>
-                <div class="button-row">
-                  <a id="residentPackagePipelineLink" class="secondary button-link hidden" href="#" target="_blank" rel="noreferrer">打开 Pipeline</a>
-                  <a id="residentPackageArtifactLink" class="secondary button-link hidden" href="#" target="_blank" rel="noreferrer">打开 Artifact</a>
-                </div>
-                <div class="resident-jobs">
-                  <div class="eyebrow">Pipeline Jobs</div>
-                  <div class="table-wrap resident-jobs-table">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Job</th>
-                          <th>阶段</th>
-                          <th>状态</th>
-                          <th>时间</th>
-                          <th>链接</th>
-                        </tr>
-                      </thead>
-                      <tbody id="residentPackageJobsBody"></tbody>
-                    </table>
-                  </div>
-                </div>
               </div>
             </article>
           </div>
-          <article class="panel readonly-panel" data-user-block>
-            <h2>权限不足</h2>
-            <p>配置自动任务需要 admin 角色。</p>
-          </article>
         </section>
 
         <section id="repositories" class="view">
           <div class="grid two">
             <article class="panel">
               <div class="panel-title">
-                <h2>已管理仓库</h2>
+                <div>
+                  <div class="eyebrow">Repositories</div>
+                  <h2>已管理仓库</h2>
+                </div>
                 <span id="repoCount" class="badge muted">0</span>
               </div>
               <div class="table-wrap">
@@ -635,7 +878,10 @@
             </article>
             <article class="panel">
               <div class="panel-title">
-                <h2>添加或编辑仓库</h2>
+                <div>
+                  <div class="eyebrow">Settings</div>
+                  <h2>添加或编辑仓库</h2>
+                </div>
               </div>
               <form id="repositoryForm">
                 <label>
@@ -691,7 +937,10 @@
           <div class="grid two">
             <article class="panel">
               <div class="panel-title">
-                <h2>账号列表</h2>
+                <div>
+                  <div class="eyebrow">Accounts</div>
+                  <h2>账号列表</h2>
+                </div>
                 <span id="accountCount" class="badge muted">0</span>
               </div>
               <div class="table-wrap">
@@ -710,7 +959,10 @@
             </article>
             <article class="panel">
               <div class="panel-title">
-                <h2 id="accountFormTitle">添加账号</h2>
+                <div>
+                  <div class="eyebrow">Account</div>
+                  <h2 id="accountFormTitle">添加账号</h2>
+                </div>
               </div>
               <form id="accountForm">
                 <input type="hidden" id="accountEditingUsername" value="" />
@@ -747,7 +999,10 @@
         <section id="settings" class="view">
           <article class="panel">
             <div class="panel-title">
-              <h2>运行配置</h2>
+              <div>
+                <div class="eyebrow">Runtime</div>
+                <h2>运行配置</h2>
+              </div>
             </div>
             <pre id="configOutput" class="terminal compact">等待加载...</pre>
           </article>
@@ -755,7 +1010,10 @@
 
         <article class="panel log-panel">
           <div class="panel-title">
-            <h2>操作结果</h2>
+            <div>
+              <div class="eyebrow">Output</div>
+              <h2>操作结果</h2>
+            </div>
             <button id="clearLogBtn">清空</button>
           </div>
           <pre id="logOutput" class="terminal log">暂无操作。</pre>

@@ -13,3 +13,4 @@ webapp/data/version-settings.json
 
 # Local linked worktrees used for isolated implementation sessions
 .worktrees/
+.deploy-state/

@@ -19,6 +19,8 @@ const state = {
   selectedScheduleRunId: null,
   schedulePreviews: {},
   configBranches: [],
+  simTestTasks: [],
+  expandedSimTestIds: new Set(),
 };
 
 const RESIDENT_PACKAGE_TAG_RE = /^[A-Za-z0-9._-]+_[VvFfTt]?\d+(?:\.\d+)+_\d{12}$/;
@@ -116,7 +118,8 @@ function formValues(form) {
   });
   const matrixInputs = Array.from(form.querySelectorAll('input[name="config_matrix"]'));
   if (matrixInputs.length) {
-    data.config_matrix_enabled = true;
+    const matrixToggle = form.elements.config_matrix_enabled;
+    data.config_matrix_enabled = matrixToggle ? Boolean(matrixToggle.checked) : true;
     data.config_matrix = matrixInputs.map((input) => {
       const [config_ref, label] = String(input.value || "").split(":");
       return { config_ref, label, enabled: input.checked };
@@ -411,6 +414,15 @@ function showLoginMessage(text, isError = false) {
 function switchView(viewId) {
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === viewId));
   document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active-view", view.id === viewId));
+  if (viewId === "simtests") {
+    clearResidentPackagePoll();
+    fillSimTestTagOptions();
+    renderSimTestTasks();
+    if (state.session) {
+      refreshSimTests().catch((error) => appendLog("刷新自动化测试任务失败", error.message));
+    }
+    return;
+  }
   if (viewId !== "schedules") {
     clearResidentPackagePoll();
     return;
@@ -440,9 +452,12 @@ function renderSession() {
   document.querySelectorAll("[data-user-block]").forEach((el) => el.classList.toggle("hidden", isAdmin));
   document.querySelectorAll("[data-feature-package-only]").forEach((el) => el.classList.toggle("hidden", !canCreateFeaturePackage));
   document.querySelectorAll("[data-feature-package-denied]").forEach((el) => el.classList.toggle("hidden", canCreateFeaturePackage));
-  if (!isAdmin && ["release", "bugfix", "tag", "schedules", "repositories", "accounts"].some((id) => $(`#${id}`)?.classList.contains("active-view"))) {
+  const simPackageEnabled = state.config?.sim_package_enabled !== false;
+  document.querySelectorAll("[data-sim-package-ui]").forEach((el) => el.classList.toggle("hidden", !simPackageEnabled || !isAdmin));
+  if (!isAdmin && ["release", "bugfix", "tag", "schedules", "simtests", "repositories", "accounts"].some((id) => $(`#${id}`)?.classList.contains("active-view"))) {
     switchView("overview");
   }
+  syncSimPackageControls();
 }
 
 function renderAccounts() {
@@ -540,10 +555,6 @@ function renderConfig() {
   if (!state.config) return;
   const repositories = businessRepositories();
   $("#projectName").textContent = repositories.length ? `已启用 ${repositories.length} 个业务仓库` : "暂无业务仓库";
-  const baseInput = $("#tagForm")?.elements.base_version;
-  if (baseInput && !baseInput.value) {
-    baseInput.value = defaultVersionBase();
-  }
   $("#configOutput").textContent = JSON.stringify(state.config, null, 2);
 }
 
@@ -597,12 +608,13 @@ function renderFeaturePackageRuns() {
     return `<tr data-run-id="${escapeHtml(run.id || "")}">
       <td><code>${escapeHtml(run.version || "-")}</code></td>
       <td><code>${escapeHtml(run.source_ref || "-")}</code></td>
+      <td>${escapeHtml(run.operator || "-")}</td>
       <td><span class="pill">${escapeHtml(run.status || "queued")}</span></td>
       <td>${pipeline}</td>
       <td><code>${escapeHtml(cloudDir)}</code></td>
       <td data-admin-only class="${state.session?.role === "admin" ? "" : "hidden"}"><button type="button" class="danger feature-run-delete" data-run-id="${escapeHtml(run.id || "")}">删除</button></td>
     </tr>`;
-  }).join("") || '<tr><td colspan="5">暂无构建记录</td></tr>';
+  }).join("") || '<tr><td colspan="7">暂无构建记录</td></tr>';
 }
 
 function renderScheduleList() {
@@ -695,11 +707,12 @@ function renderScheduleRuns() {
               <code>${escapeHtml(run.cloud_dir || run.error || "-")}</code>
               ${renderVersionMerge(run)}
             </td>
+            <td>${renderSimTaskBadge(run)}</td>
             <td><button class="danger small" type="button" data-delete-run="${escapeHtml(run.id)}">删除</button></td>
           </tr>
         `,
       )
-      .join("") || `<tr><td colspan="5">暂无运行记录</td></tr>`;
+      .join("") || `<tr><td colspan="6">暂无运行记录</td></tr>`;
   renderComponentResolutions(selectedRun?.component_resolutions);
   if (!selectedRun?.tag_name) {
     clearResidentPackagePoll();
@@ -794,6 +807,9 @@ function fillScheduleForm(schedule = null) {
     manual_version_prefix: "V",
     cloud_category: "车机/CI自动构建",
     ota_target_envs: [],
+    build_sim_package: false,
+    sim_test_target: "both",
+    sim_test_note: "",
   };
   Object.entries(next).forEach(([key, value]) => {
     const field = form.elements[key];
@@ -821,6 +837,7 @@ function fillScheduleForm(schedule = null) {
   renderConfigBranchOptions();
   renderSchedulePreviewFromForm();
   syncConfigMatrixControls();
+  syncSimPackageControls();
 }
 
 function scheduleFormBody() {
@@ -1022,7 +1039,7 @@ function renderRepositorySelectors() {
     const root = $(`#${name}Repositories`);
     if (!root) return;
     const selected = Array.from(root.querySelectorAll('input[name="repository_ids"]:checked')).map((input) => input.value);
-    const available = name === "featurePackage" ? featurePackageRepositories() : repositories;
+    const available = ["feature", "featurePackage"].includes(name) ? featurePackageRepositories() : repositories;
     root.innerHTML = available.map((repo) => `<label><input type="checkbox" name="repository_ids" value="${escapeHtml(repo.id)}" ${selected.includes(repo.id) ? "checked" : ""} /> ${escapeHtml(repo.name)}</label>`).join("") || "<span class=\"meta\">暂无可操作仓库</span>";
   });
 }
@@ -1109,10 +1126,6 @@ async function renderTagDeleteOptions() {
   }
 }
 
-function defaultVersionBase() {
-  return state.config?.version_update?.base_version || "";
-}
-
 function syncTagUpdateVersionControl() {
   const form = $("#tagForm");
   if (!form?.elements.update_version) return;
@@ -1130,9 +1143,6 @@ function syncTagUpdateVersionControl() {
   baseField?.classList.toggle("hidden", !showBaseVersion);
   if (baseInput) {
     baseInput.disabled = !showBaseVersion;
-    if (showBaseVersion && !baseInput.value) {
-      baseInput.value = defaultVersionBase();
-    }
   }
 }
 
@@ -1168,7 +1178,7 @@ async function refreshAll() {
   if (search) params.set("search", search);
   const simosRepo = simosRepository();
   const configRepo = configRepository();
-  const [branches, tags, commonRefs, simosTags, schedules, configBranches, previews, featureRuns, accounts] = await Promise.all([
+  const [branches, tags, commonRefs, simosTags, schedules, configBranches, previews, featureRuns, accounts, simTasks] = await Promise.all([
     api(`/api/branches?${params}`),
     api(`/api/tags?${params}`),
     api("/api/common-refs").catch((error) => {
@@ -1205,6 +1215,12 @@ async function refreshAll() {
           return null;
         })
       : Promise.resolve(null),
+    state.session?.role === "admin" && state.config?.sim_package_enabled !== false
+      ? api("/api/sim-test-tasks").catch((error) => {
+          appendLog("刷新自动化测试任务失败", error.message);
+          return null;
+        })
+      : Promise.resolve(null),
   ]);
   state.branches = branches.branches || [];
   state.tags = tags.tags || [];
@@ -1214,6 +1230,7 @@ async function refreshAll() {
   state.scheduleRuns = schedules?.runs || [];
   state.featurePackageRuns = featureRuns?.runs || [];
   state.accounts = accounts?.accounts || [];
+  state.simTestTasks = simTasks?.tasks || [];
   applySchedulePreviews(previews);
   state.configBranches = configBranches?.branches || [];
   renderConfigBranchOptions();
@@ -1224,6 +1241,8 @@ async function refreshAll() {
   renderSchedules();
   renderFeaturePackageRuns();
   renderAccounts();
+  fillSimTestTagOptions();
+  renderSimTestTasks();
 }
 
 async function refreshWorkspace() {
@@ -1530,6 +1549,13 @@ async function refreshManualReleasePreview() {
     manual_version_prefix: body.manual_version_prefix || "V",
     force_week_bump: String(Boolean(form.elements.force_week_bump?.checked)),
   });
+  const button = $("#manualReleaseCalculateBtn");
+  const previousText = button?.textContent || "计算版本";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "计算中…";
+  }
+  preview.classList.add("is-loading");
   try {
     const result = await api(`/api/release-runs/manual-preview?${params}`);
     preview.textContent = result.ok && result.current_version && result.version && result.tag_name
@@ -1537,6 +1563,12 @@ async function refreshManualReleasePreview() {
       : result.error || "计算结果不完整，请检查来源分支后重试";
   } catch (error) {
     preview.textContent = error.message;
+  } finally {
+    preview.classList.remove("is-loading");
+    if (button) {
+      button.disabled = false;
+      button.textContent = previousText;
+    }
   }
 }
 
@@ -1578,6 +1610,278 @@ async function clearReleaseRuns() {
   state.scheduleRuns = result.runs || [];
   appendLog("清空发版运行记录", result);
   renderSchedules();
+}
+
+function simStatusText(status) {
+  const mapping = {
+    queued: "排队",
+    building: "构建中",
+    packaged: "已出包",
+    notified: "已通知",
+    running: "测试中",
+    passed: "通过",
+    failed: "失败",
+    timeout: "超时",
+    notify_failed: "通知失败",
+  };
+  return mapping[status] || status || "未知";
+}
+
+function simStatusClass(status) {
+  if (status === "passed") return "badge ok";
+  if (["failed", "timeout", "notify_failed"].includes(status)) return "badge error";
+  if (["notified", "running", "packaged"].includes(status)) return "badge";
+  return "badge muted";
+}
+
+function simTargetText(target) {
+  return { sim: "仿真(x86)", vehicle: "实车(arm)", both: "两者" }[target] || target || "两者";
+}
+
+function simTagSupportsPackageClient(message) {
+  const lines = String(message || "").split(/\r?\n/);
+  for (const line of lines) {
+    const match = line.trim().match(/^(SIMOS_CONFIG_MATRIX|SIMOS_CONFIG_REFS|SIMOS_CONFIG_REF)\s*[:=]\s*(.+)$/);
+    if (!match) continue;
+    const value = match[2].trim();
+    if (["none", "off", "disabled", "false"].includes(value.toLowerCase())) continue;
+    const refs = value.split(",").map((item) => item.trim()).filter(Boolean);
+    if (refs.length > 1) return false;
+  }
+  return true;
+}
+
+function simTagVersion(tag) {
+  const match = String(tag || "").match(/_([VvFfTt]?\d+(?:\.\d+)+)_\d{12}$/);
+  if (!match) return "";
+  return /^[VvFfTt]/.test(match[1]) ? match[1].slice(1) : match[1];
+}
+
+function fillSimTestTagOptions() {
+  const select = $("#simTestTag");
+  if (!select) return;
+  const search = String($("#simTestTagSearch")?.value || "").trim().toLowerCase();
+  const previous = select.value;
+  const tags = state.simosTags
+    .filter((tag) => RESIDENT_PACKAGE_TAG_RE.test(tag.name || ""))
+    .filter((tag) => simTagSupportsPackageClient(tag.message))
+    .filter((tag) => !search || String(tag.name || "").toLowerCase().includes(search) || simTagVersion(tag.name).toLowerCase().includes(search));
+  select.innerHTML = tags
+    .map((tag) => {
+      const version = simTagVersion(tag.name);
+      const createdAt = tag.created_at || tag.commit_created_at || "";
+      const label = `${tag.name}${version ? `（${version}${createdAt ? ` · ${createdAt}` : ""}）` : ""}`;
+      return `<option value="${escapeHtml(tag.name)}">${escapeHtml(label)}</option>`;
+    })
+    .join("") || '<option value="">暂无可用的单配置 Tag</option>';
+  if (tags.some((tag) => tag.name === previous)) select.value = previous;
+}
+
+function renderSimTaskBadge(run) {
+  const taskId = String(run?.sim_task_id || "");
+  const task = state.simTestTasks.find((item) => item.id === taskId);
+  if (!taskId) return '<span class="meta">-</span>';
+  if (!task) return `<span class="badge muted">${escapeHtml(taskId)}</span>`;
+  return `<a class="badge ${simStatusClass(task.test_status).replace("badge", "").trim()}" href="#simtests" data-open-sim-test="${escapeHtml(task.id)}">${escapeHtml(simStatusText(task.test_status))}</a>`;
+}
+
+function simPackageLink(pkg, fallback = "-") {
+  if (!pkg) return `<span class="badge muted">未出</span>`;
+  const name = String(pkg.name || "").trim();
+  const url = safeUrl(pkg.registry_url || "");
+  const cloud = String(pkg.cloud_dir || "");
+  const label = name ? `已出` : "已出";
+  const anchor = url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>` : `<span class="badge ok">${escapeHtml(label)}</span>`;
+  return `${anchor}${cloud ? `<div class="meta"><code>${escapeHtml(cloud)}</code></div>` : ""}`;
+}
+
+function simNotifyText(task) {
+  const status = String(task?.notify?.status || "");
+  if (!status) return '<span class="badge muted">未发</span>';
+  const cls = status === "success" ? "badge ok" : status === "partial" ? "badge" : "badge error";
+  const text = status === "success" ? "成功" : status === "partial" ? "部分成功" : "失败";
+  return `<span class="${cls}">${escapeHtml(text)}</span>`;
+}
+
+function simTaskMatchesFilter(task) {
+  const statusFilter = $("#simTestStatusFilter")?.value || "all";
+  if (statusFilter !== "all" && task.test_status !== statusFilter) return false;
+  const search = String($("#simTestSearch")?.value || "").trim().toLowerCase();
+  if (!search) return true;
+  return [task.id, task.tag, task.version, task.note].some((value) => String(value || "").toLowerCase().includes(search));
+}
+
+function renderSimTestTasks() {
+  const body = $("#simTestTasksBody");
+  if (!body) return;
+  const tasks = state.simTestTasks.filter(simTaskMatchesFilter);
+  setText("#simTestCount", String(tasks.length));
+  body.innerHTML = tasks.map((task) => {
+    const expanded = state.expandedSimTestIds.has(task.id);
+    const arm = task.packages?.arm;
+    const debCount = Array.isArray(arm?.debs) ? arm.debs.length : 0;
+    const residentLink = arm?.resident ? simPackageLink(arm.resident) : `<span class="badge muted">缺失</span>`;
+    const report = task.report || {};
+    const localReport = report.local_path ? `<a href="/api/sim-test-tasks/${encodeURIComponent(task.id)}/report" target="_blank" rel="noreferrer">webapp 报告</a>` : "";
+    const remoteReport = report.url ? `<a href="${escapeHtml(safeUrl(report.url))}" target="_blank" rel="noreferrer">报告链接</a>` : "";
+    const reportLink = localReport || remoteReport;
+    const cloudReport = report.cloud_dir ? `<div class="meta"><code>${escapeHtml(report.cloud_dir)}</code></div>` : "";
+    const pipeline = task.pipeline_url ? `<a href="${escapeHtml(safeUrl(task.pipeline_url))}" target="_blank" rel="noreferrer">pipeline</a>` : "";
+    return `
+      <tr class="sim-task-row" data-sim-task-row="${escapeHtml(task.id)}">
+        <td><code>${escapeHtml(task.id)}</code><div class="meta">${escapeHtml(task.trigger || "")}${task.release_run_id ? ` · ${escapeHtml(task.release_run_id)}` : ""}</div></td>
+        <td><code>${escapeHtml(task.tag)}</code><div class="meta">${escapeHtml(task.version || "")}</div></td>
+        <td>${escapeHtml(simTargetText(task.test_target))}</td>
+        <td>${simPackageLink(task.packages?.x86)}</td>
+        <td>${residentLink}<div class="meta">deb: ${debCount} 项</div></td>
+        <td>${simNotifyText(task)}</td>
+        <td><span class="${simStatusClass(task.test_status)}">${escapeHtml(simStatusText(task.test_status))}</span>${task.error ? `<div class="meta sim-error">${escapeHtml(task.error)}</div>` : ""}</td>
+        <td>${reportLink}${cloudReport}</td>
+        <td class="sim-actions">
+          <button type="button" class="secondary small" data-sim-renotify="${escapeHtml(task.id)}">重发通知</button>
+          <button type="button" class="secondary small" data-sim-remark="${escapeHtml(task.id)}">重催</button>
+          <button type="button" class="secondary small" data-sim-reupload="${escapeHtml(task.id)}">重传报告</button>
+          <button type="button" class="danger small" data-sim-delete="${escapeHtml(task.id)}">删除</button>
+          ${pipeline}
+        </td>
+      </tr>
+      ${expanded ? renderSimTestDetail(task) : ""}
+    `;
+  }).join("") || '<tr><td colspan="9">暂无自动化测试任务</td></tr>';
+}
+
+function renderSimTestDetail(task) {
+  const targets = Array.isArray(task.notify?.targets) ? task.notify.targets : [];
+  const events = Array.isArray(task.events) ? task.events : [];
+  const payloadText = task.payload ? JSON.stringify(task.payload, null, 2) : "暂无留存 payload";
+  return `
+    <tr class="sim-detail-row">
+      <td colspan="9">
+        <div class="sim-detail-grid">
+          <div>
+            <div class="eyebrow">任务详情</div>
+            <div class="meta">创建：${escapeHtml(task.created_at || "-")} · 更新：${escapeHtml(task.updated_at || "-")} · 完成：${escapeHtml(task.finished_at || "-")}</div>
+            <div class="meta">截止：${escapeHtml(task.deadline_at || "未设置")} · 超时：${escapeHtml(String(task.timeout_hours ?? ""))} 小时</div>
+            <div class="button-row sim-timeout-row">
+              <input type="number" min="0.1" max="720" step="0.1" value="${escapeHtml(String(task.timeout_hours ?? 24))}" data-sim-timeout-input="${escapeHtml(task.id)}" />
+              <button type="button" class="secondary small" data-sim-timeout-save="${escapeHtml(task.id)}">调整超时</button>
+            </div>
+            <div class="eyebrow">时间线</div>
+            <ul class="sim-timeline">${events.map((event) => `<li><code>${escapeHtml(event.status || "")}</code> ${escapeHtml(event.at || "")} <span class="meta">${escapeHtml(event.source || "")}</span></li>`).join("") || "<li>暂无</li>"}</ul>
+          </div>
+          <div>
+            <div class="eyebrow">通知目标</div>
+            <table class="sim-mini-table"><thead><tr><th>名称</th><th>状态</th><th>HTTP</th></tr></thead><tbody>
+              ${targets.map((item) => `<tr><td>${escapeHtml(item.name || "-")}</td><td>${escapeHtml(item.status || "-")}</td><td>${escapeHtml(String(item.http_code ?? "-"))}</td></tr>`).join("") || '<tr><td colspan="3">暂无通知记录</td></tr>'}
+            </tbody></table>
+            <div class="eyebrow">payload 摘要</div>
+            <pre class="terminal compact sim-payload">${escapeHtml(payloadText)}</pre>
+          </div>
+        </div>
+      </td>
+    </tr>
+  `;
+}
+
+function toggleSimTestDetail(taskId) {
+  if (state.expandedSimTestIds.has(taskId)) state.expandedSimTestIds.delete(taskId);
+  else state.expandedSimTestIds.add(taskId);
+  renderSimTestTasks();
+}
+
+async function createSimTestTask(form) {
+  const button = $("#createSimTestBtn");
+  const resultBox = $("#simTestCreateResult");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "创建中，请稍候…";
+  }
+  try {
+    const result = await postJson("/api/sim-test-tasks/create", formValues(form));
+    appendLog("创建自动化测试任务", result);
+    const task = result.task || {};
+    if (result.ok) {
+      resultBox.className = "sim-create-result ok";
+      resultBox.innerHTML = `任务已创建：<code>${escapeHtml(task.id || "")}</code>${task.pipeline_url ? ` · <a href="${escapeHtml(safeUrl(task.pipeline_url))}" target="_blank" rel="noreferrer">打开 pipeline</a>` : ""}`;
+    } else {
+      resultBox.className = "sim-create-result error";
+      resultBox.textContent = result.error || "创建失败";
+    }
+  } catch (error) {
+    appendLog("创建自动化测试任务失败", error.message);
+    resultBox.className = "sim-create-result error";
+    resultBox.textContent = error.message;
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "创建自动化任务并触发构建";
+    }
+    await refreshSimTests().catch((error) => appendLog("刷新自动化测试任务失败", error.message));
+  }
+}
+
+async function refreshSimTests() {
+  const result = await api("/api/sim-test-tasks");
+  state.simTestTasks = result.tasks || [];
+  renderSimTestTasks();
+}
+
+async function renotifySimTest(taskId, remark = false) {
+  const path = remark ? `/api/sim-test-tasks/${encodeURIComponent(taskId)}/remark` : `/api/sim-test-tasks/${encodeURIComponent(taskId)}/renotify`;
+  const result = await postJson(path, {});
+  appendLog(remark ? "重催自动化测试" : "重发自动化测试通知", result);
+  await refreshSimTests();
+}
+
+async function reuploadSimTestReport(taskId) {
+  const result = await postJson(`/api/sim-test-tasks/${encodeURIComponent(taskId)}/report/reupload`, {});
+  appendLog("重传测试报告", result);
+  await refreshSimTests();
+}
+
+async function deleteSimTestTask(taskId) {
+  if (!confirm(`确认删除自动化测试任务 ${taskId}？只删除 webapp 记录和本地报告，不删除 GitLab pipeline、Tag、registry 或云盘产物。`)) return;
+  const result = await api(`/api/sim-test-tasks/${encodeURIComponent(taskId)}`, { method: "DELETE" });
+  appendLog("删除自动化测试任务", result);
+  state.expandedSimTestIds.delete(taskId);
+  await refreshSimTests();
+}
+
+async function adjustSimTestTimeout(taskId) {
+  const input = document.querySelector(`[data-sim-timeout-input="${CSS.escape(taskId)}"]`);
+  const timeoutHours = Number(input?.value || 24);
+  const result = await postJson(`/api/sim-test-tasks/${encodeURIComponent(taskId)}/timeout`, { timeout_hours: timeoutHours });
+  appendLog("调整自动化测试超时", result);
+  await refreshSimTests();
+}
+
+function syncSimPackageControls() {
+  const simEnabled = state.config?.sim_package_enabled !== false;
+  document.querySelectorAll("#scheduleForm, #manualReleaseForm").forEach((form) => {
+    const checkbox = form.elements.build_sim_package;
+    if (!checkbox) return;
+    const matrixToggle = form.elements.config_matrix_enabled;
+    const singleMode = matrixToggle ? !matrixToggle.checked : true;
+    const available = simEnabled && singleMode;
+    checkbox.disabled = !available;
+    if (!available) checkbox.checked = false;
+    const fields = form.querySelectorAll("[data-sim-package-fields] input, [data-sim-package-fields] select");
+    const showFields = available && checkbox.checked;
+    form.querySelector("[data-sim-package-fields]")?.classList.toggle("hidden", !showFields);
+    fields.forEach((field) => {
+      field.disabled = !showFields;
+    });
+    const toggle = form.querySelector("[data-sim-package-toggle]");
+    toggle?.classList.toggle("hidden", !simEnabled);
+    const hint = form.querySelector("[data-sim-package-hint]");
+    if (hint) {
+      hint.textContent = !simEnabled
+        ? "x86 仿真包功能未启用。"
+        : singleMode
+          ? "仅单配置发版支持仿真包；勾选后会触发 sim_package_x86 链路。"
+          : "双配置矩阵下不支持仿真包；关闭矩阵并选择一个 config 分支后才可勾选。";
+    }
+  });
 }
 
 function bindEvents() {
@@ -1648,7 +1952,13 @@ function bindEvents() {
   $("#featurePackageForm")?.elements.ref?.addEventListener("change", () =>
     refreshFeaturePackagePreview().catch((error) => setText("#featurePackageVersionPreview", error.message)),
   );
-  document.querySelectorAll("[data-config-matrix-toggle]").forEach((toggle) => toggle.addEventListener("change", syncConfigMatrixControls));
+  document.querySelectorAll("[data-config-matrix-toggle]").forEach((toggle) =>
+    toggle.addEventListener("change", () => {
+      syncConfigMatrixControls();
+      syncSimPackageControls();
+    }),
+  );
+  document.querySelectorAll('input[name="build_sim_package"]').forEach((input) => input.addEventListener("change", syncSimPackageControls));
   ["ref", "baseline_ref", "cloud_category"].forEach((name) => $("#featurePackageForm")?.elements[name]?.addEventListener("change", () =>
     refreshFeaturePackagePreview().catch((error) => setText("#featurePackageVersionPreview", error.message)),
   ));
@@ -1697,6 +2007,40 @@ function bindEvents() {
   $("#rerunTagForm")?.addEventListener("submit", (event) => {
     event.preventDefault();
     rerunExistingTag(event.currentTarget).catch((error) => appendLog("重跑已有 Tag 失败", error.message));
+  });
+  $("#simTestForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    createSimTestTask(event.currentTarget).catch((error) => appendLog("创建自动化测试任务失败", error.message));
+  });
+  $("#simTestTagSearch")?.addEventListener("input", fillSimTestTagOptions);
+  $("#simTestStatusFilter")?.addEventListener("change", renderSimTestTasks);
+  $("#simTestSearch")?.addEventListener("input", renderSimTestTasks);
+  $("#refreshSimTestsBtn")?.addEventListener("click", () => refreshSimTests().catch((error) => appendLog("刷新自动化测试任务失败", error.message)));
+  $("#simTestTasksBody")?.addEventListener("click", (event) => {
+    const target = event.target instanceof Element ? event.target.closest("[data-sim-renotify], [data-sim-remark], [data-sim-reupload], [data-sim-delete], [data-sim-timeout-save], [data-sim-task-row]") : null;
+    if (!target) return;
+    const taskId = target.dataset.simRenotify || target.dataset.simRemark || target.dataset.simReupload || target.dataset.simDelete || target.dataset.simTimeoutSave || target.dataset.simTaskRow;
+    if (!taskId) return;
+    if (target.dataset.simRenotify) {
+      renotifySimTest(taskId, false).catch((error) => appendLog("重发通知失败", error.message));
+    } else if (target.dataset.simRemark) {
+      renotifySimTest(taskId, true).catch((error) => appendLog("重催失败", error.message));
+    } else if (target.dataset.simReupload) {
+      reuploadSimTestReport(taskId).catch((error) => appendLog("重传报告失败", error.message));
+    } else if (target.dataset.simDelete) {
+      deleteSimTestTask(taskId).catch((error) => appendLog("删除自动化测试任务失败", error.message));
+    } else if (target.dataset.simTimeoutSave) {
+      adjustSimTestTimeout(taskId).catch((error) => appendLog("调整超时失败", error.message));
+    } else {
+      toggleSimTestDetail(taskId);
+    }
+  });
+  $("#scheduleRunsBody")?.addEventListener("click", (event) => {
+    const target = event.target instanceof Element ? event.target.closest("[data-open-sim-test]") : null;
+    if (!target?.dataset.openSimTest) return;
+    state.expandedSimTestIds.add(target.dataset.openSimTest);
+    switchView("simtests");
+    renderSimTestTasks();
   });
   $("#refreshFeaturePackageRunsBtn")?.addEventListener("click", () => refreshAll().catch((error) => appendLog("刷新 Feature 构建记录失败", error.message)));
   $("#featurePackageRunsBody")?.addEventListener("click", (event) => {

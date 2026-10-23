@@ -3,6 +3,12 @@
 .gitlab
 .gitlab-ci.yml
 gitlab-local/
+.deploy-state/
+.worktrees/
+.superpowers/
+.codex/
+.agents/
+.aws/
 
 .env
 .env.*

@@ -18,11 +18,14 @@ services:
       GITOPS_TLS_CERT: ${GITOPS_TLS_CERT:-/etc/gitlab/ssl/chancee-shanghai.cn-crt.pem}
       GITOPS_TLS_KEY: ${GITOPS_TLS_KEY:-/etc/gitlab/ssl/chancee-shanghai.cn-key.pem}
       SIMOS_CI_ARTIFACT_ROOT: ${SIMOS_CI_ARTIFACT_ROOT:-/data/simos-ci/artifacts}
+      GITOPS_SIM_TEST_REPORT_ROOT: ${GITOPS_SIM_TEST_REPORT_ROOT:-/data/simos-ci/sim-test-reports}
     extra_hosts:
-      - "www.chancee-shanghai.cn:${GITLAB_HOST_IP:-192.168.110.222}"
+      - "www.chancee-shanghai.cn:${GITLAB_HOST_IP:-192.168.110.17}"
     volumes:
       - gitops-workbench-data:/app/data
       - /data/simos-ci:/data/simos-ci:ro
+      # 仿真测试报告需要写入共享盘；只放开报告目录，CI 产物目录保持只读。
+      - /data/simos-ci/sim-test-reports:/data/simos-ci/sim-test-reports
       - /etc/gitlab/ssl:/etc/gitlab/ssl:ro
     ports:
       - "9910:9910"
